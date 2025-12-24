@@ -1,0 +1,2 @@
+-- Core IR types from Cerberus
+-- This module will contain the AST types matching cerberus/frontend/ott/core-ott/core.ott

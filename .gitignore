@@ -1,0 +1,16 @@
+# Lean build artifacts
+lean/.lake/
+lean/lake-packages/
+lean/.cache/
+*.olean
+
+# Editor
+.vscode/
+*.swp
+*~
+
+# OS
+.DS_Store
+
+# Claude internal
+.claude/
