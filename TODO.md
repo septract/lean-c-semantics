@@ -1,8 +1,8 @@
 # TODO - C-to-Lean Project
 
-## Current Phase: 1 - Core AST in Lean
+## Current Phase: 2 - Core JSON Export & Parser
 
-### Phase 0 Complete
+### Phase 0 & 1 Complete
 - [x] Initialize Lean 4 project in `lean/` directory
 - [x] Set up Lake build system
 - [x] Create basic project structure (Core, Parser, Memory, Semantics, Theorems, Test)
@@ -10,19 +10,21 @@
 ## Roadmap
 
 ### Phase 1: Core AST in Lean
-- [ ] Define `core_object_type` (integer, floating, pointer, array, struct, union)
-- [ ] Define `core_base_type` (unit, boolean, ctype, list, tuple, object, loaded)
-- [ ] Define `binop` (arithmetic and logical operators)
-- [ ] Define `value` types
-- [ ] Define `generic_pexpr` (pure expressions)
-- [ ] Define `generic_expr` (effectful expressions)
-- [ ] Define `generic_file` (program structure)
+- [x] Define `ObjectType` (integer, floating, pointer, array, struct, union)
+- [x] Define `BaseType` (unit, boolean, ctype, list, tuple, object, loaded)
+- [x] Define `Binop` (arithmetic and logical operators)
+- [x] Define `Value` types (ObjectValue, LoadedValue, Value)
+- [x] Define `Pexpr` (pure expressions)
+- [x] Define `Expr` (effectful expressions)
+- [x] Define `File` (program structure)
+- [ ] Add pretty-printer for round-trip validation
 
 ### Phase 2: Core JSON Export & Parser
 - [ ] Add `[@@deriving yojson]` to Cerberus Core types
 - [ ] Add `--json-core-out` flag to Cerberus driver
 - [ ] Implement JSON parser in Lean
-- [ ] Test on simple Core outputs
+- [ ] Write pretty-printer in Lean matching Cerberus format
+- [ ] Validate: JSON parse → pretty-print == Cerberus pretty-print
 
 ### Phase 3: Memory Model Interface
 - [ ] Define `Memory` type class with core operations
