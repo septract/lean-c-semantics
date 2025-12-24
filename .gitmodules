@@ -1,0 +1,3 @@
+[submodule "cerberus"]
+	path = cerberus
+	url = https://github.com/rems-project/cerberus.git

@@ -1,0 +1,6 @@
+name = "CToLean"
+version = "0.1.0"
+defaultTargets = ["CToLean"]
+
+[[lean_lib]]
+name = "CToLean"
