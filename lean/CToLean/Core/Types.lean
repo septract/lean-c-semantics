@@ -48,6 +48,17 @@ inductive CoreType where
 
 /-! ## Binary Operators -/
 
+/-- Integer operations (for overflow checks) -/
+inductive Iop where
+  | add
+  | sub
+  | mul
+  | shl   -- shift left
+  | shr   -- shift right
+  | div
+  | rem_t -- truncated remainder
+  deriving Repr, BEq, Inhabited
+
 /-- Binary operators -/
 inductive Binop where
   -- Arithmetic operators (integer -> integer -> integer)
@@ -82,6 +93,7 @@ inductive Polarity where
 /-- Memory operations involving memory state -/
 inductive Memop where
   | ptrEq           -- pointer equality comparison
+  | ptrNe           -- pointer inequality
   | ptrLt           -- pointer relational comparison
   | ptrGt
   | ptrLe
@@ -92,6 +104,7 @@ inductive Memop where
   | ptrValidForDeref
   | ptrWellAligned
   | ptrArrayShift
+  | ptrMemberShift (tag : Sym) (member : Identifier)
   | memcpy
   | memcmp
   | realloc
@@ -99,6 +112,8 @@ inductive Memop where
   | vaCopy
   | vaArg
   | vaEnd
+  | copyAllocId     -- RefinedC: copy allocation ID between pointers
+  | cheriIntrinsic (name : String)  -- CHERI capability operations
   deriving Repr, BEq, Inhabited
 
 /-! ## Kill Kind -/

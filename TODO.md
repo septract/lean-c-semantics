@@ -1,6 +1,6 @@
 # TODO - C-to-Lean Project
 
-## Current Phase: 2 - Core JSON Export & Parser
+## Current Phase: 2 - Core JSON Export & Parser (nearly complete)
 
 ### Phase 0 & 1 Complete
 - [x] Initialize Lean 4 project in `lean/` directory
@@ -9,7 +9,7 @@
 
 ## Roadmap
 
-### Phase 1: Core AST in Lean
+### Phase 1: Core AST in Lean ✓
 - [x] Define `ObjectType` (integer, floating, pointer, array, struct, union)
 - [x] Define `BaseType` (unit, boolean, ctype, list, tuple, object, loaded)
 - [x] Define `Binop` (arithmetic and logical operators)
@@ -20,9 +20,9 @@
 - [ ] Add pretty-printer for round-trip validation
 
 ### Phase 2: Core JSON Export & Parser
-- [ ] Add `[@@deriving yojson]` to Cerberus Core types
-- [ ] Add `--json-core-out` flag to Cerberus driver
-- [ ] Implement JSON parser in Lean
+- [x] Create `json_core.ml` in Cerberus for JSON serialization
+- [x] Add `--json_core_out` flag to Cerberus driver
+- [x] Implement JSON parser in Lean (**100% success rate on 1817 test files**)
 - [ ] Write pretty-printer in Lean matching Cerberus format
 - [ ] Validate: JSON parse → pretty-print == Cerberus pretty-print
 

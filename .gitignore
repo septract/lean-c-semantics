@@ -14,3 +14,7 @@ lean/.cache/
 
 # Claude internal
 .claude/
+
+# Test artifacts
+test_outputs/
+*.json
