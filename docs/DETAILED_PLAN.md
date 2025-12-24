@@ -102,11 +102,21 @@ lean/CToLean/Core/File.lean       # Program structure
 2. Add `--json-core-out` flag to driver
 3. Serialize Core file to JSON format
 
-**Lean parser**:
+**Lean implementation**:
 ```
 lean/CToLean/Parser/Json.lean     # JSON parsing utilities
 lean/CToLean/Parser/Core.lean     # Core-specific JSON parsing
+lean/CToLean/Pretty/Core.lean     # Pretty-printer matching Cerberus format
 ```
+
+**Validation approach**:
+Round-trip validation via pretty-printing:
+1. Run `cerberus --json-core-out=out.json --pp-core-out=expected.core input.c`
+2. Parse `out.json` in Lean → Lean AST
+3. Pretty-print Lean AST → `actual.core`
+4. Assert `expected.core == actual.core`
+
+This validates both the parser and AST structure are correct without needing to run the interpreter.
 
 ### Phase 3: Memory Model Interface
 **Goal**: Define abstract memory model with smooth upgrade path
