@@ -21,17 +21,20 @@ C source → Cerberus → Core IR (JSON) → Lean Parser → Lean AST → Lean I
 ## Project Structure
 ```
 c-to-lean/
-├── cerberus/          # Git submodule - Cerberus C semantics tool
+├── cerberus/          # Git submodule - Cerberus C semantics tool (private fork)
 ├── docs/
 │   └── DETAILED_PLAN.md   # Full implementation roadmap
-├── lean/              # Lean 4 project (to be created)
+├── lean/              # Lean 4 project
 │   └── CToLean/
 │       ├── Core/      # Core AST types
-│       ├── Parser/    # JSON parsing
-│       ├── Memory/    # Memory model implementations
-│       ├── Semantics/ # Interpreter
-│       ├── Theorems/  # UB-freeness definitions
-│       └── Test/      # Validation framework
+│       ├── Parser.lean # JSON parser (100% success on test suite)
+│       ├── Memory/    # Memory model implementations (future)
+│       ├── Semantics/ # Interpreter (future)
+│       ├── Theorems/  # UB-freeness definitions (future)
+│       └── Test*.lean # Test utilities
+├── scripts/           # Development scripts
+│   └── test_parser.sh # Run parser against Cerberus test suite
+├── tests/             # Simple C test files
 ├── context/           # Background materials
 ├── CLAUDE.md          # This file
 ├── PLAN.md            # High-level goals
@@ -87,6 +90,9 @@ Focus on sequential Core initially:
 ```bash
 # Compile C to Core (pretty-printed)
 cerberus --pp-core-out=output.core input.c
+
+# Compile C to Core (JSON format for Lean parser)
+cerberus --json_core_out=output.json input.c
 
 # Execute C program
 cerberus --exec input.c

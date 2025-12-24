@@ -4,3 +4,11 @@ defaultTargets = ["CToLean"]
 
 [[lean_lib]]
 name = "CToLean"
+
+[[lean_exe]]
+name = "ctolean_test"
+root = "CToLean.Test"
+
+[[lean_exe]]
+name = "ctolean_testbatch"
+root = "CToLean.TestBatch"

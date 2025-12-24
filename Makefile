@@ -1,6 +1,6 @@
 # C-to-Lean Project Makefile
 
-.PHONY: all lean cerberus clean test help
+.PHONY: all lean cerberus clean test test-full help
 
 # Default target
 all: lean
@@ -9,18 +9,22 @@ all: lean
 lean:
 	cd lean && lake build
 
-# Build Cerberus (requires opam environment)
+# Build Cerberus (requires opam environment with lem)
 cerberus:
-	cd cerberus && dune build
+	cd cerberus && make cerberus
 
 # Clean build artifacts
 clean:
 	cd lean && lake clean
-	cd cerberus && dune clean 2>/dev/null || true
+	cd cerberus && make clean 2>/dev/null || true
 
-# Run tests (placeholder - will be expanded)
-test: lean
-	@echo "Tests not yet implemented"
+# Run quick tests (first 100 files)
+test: lean cerberus
+	./scripts/test_parser.sh --quick
+
+# Run full test suite (~5500 files, ~12 min)
+test-full: lean cerberus
+	./scripts/test_parser.sh
 
 # Update Cerberus submodule
 update-cerberus:
@@ -39,7 +43,8 @@ help:
 	@echo "  lean            Build Lean project"
 	@echo "  cerberus        Build Cerberus (requires opam)"
 	@echo "  clean           Clean all build artifacts"
-	@echo "  test            Run tests"
+	@echo "  test            Run quick tests (100 files, ~15s)"
+	@echo "  test-full       Run full test suite (~5500 files, ~12 min)"
 	@echo "  init            Initialize git submodules"
 	@echo "  update-cerberus Update Cerberus submodule"
 	@echo "  help            Show this help"

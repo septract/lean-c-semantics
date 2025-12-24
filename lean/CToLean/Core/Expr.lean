@@ -44,7 +44,7 @@ structure APattern where
 /-! ## Pure Expressions -/
 
 /-- Pure expressions (no side effects) -/
-inductive Pexpr where
+inductive Pexpr : Type where
   | sym (s : Sym)
   | impl (c : ImplConst)
   | val (v : Value)
@@ -68,14 +68,26 @@ inductive Pexpr where
   | isSigned (e : Pexpr)
   | isUnsigned (e : Pexpr)
   | areCompatible (e1 : Pexpr) (e2 : Pexpr)
-  deriving Inhabited
+  -- Integer conversion and overflow operations
+  | convInt (ty : IntegerType) (e : Pexpr)
+  | wrapI (ty : IntegerType) (op : Iop) (e1 : Pexpr) (e2 : Pexpr)
+  | catchExceptionalCondition (ty : IntegerType) (op : Iop) (e1 : Pexpr) (e2 : Pexpr)
+  -- BMC assume (for model checking)
+  | bmcAssume (e : Pexpr)
+  -- Pure memory operations
+  | pureMemop (op : String) (args : List Pexpr)
+  -- Constrained values (for memory model)
+  | constrained (constraints : List (String × Pexpr))
+
+instance : Inhabited Pexpr := ⟨.val .unit⟩
 
 /-- Annotated pure expression with optional type -/
 structure APexpr where
   annots : Annots
   ty : Option BaseType  -- type annotation (for typed Core)
   expr : Pexpr
-  deriving Inhabited
+
+instance : Inhabited APexpr := ⟨{ annots := [], ty := none, expr := default }⟩
 
 /-! ## Memory Actions -/
 
@@ -94,6 +106,8 @@ inductive Action where
       (successOrd : MemoryOrder) (failOrd : MemoryOrder)
   | compareExchangeWeak (ty : APexpr) (ptr : APexpr) (expected : APexpr) (desired : APexpr)
       (successOrd : MemoryOrder) (failOrd : MemoryOrder)
+  -- Sequential read-modify-write (for BMC)
+  | seqRmw (isUpdate : Bool) (ty : APexpr) (ptr : APexpr) (sym : Sym) (val : APexpr)
   deriving Inhabited
 
 /-- Annotated action with location -/
