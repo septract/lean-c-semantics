@@ -150,13 +150,93 @@ partial def parseBaseType (j : Json) : Except String BaseType := do
   | _ => .error s!"unknown base type: {tag}"
 
 /-- Parse a Ctype from a string representation -/
--- Note: The JSON outputs ctypes as strings like "signed int"
--- For now we'll store as a simple wrapper; full parsing can be added later
+-- The JSON outputs ctypes as strings like "signed int", "char*", etc.
+partial def parseCtypeStr (s : String) : Except String Ctype := do
+  -- Strip trailing whitespace
+  let s := s.trim
+  -- Handle pointer types (but not function types with parentheses)
+  if s.endsWith "*" then
+    let inner := s.dropRight 1 |>.trim
+    let innerTy ← parseCtypeStr inner
+    return .pointer {} innerTy
+  -- Handle atomic types BEFORE function types (since _Atomic(x) ends with ')')
+  else if s.startsWith "_Atomic" then
+    let rest := s.drop 7 |>.trim
+    if rest.startsWith "(" && rest.endsWith ")" then
+      let inner := (rest.toSubstring.drop 1 |>.dropRight 1).toString.trim
+      let innerTy ← parseCtypeStr inner
+      return .atomic innerTy
+    else
+      throw s!"malformed _Atomic type: {s}"
+  -- Handle function types like "int ()" or "int (int, int)"
+  else if s.endsWith ")" && s.contains '(' then
+    -- Find matching open paren from the end
+    let parenIdx := s.find (· == '(')
+    let retStr := (s.toSubstring.take parenIdx.byteIdx).toString.trim
+    let retTy ← parseCtypeStr retStr
+    -- Parse params (simplified - we don't need them precisely)
+    return .function retTy [] false
+  -- Handle array types
+  else if s.contains '[' then
+    -- Parse array like "int[10]" or "char[]"
+    let bracketIdx := s.find (· == '[')
+    let elemStr := (s.toSubstring.take bracketIdx.byteIdx).toString.trim
+    let closeBracket := s.length - 1
+    let sizeStr := (s.toSubstring.drop (bracketIdx.byteIdx + 1) |>.take (closeBracket - bracketIdx.byteIdx - 1)).toString
+    let elemTy ← parseCtypeStr elemStr
+    let size := if sizeStr.isEmpty then none else sizeStr.toNat?
+    return .array elemTy size
+  -- Handle basic types
+  else if s == "void" then return .void
+  else if s == "char" then return .basic (.integer .char)
+  else if s == "_Bool" then return .basic (.integer .bool)
+  else if s == "signed char" || s == "signed ichar" then return .basic (.integer (.signed .ichar))
+  else if s == "unsigned char" || s == "unsigned ichar" then return .basic (.integer (.unsigned .ichar))
+  else if s == "short" || s == "signed short" || s == "short int" || s == "signed short int" then
+    return .basic (.integer (.signed .short))
+  else if s == "unsigned short" || s == "unsigned short int" then
+    return .basic (.integer (.unsigned .short))
+  else if s == "int" || s == "signed" || s == "signed int" then
+    return .basic (.integer (.signed .int_))
+  else if s == "unsigned" || s == "unsigned int" then
+    return .basic (.integer (.unsigned .int_))
+  else if s == "long" || s == "signed long" || s == "long int" || s == "signed long int" then
+    return .basic (.integer (.signed .long))
+  else if s == "unsigned long" || s == "unsigned long int" then
+    return .basic (.integer (.unsigned .long))
+  else if s == "long long" || s == "signed long long" || s == "long long int" || s == "signed long long int" then
+    return .basic (.integer (.signed .longLong))
+  else if s == "unsigned long long" || s == "unsigned long long int" then
+    return .basic (.integer (.unsigned .longLong))
+  else if s == "float" then return .basic (.floating .float)
+  else if s == "double" then return .basic (.floating .double)
+  else if s == "long double" then return .basic (.floating .longDouble)
+  -- Handle common typedefs (map to void, since we just need them to parse)
+  else if s == "size_t" || s == "ssize_t" || s == "ptrdiff_t" ||
+          s == "intptr_t" || s == "uintptr_t" ||
+          s == "int8_t" || s == "int16_t" || s == "int32_t" || s == "int64_t" ||
+          s == "uint8_t" || s == "uint16_t" || s == "uint32_t" || s == "uint64_t" then
+    return .basic (.integer (.signed .int_))  -- Simplification
+  -- Handle struct/union types
+  else if s.startsWith "struct " then
+    let tag := s.drop 7
+    return .struct_ { id := 0, name := some tag }
+  else if s.startsWith "union " then
+    let tag := s.drop 6
+    return .union_ { id := 0, name := some tag }
+  -- Handle enum types
+  else if s.startsWith "enum " then
+    let tag := s.drop 5
+    return .basic (.integer (.enum { id := 0, name := some tag }))
+  -- Fallback - treat unknown types as void (with warning in future)
+  else
+    -- For any unrecognized type, use void as a placeholder
+    return .void
+
 def parseCtype (j : Json) : Except String Ctype := do
-  let _s ← j.getStr?
-  -- TODO: Parse the string representation properly
-  -- For now, just use void as placeholder
-  .ok .void
+  match j with
+  | .str s => parseCtypeStr s
+  | _ => throw "expected ctype string"
 
 /-! ## Value Parsing -/
 
@@ -197,7 +277,7 @@ def parsePolarity (j : Json) : Except String Polarity := do
 def parseMemoryOrder (j : Json) : Except String MemoryOrder := do
   let s ← j.getStr?
   match s with
-  | "NA" => .ok .seqCst  -- Non-atomic maps to seqCst for now
+  | "NA" => .ok .na
   | "Relaxed" => .ok .relaxed
   | "Consume" => .ok .consume
   | "Acquire" => .ok .acquire
@@ -212,9 +292,9 @@ def parseKillKind (j : Json) : Except String KillKind := do
   match tag with
   | "Dynamic" => .ok .dynamic
   | "Static" =>
-    let _cty ← getStr j "ctype"
-    -- TODO: Parse ctype string properly
-    .ok (.static .void)
+    let ctyStr ← getStr j "ctype"
+    let cty ← parseCtypeStr ctyStr
+    .ok (.static cty)
   | _ => .error s!"unknown kill kind: {tag}"
 
 /-- Parse a Name from JSON -/
@@ -343,11 +423,48 @@ mutual
       let val := valStr.toInt?.getD 0
       .ok (.integer { val := val })
     | "OVfloating" =>
-      -- TODO: Handle unspecified case
-      .ok (.floating { val := 0.0 })
+      let valField ← getField j "value"
+      match valField with
+      | .str s =>
+        -- Handle special string values with proper types
+        let fv := match s with
+          | "unspecified" => FloatingValue.unspecified
+          | "NaN" => FloatingValue.nan
+          | "Infinity" => FloatingValue.posInf
+          | "-Infinity" => FloatingValue.negInf
+          | _ =>
+            -- Try parsing as number string
+            match s.toNat? with
+            | some n => FloatingValue.finite n.toFloat
+            | none => FloatingValue.finite 0.0  -- Fallback
+        .ok (.floating fv)
+      | .num n => .ok (.floating (.finite n.toFloat))
+      | _ => .error "OVfloating value must be string or number"
     | "OVpointer" =>
-      -- TODO: Parse pointer value properly
-      .ok (.pointer (.null .void))
+      let valStr ← getStr j "value"
+      -- Parse pointer value string: NULL(ctype), Cfunction(sym), or (prov, 0xaddr)
+      if valStr.startsWith "NULL(" && valStr.endsWith ")" then
+        let ctypeStr := (valStr.drop 5).dropRight 1  -- Remove "NULL(" and ")"
+        match parseCtypeStr ctypeStr with
+        | .ok cty => .ok (.pointer { prov := .none, base := .null cty })
+        | .error _ => .ok (.pointer { prov := .none, base := .null .void })
+      else if valStr.startsWith "Cfunction(" then
+        -- Function pointer - parse symbol name
+        let symName := (valStr.drop 10).dropRight 1  -- Remove "Cfunction(" and ")"
+        .ok (.pointer { prov := .none, base := .function { id := 0, name := some symName } })
+      else
+        -- Concrete pointer: (prov, 0xaddr) - parse address
+        -- For now, extract hex address if present
+        let parts := valStr.splitOn "0x"
+        let addr := if parts.length > 1 then
+          let hexPart := parts[1]!.takeWhile (·.isAlphanum)
+          hexPart.foldl (fun acc c =>
+            let digit := if c.isDigit then c.toNat - '0'.toNat
+                        else if c.toLower >= 'a' && c.toLower <= 'f' then c.toLower.toNat - 'a'.toNat + 10
+                        else 0
+            acc * 16 + digit) 0
+        else 0
+        .ok (.pointer { prov := .none, base := .concrete none addr })
     | "OVarray" =>
       let elems ← getArr j "elements"
       let lvs ← elems.toList.mapM parseLoadedValue
@@ -355,14 +472,23 @@ mutual
     | "OVstruct" =>
       let tagSym ← getField j "struct_tag"
       let sym ← parseSym tagSym
-      -- TODO: Parse members
-      .ok (.struct_ sym [])
+      let membersArr ← getArr j "members"
+      let members ← membersArr.toList.mapM fun m => do
+        let nameJ ← getField m "name"
+        let name ← parseIdentifier nameJ
+        let ctypeStr ← getStr m "ctype"
+        let ctype ← parseCtypeStr ctypeStr
+        -- Value is a string representation of mem_value - store as unspecified for now
+        -- Full parsing would require interpreting the pp_mem_value output
+        pure { name := name, ty := ctype, value := .unspecified ctype : StructMember }
+      .ok (.struct_ sym members)
     | "OVunion" =>
       let tagSym ← getField j "union_tag"
       let sym ← parseSym tagSym
       let member ← getField j "member"
       let id ← parseIdentifier member
-      .ok (.union_ sym id { bytes := [] })
+      -- Value is a string representation - store as unspecified for now
+      .ok (.union_ sym id (.unspecified .void))
     | _ => .error s!"unknown object value: {tag}"
 
   /-- Parse a LoadedValue from JSON -/
@@ -374,8 +500,9 @@ mutual
       let ov ← parseObjectValue v
       .ok (.specified ov)
     | "LVunspecified" =>
-      -- TODO: Parse ctype
-      .ok (.unspecified .void)
+      let ctyStr ← getStr j "ctype"
+      let cty ← parseCtypeStr ctyStr
+      .ok (.unspecified cty)
     | _ => .error s!"unknown loaded value: {tag}"
 
   /-- Parse a Value from JSON -/
@@ -386,8 +513,9 @@ mutual
     | "Vtrue" => .ok .true_
     | "Vfalse" => .ok .false_
     | "Vctype" =>
-      -- Ctype stored as string
-      .ok (.ctype .void)  -- TODO: Parse properly
+      let ctyStr ← getStr j "ctype"
+      let cty ← parseCtypeStr ctyStr
+      .ok (.ctype cty)
     | "Vobject" =>
       let v ← getField j "value"
       let ov ← parseObjectValue v
@@ -479,10 +607,11 @@ mutual
     | "PEarray_shift" =>
       let ptr ← getField exprJ "ptr"
       let p ← parsePexpr ptr
+      let ctypeStr ← getStr exprJ "ctype"
+      let ctype ← parseCtypeStr ctypeStr
       let idx ← getField exprJ "index"
       let i ← parsePexpr idx
-      -- TODO: parse ctype properly
-      .ok (Pexpr.arrayShift p.expr .void i.expr)
+      .ok (Pexpr.arrayShift p.expr ctype i.expr)
     | "PEmember_shift" =>
       let ptr ← getField exprJ "ptr"
       let p ← parsePexpr ptr

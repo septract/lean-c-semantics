@@ -128,6 +128,7 @@ inductive KillKind where
 
 /-- C11 memory ordering -/
 inductive MemoryOrder where
+  | na        -- Non-atomic (default, omitted in pretty-print)
   | relaxed
   | consume
   | acquire

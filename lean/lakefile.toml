@@ -12,3 +12,7 @@ root = "CToLean.Test"
 [[lean_exe]]
 name = "ctolean_testbatch"
 root = "CToLean.TestBatch"
+
+[[lean_exe]]
+name = "ctolean_pp"
+root = "CToLean.TestPrettyPrint"
