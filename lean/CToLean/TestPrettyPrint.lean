@@ -69,11 +69,18 @@ def main (args : List String) : IO UInt32 := do
         return 0
       else
         IO.eprintln "✗ Outputs differ"
+        let n1 := normalizeWhitespace leanOutput
+        let n2 := normalizeWhitespace cerberusOutput
+        IO.eprintln s!"Normalized lengths: Lean={n1.length}, Cerberus={n2.length}"
         match findFirstDiff leanOutput cerberusOutput with
         | some (idx, ctx1, ctx2) =>
           IO.eprintln s!"First difference at position {idx}:"
-          IO.eprintln s!"  Lean:     {ctx1}"
-          IO.eprintln s!"  Cerberus: {ctx2}"
+          IO.eprintln s!"  Lean:     '{ctx1}'"
+          IO.eprintln s!"  Cerberus: '{ctx2}'"
+          -- Show more context around the difference
+          let startIdx := if idx > 20 then idx - 20 else 0
+          IO.eprintln s!"  Lean context:     '{String.ofList (n1.toList.drop startIdx |>.take 50)}'"
+          IO.eprintln s!"  Cerberus context: '{String.ofList (n2.toList.drop startIdx |>.take 50)}'"
         | none => pure ()
         IO.eprintln "\n=== Lean output ==="
         IO.println leanOutput

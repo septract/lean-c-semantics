@@ -43,6 +43,6 @@ def main : IO Unit := do
   | .ok file =>
     IO.println s!"✓ Parsed successfully!"
     IO.println s!"  main: {repr file.main}"
-    IO.println s!"  functions: {file.funs.size}"
+    IO.println s!"  functions: {file.funs.length}"
   | .error e =>
     IO.println s!"✗ Parse error: {e}"

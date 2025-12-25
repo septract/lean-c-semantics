@@ -10,11 +10,19 @@ lake build
 
 ## Testing
 
-Run the parser against the Cerberus test suite:
+From the project root, use the Makefile:
 
 ```bash
-../scripts/test_parser.sh --quick  # First 100 tests
-../scripts/test_parser.sh          # Full suite (~5500 files, ~12 min)
+make test              # Run all quick tests (parser + pretty-printer)
+make test-parser-full  # Full parser test (~5500 files, ~12 min)
+```
+
+Or run the scripts directly:
+
+```bash
+../scripts/test_parser.sh --quick  # Parser: first 100 files
+../scripts/test_parser.sh          # Parser: full suite
+../scripts/test_pp.sh --max 100    # Pretty-printer comparison
 ```
 
 ## Structure
@@ -25,25 +33,27 @@ Run the parser against the Cerberus test suite:
   - `Expr.lean` - Pure and effectful expressions
   - `File.lean` - Program structure (functions, globals, tags)
 - `CToLean/Parser.lean` - JSON parser for Cerberus output
-- `CToLean/Test.lean` - Simple test utility
-- `CToLean/TestBatch.lean` - Batch testing for the parser
+- `CToLean/PrettyPrint.lean` - Pretty-printer matching Cerberus format
+- `CToLean/Test*.lean` - Test utilities
 
 ## Usage
 
 ```lean
 import CToLean.Parser
+import CToLean.PrettyPrint
 
 -- Parse JSON from Cerberus
-let json := IO.FS.readFile "output.json"
+let json ← IO.FS.readFile "output.json"
 match CToLean.Parser.parseFileFromString json with
 | .ok file =>
-  IO.println s!"Parsed {file.funs.size} functions"
+  -- Pretty-print back to Core syntax
+  IO.println (CToLean.PrettyPrint.ppFile file)
 | .error e =>
-  IO.println s!"Parse error: {e}"
+  IO.eprintln s!"Parse error: {e}"
 ```
 
 ## Status
 
-- **Parser**: 100% success rate on 1817 Cerberus test files
+- **Parser**: 100% success rate on 5500+ Cerberus test files
+- **Pretty-printer**: ~60% match rate with Cerberus output (in progress)
 - **Interpreter**: Not yet implemented
-- **Pretty-printer**: Not yet implemented

@@ -149,74 +149,171 @@ partial def parseBaseType (j : Json) : Except String BaseType := do
     .ok (.loaded oty)
   | _ => .error s!"unknown base type: {tag}"
 
-/-- Parse a Ctype from a string representation -/
--- The JSON outputs ctypes as strings like "signed int", "char*", etc.
+/-- Parse Qualifiers from JSON -/
+def parseQualifiers (j : Json) : Except String Qualifiers := do
+  let const_ ← getBool j "const"
+  let restrict ← getBool j "restrict"
+  let volatile ← getBool j "volatile"
+  .ok { const := const_, restrict := restrict, volatile := volatile }
+
+/-- Parse IntBaseKind from JSON string -/
+def parseIntBaseKind (j : Json) : Except String IntBaseKind := do
+  match j with
+  | .str s =>
+    match s with
+    | "Ichar" => .ok .ichar
+    | "Short" => .ok .short
+    | "Int_" => .ok .int_
+    | "Long" => .ok .long
+    | "LongLong" => .ok .longLong
+    | "Intmax_t" => .ok .intmax
+    | "Intptr_t" => .ok .intptr
+    | _ => .error s!"unknown int base kind: {s}"
+  | .obj _ =>
+    let tag ← getTag j
+    match tag with
+    | "IntN_t" =>
+      let bits ← getNat j "bits"
+      .ok (.intN bits)
+    | "Int_leastN_t" =>
+      let bits ← getNat j "bits"
+      .ok (.intLeastN bits)
+    | "Int_fastN_t" =>
+      let bits ← getNat j "bits"
+      .ok (.intFastN bits)
+    | _ => .error s!"unknown int base kind tag: {tag}"
+  | _ => .error "expected int base kind"
+
+/-- Parse IntegerType from structured JSON -/
+def parseIntegerTypeStruct (j : Json) : Except String IntegerType := do
+  let tag ← getTag j
+  match tag with
+  | "Char" => .ok .char
+  | "Bool" => .ok .bool
+  | "Signed" =>
+    let kind ← getField j "kind"
+    let k ← parseIntBaseKind kind
+    .ok (.signed k)
+  | "Unsigned" =>
+    let kind ← getField j "kind"
+    let k ← parseIntBaseKind kind
+    .ok (.unsigned k)
+  | "Enum" =>
+    let tagSym ← getField j "tag"
+    let sym ← parseSym tagSym
+    .ok (.enum sym)
+  | "Size_t" => .ok .size_t
+  | "Wchar_t" => .ok .wchar_t
+  | "Wint_t" => .ok .wint_t
+  | "Ptrdiff_t" => .ok .ptrdiff_t
+  | "Ptraddr_t" => .ok .ptraddr_t
+  | _ => .error s!"unknown integer type: {tag}"
+
+/-- Parse FloatingType from JSON string -/
+def parseFloatingTypeStruct (j : Json) : Except String FloatingType := do
+  let s ← j.getStr?
+  match s with
+  | "Float" => .ok .float
+  | "Double" => .ok .double
+  | "LongDouble" => .ok .longDouble
+  | _ => .error s!"unknown floating type: {s}"
+
+/-- Parse BasicType from structured JSON -/
+def parseBasicType (j : Json) : Except String BasicType := do
+  let tag ← getTag j
+  match tag with
+  | "Integer" =>
+    let intTy ← getField j "int_type"
+    let ity ← parseIntegerTypeStruct intTy
+    .ok (.integer ity)
+  | "Floating" =>
+    let floatTy ← getField j "float_type"
+    let fty ← parseFloatingTypeStruct floatTy
+    .ok (.floating fty)
+  | _ => .error s!"unknown basic type: {tag}"
+
+/-- Parse a Ctype from structured JSON -/
+partial def parseCtype (j : Json) : Except String Ctype := do
+  let tag ← getTag j
+  match tag with
+  | "Void" => .ok .void
+  | "Byte" => .ok .byte
+  | "Basic" =>
+    let basicTy ← getField j "basic_type"
+    let bty ← parseBasicType basicTy
+    .ok (.basic bty)
+  | "Array" =>
+    let elemTy ← getField j "element_type"
+    let elem ← parseCtype elemTy
+    let sizeJ ← getField j "size"
+    let size := if sizeJ.isNull then none else sizeJ.getInt?.toOption.map (·.toNat)
+    .ok (.array elem size)
+  | "Function" =>
+    let retTy ← getField j "return_type"
+    let ret ← parseCtype retTy
+    let retQualsJ ← getField j "return_qualifiers"
+    let retQuals ← parseQualifiers retQualsJ
+    let paramsJ ← getArr j "params"
+    let params ← paramsJ.toList.mapM fun p => do
+      let qualsJ ← getField p "qualifiers"
+      let quals ← parseQualifiers qualsJ
+      let tyJ ← getField p "type"
+      let ty ← parseCtype tyJ
+      .ok (quals, ty)
+    let variadic ← getBool j "variadic"
+    .ok (.function retQuals ret params variadic)
+  | "FunctionNoParams" =>
+    let retTy ← getField j "return_type"
+    let ret ← parseCtype retTy
+    let retQualsJ ← getField j "return_qualifiers"
+    let retQuals ← parseQualifiers retQualsJ
+    .ok (.functionNoParams retQuals ret)
+  | "Pointer" =>
+    let qualsJ ← getField j "qualifiers"
+    let quals ← parseQualifiers qualsJ
+    let pointeeTy ← getField j "pointee_type"
+    let pointee ← parseCtype pointeeTy
+    .ok (.pointer quals pointee)
+  | "Atomic" =>
+    let innerTy ← getField j "inner_type"
+    let inner ← parseCtype innerTy
+    .ok (.atomic inner)
+  | "Struct" =>
+    let tagSym ← getField j "struct_tag"
+    let sym ← parseSym tagSym
+    .ok (.struct_ sym)
+  | "Union" =>
+    let tagSym ← getField j "union_tag"
+    let sym ← parseSym tagSym
+    .ok (.union_ sym)
+  | _ => .error s!"unknown ctype: {tag}"
+
+/-- Parse a ctype from a string representation (for embedded ctypes in pp_pointer_value output) -/
+-- This is a simplified parser for ctypes that appear inside string values
 partial def parseCtypeStr (s : String) : Except String Ctype := do
-  -- Strip trailing whitespace
   let s := s.trim
-  -- Handle pointer types (but not function types with parentheses)
-  if s.endsWith "*" then
-    let inner := s.dropRight 1 |>.trim
-    let innerTy ← parseCtypeStr inner
-    return .pointer {} innerTy
-  -- Handle atomic types BEFORE function types (since _Atomic(x) ends with ')')
-  else if s.startsWith "_Atomic" then
-    let rest := s.drop 7 |>.trim
-    if rest.startsWith "(" && rest.endsWith ")" then
-      let inner := (rest.toSubstring.drop 1 |>.dropRight 1).toString.trim
-      let innerTy ← parseCtypeStr inner
-      return .atomic innerTy
-    else
-      throw s!"malformed _Atomic type: {s}"
-  -- Handle function types like "int ()" or "int (int, int)"
-  else if s.endsWith ")" && s.contains '(' then
-    -- Find matching open paren from the end
-    let parenIdx := s.find (· == '(')
-    let retStr := (s.toSubstring.take parenIdx.byteIdx).toString.trim
-    let retTy ← parseCtypeStr retStr
-    -- Parse params (simplified - we don't need them precisely)
-    return .function retTy [] false
-  -- Handle array types
-  else if s.contains '[' then
-    -- Parse array like "int[10]" or "char[]"
-    let bracketIdx := s.find (· == '[')
-    let elemStr := (s.toSubstring.take bracketIdx.byteIdx).toString.trim
-    let closeBracket := s.length - 1
-    let sizeStr := (s.toSubstring.drop (bracketIdx.byteIdx + 1) |>.take (closeBracket - bracketIdx.byteIdx - 1)).toString
-    let elemTy ← parseCtypeStr elemStr
-    let size := if sizeStr.isEmpty then none else sizeStr.toNat?
-    return .array elemTy size
   -- Handle basic types
-  else if s == "void" then return .void
+  if s == "void" then return .void
   else if s == "char" then return .basic (.integer .char)
   else if s == "_Bool" then return .basic (.integer .bool)
-  else if s == "signed char" || s == "signed ichar" then return .basic (.integer (.signed .ichar))
-  else if s == "unsigned char" || s == "unsigned ichar" then return .basic (.integer (.unsigned .ichar))
-  else if s == "short" || s == "signed short" || s == "short int" || s == "signed short int" then
-    return .basic (.integer (.signed .short))
-  else if s == "unsigned short" || s == "unsigned short int" then
-    return .basic (.integer (.unsigned .short))
-  else if s == "int" || s == "signed" || s == "signed int" then
-    return .basic (.integer (.signed .int_))
-  else if s == "unsigned" || s == "unsigned int" then
-    return .basic (.integer (.unsigned .int_))
-  else if s == "long" || s == "signed long" || s == "long int" || s == "signed long int" then
-    return .basic (.integer (.signed .long))
-  else if s == "unsigned long" || s == "unsigned long int" then
-    return .basic (.integer (.unsigned .long))
-  else if s == "long long" || s == "signed long long" || s == "long long int" || s == "signed long long int" then
-    return .basic (.integer (.signed .longLong))
-  else if s == "unsigned long long" || s == "unsigned long long int" then
-    return .basic (.integer (.unsigned .longLong))
+  else if s == "signed char" then return .basic (.integer (.signed .ichar))
+  else if s == "unsigned char" then return .basic (.integer (.unsigned .ichar))
+  else if s == "short" || s == "signed short" then return .basic (.integer (.signed .short))
+  else if s == "unsigned short" then return .basic (.integer (.unsigned .short))
+  else if s == "int" || s == "signed int" then return .basic (.integer (.signed .int_))
+  else if s == "unsigned int" then return .basic (.integer (.unsigned .int_))
+  else if s == "long" || s == "signed long" then return .basic (.integer (.signed .long))
+  else if s == "unsigned long" then return .basic (.integer (.unsigned .long))
+  else if s == "long long" || s == "signed long long" then return .basic (.integer (.signed .longLong))
+  else if s == "unsigned long long" then return .basic (.integer (.unsigned .longLong))
   else if s == "float" then return .basic (.floating .float)
   else if s == "double" then return .basic (.floating .double)
   else if s == "long double" then return .basic (.floating .longDouble)
-  -- Handle common typedefs (map to void, since we just need them to parse)
-  else if s == "size_t" || s == "ssize_t" || s == "ptrdiff_t" ||
-          s == "intptr_t" || s == "uintptr_t" ||
-          s == "int8_t" || s == "int16_t" || s == "int32_t" || s == "int64_t" ||
-          s == "uint8_t" || s == "uint16_t" || s == "uint32_t" || s == "uint64_t" then
-    return .basic (.integer (.signed .int_))  -- Simplification
+  -- Handle pointer types
+  else if s.endsWith "*" then
+    let inner := s.dropRight 1 |>.trim
+    let innerTy ← parseCtypeStr inner
+    return .pointer {} innerTy
   -- Handle struct/union types
   else if s.startsWith "struct " then
     let tag := s.drop 7
@@ -224,19 +321,8 @@ partial def parseCtypeStr (s : String) : Except String Ctype := do
   else if s.startsWith "union " then
     let tag := s.drop 6
     return .union_ { id := 0, name := some tag }
-  -- Handle enum types
-  else if s.startsWith "enum " then
-    let tag := s.drop 5
-    return .basic (.integer (.enum { id := 0, name := some tag }))
-  -- Fallback - treat unknown types as void (with warning in future)
-  else
-    -- For any unrecognized type, use void as a placeholder
-    return .void
-
-def parseCtype (j : Json) : Except String Ctype := do
-  match j with
-  | .str s => parseCtypeStr s
-  | _ => throw "expected ctype string"
+  -- Default to void for unrecognized types
+  else return .void
 
 /-! ## Value Parsing -/
 
@@ -292,8 +378,8 @@ def parseKillKind (j : Json) : Except String KillKind := do
   match tag with
   | "Dynamic" => .ok .dynamic
   | "Static" =>
-    let ctyStr ← getStr j "ctype"
-    let cty ← parseCtypeStr ctyStr
+    let ctyJ ← getField j "ctype"
+    let cty ← parseCtype ctyJ
     .ok (.static cty)
   | _ => .error s!"unknown kill kind: {tag}"
 
@@ -476,8 +562,8 @@ mutual
       let members ← membersArr.toList.mapM fun m => do
         let nameJ ← getField m "name"
         let name ← parseIdentifier nameJ
-        let ctypeStr ← getStr m "ctype"
-        let ctype ← parseCtypeStr ctypeStr
+        let ctypeJ ← getField m "ctype"
+        let ctype ← parseCtype ctypeJ
         -- Value is a string representation of mem_value - store as unspecified for now
         -- Full parsing would require interpreting the pp_mem_value output
         pure { name := name, ty := ctype, value := .unspecified ctype : StructMember }
@@ -500,8 +586,8 @@ mutual
       let ov ← parseObjectValue v
       .ok (.specified ov)
     | "LVunspecified" =>
-      let ctyStr ← getStr j "ctype"
-      let cty ← parseCtypeStr ctyStr
+      let ctyJ ← getField j "ctype"
+      let cty ← parseCtype ctyJ
       .ok (.unspecified cty)
     | _ => .error s!"unknown loaded value: {tag}"
 
@@ -513,8 +599,8 @@ mutual
     | "Vtrue" => .ok .true_
     | "Vfalse" => .ok .false_
     | "Vctype" =>
-      let ctyStr ← getStr j "ctype"
-      let cty ← parseCtypeStr ctyStr
+      let ctyJ ← getField j "ctype"
+      let cty ← parseCtype ctyJ
       .ok (.ctype cty)
     | "Vobject" =>
       let v ← getField j "value"
@@ -607,8 +693,8 @@ mutual
     | "PEarray_shift" =>
       let ptr ← getField exprJ "ptr"
       let p ← parsePexpr ptr
-      let ctypeStr ← getStr exprJ "ctype"
-      let ctype ← parseCtypeStr ctypeStr
+      let ctypeJ ← getField exprJ "ctype"
+      let ctype ← parseCtype ctypeJ
       let idx ← getField exprJ "index"
       let i ← parsePexpr idx
       .ok (Pexpr.arrayShift p.expr ctype i.expr)
@@ -708,8 +794,8 @@ mutual
       let re ← parsePexpr r
       .ok (Pexpr.areCompatible le.expr re.expr)
     | "PEwrapI" =>
-      let tyStr ← getStr exprJ "type"
-      let ty ← parseIntegerTypeStr tyStr
+      let tyJ ← getField exprJ "type"
+      let ty ← parseIntegerTypeStruct tyJ
       let op ← getField exprJ "op"
       let iop ← parseIop op
       let l ← getField exprJ "left"
@@ -718,8 +804,8 @@ mutual
       let re ← parsePexpr r
       .ok (Pexpr.wrapI ty iop le.expr re.expr)
     | "PEcatch_exceptional_condition" =>
-      let tyStr ← getStr exprJ "type"
-      let ty ← parseIntegerTypeStr tyStr
+      let tyJ ← getField exprJ "type"
+      let ty ← parseIntegerTypeStruct tyJ
       let op ← getField exprJ "op"
       let iop ← parseIop op
       let l ← getField exprJ "left"
@@ -728,8 +814,8 @@ mutual
       let re ← parsePexpr r
       .ok (Pexpr.catchExceptionalCondition ty iop le.expr re.expr)
     | "PEconv_int" =>
-      let tyStr ← getStr exprJ "type"
-      let ty ← parseIntegerTypeStr tyStr
+      let tyJ ← getField exprJ "type"
+      let ty ← parseIntegerTypeStruct tyJ
       let e ← getField exprJ "expr"
       let pe ← parsePexpr e
       .ok (Pexpr.convInt ty pe.expr)
@@ -1025,15 +1111,18 @@ def parseTagDef (j : Json) : Except String (Sym × Loc × TagDef) := do
     let fs ← fields.toList.mapM fun f => do
       let name ← getField f "name"
       let n ← parseIdentifier name
-      -- ctype is stored as string
-      .ok { name := n, ty := .void : FieldDef }
+      let ctypeJ ← getField f "ctype"
+      let cty ← parseCtype ctypeJ
+      .ok { name := n, ty := cty : FieldDef }
     .ok (TagDef.struct_ fs)
   | "UnionDef" =>
     let fields ← getArr defJ "fields"
     let fs ← fields.toList.mapM fun f => do
       let name ← getField f "name"
       let n ← parseIdentifier name
-      .ok { name := n, ty := .void : FieldDef }
+      let ctypeJ ← getField f "ctype"
+      let cty ← parseCtype ctypeJ
+      .ok { name := n, ty := cty : FieldDef }
     .ok (TagDef.union_ fs)
   | _ => .error s!"unknown tag definition: {tag}"
   .ok (s, loc, def_)
@@ -1045,13 +1134,15 @@ def parseGlobDecl (j : Json) : Except String (Sym × GlobDecl) := do
   let tag ← getStr j "tag"
   let coreTy ← getField j "core_type"
   let ct ← parseBaseType coreTy
+  let ctypeJ ← getField j "ctype"
+  let cty ← parseCtype ctypeJ
   match tag with
   | "GlobalDef" =>
     let init ← getField j "init"
     let i ← parseExpr init
-    .ok (s, .def_ ct .void i)
+    .ok (s, .def_ ct cty i)
   | "GlobalDecl" =>
-    .ok (s, .decl ct .void)
+    .ok (s, .decl ct cty)
   | _ => .error s!"unknown glob decl: {tag}"
 
 /-- Parse a FunDecl from JSON -/
@@ -1131,10 +1222,9 @@ def parseFile (j : Json) : Except String File := do
   let globsJ ← getArr j "globs"
   let globs ← globsJ.toList.mapM parseGlobDecl
 
-  -- Parse function definitions
+  -- Parse function definitions (preserve order from JSON)
   let funsJ ← getArr j "funs"
-  let funsList ← funsJ.toList.mapM parseFunDecl
-  let funs : FunMap := funsList.foldl (fun m (s, d) => m.insert s d) {}
+  let funs ← funsJ.toList.mapM parseFunDecl
 
   .ok {
     main := main

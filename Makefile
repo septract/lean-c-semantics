@@ -1,6 +1,6 @@
 # C-to-Lean Project Makefile
 
-.PHONY: all lean cerberus clean test test-full help
+.PHONY: all lean cerberus clean test test-parser-full test-pp-full help
 
 # Default target
 all: lean
@@ -18,13 +18,18 @@ clean:
 	cd lean && lake clean
 	cd cerberus && make clean 2>/dev/null || true
 
-# Run quick tests (first 100 files)
+# Run quick tests (parser + pretty-printer, 100 files each)
 test: lean cerberus
 	./scripts/test_parser.sh --quick
+	./scripts/test_pp.sh --max 100
 
-# Run full test suite (~5500 files, ~12 min)
-test-full: lean cerberus
+# Run full parser test suite (~5500 files, ~12 min)
+test-parser-full: lean cerberus
 	./scripts/test_parser.sh
+
+# Run full pretty-printer test (all CI files)
+test-pp-full: lean cerberus
+	./scripts/test_pp.sh
 
 # Update Cerberus submodule
 update-cerberus:
@@ -39,12 +44,13 @@ help:
 	@echo "C-to-Lean Project"
 	@echo ""
 	@echo "Targets:"
-	@echo "  all             Build Lean project (default)"
-	@echo "  lean            Build Lean project"
-	@echo "  cerberus        Build Cerberus (requires opam)"
-	@echo "  clean           Clean all build artifacts"
-	@echo "  test            Run quick tests (100 files, ~15s)"
-	@echo "  test-full       Run full test suite (~5500 files, ~12 min)"
-	@echo "  init            Initialize git submodules"
-	@echo "  update-cerberus Update Cerberus submodule"
-	@echo "  help            Show this help"
+	@echo "  all               Build Lean project (default)"
+	@echo "  lean              Build Lean project"
+	@echo "  cerberus          Build Cerberus (requires opam)"
+	@echo "  clean             Clean all build artifacts"
+	@echo "  test              Run all quick tests (parser + pretty-printer, 100 files)"
+	@echo "  test-parser-full  Run full parser test (~5500 files, ~12 min)"
+	@echo "  test-pp-full      Run full pretty-printer test (all CI files)"
+	@echo "  init              Initialize git submodules"
+	@echo "  update-cerberus   Update Cerberus submodule"
+	@echo "  help              Show this help"
