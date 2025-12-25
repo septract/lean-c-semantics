@@ -27,13 +27,15 @@ c-to-lean/
 ├── lean/              # Lean 4 project
 │   └── CToLean/
 │       ├── Core/      # Core AST types
-│       ├── Parser.lean # JSON parser (100% success on test suite)
+│       ├── Parser.lean      # JSON parser (100% success on test suite)
+│       ├── PrettyPrint.lean # Pretty-printer matching Cerberus output
 │       ├── Memory/    # Memory model implementations (future)
 │       ├── Semantics/ # Interpreter (future)
 │       ├── Theorems/  # UB-freeness definitions (future)
 │       └── Test*.lean # Test utilities
 ├── scripts/           # Development scripts
-│   └── test_parser.sh # Run parser against Cerberus test suite
+│   ├── test_parser.sh # Run parser against Cerberus test suite
+│   └── test_pp.sh     # Run pretty-printer comparison tests
 ├── tests/             # Simple C test files
 ├── context/           # Background materials
 ├── CLAUDE.md          # This file
@@ -96,6 +98,9 @@ CERBERUS=./cerberus/_build/default/backend/driver/main.exe
 # Pretty-print Core to stdout
 $CERBERUS --pp=core input.c
 
+# Pretty-print Core in compact mode (single line, for diffing)
+$CERBERUS --pp=core --pp_core_compact input.c
+
 # Pretty-print Core to file (requires --pp=core flag too)
 $CERBERUS --pp=core --pp_core_out=output.core input.c
 
@@ -117,7 +122,28 @@ Cerberus has 5500+ test files in `cerberus/tests/`:
 - `*.undef.c` - Expected undefined behavior
 - `*.syntax-only.c` - Parse-only tests
 
-### Differential Testing
+### Test Scripts
+
+**Parser Test** (`scripts/test_parser.sh`):
+Tests that the Lean JSON parser can successfully parse Cerberus JSON output.
+```bash
+./scripts/test_parser.sh --quick    # Test first 100 files
+./scripts/test_parser.sh            # Full test suite (~5500 files)
+./scripts/test_parser.sh --max 500  # Test first 500 files
+```
+
+**Pretty-Printer Test** (`scripts/test_pp.sh`):
+Compares Lean pretty-printer output against Cerberus pretty-printer output.
+```bash
+./scripts/test_pp.sh --max 100      # Test first 100 files
+./scripts/test_pp.sh --max 100 -v   # Verbose mode (show each file)
+./scripts/test_pp.sh                # Full test (all CI files)
+```
+The script generates JSON from Cerberus, runs the Lean pretty-printer, compares with Cerberus compact output, and reports match rate. Output files are saved to a temp directory for investigation.
+
+Current status: ~60% match rate (improving as we fix formatting discrepancies).
+
+### Differential Testing (Future)
 Compare Lean interpreter output against Cerberus:
 1. Run Cerberus on C file, get Core + execution result
 2. Parse Core in Lean
@@ -128,15 +154,22 @@ Target: 90%+ agreement on sequential tests.
 
 ## Development Notes
 
+### Shell Commands
+**IMPORTANT**: Do NOT use `sed`, `awk`, `tr`, or similar shell string manipulation tools for ad-hoc text processing. These commands are error-prone and often fail silently or produce unexpected results across different platforms.
+
+If string manipulation is needed:
+- Write a proper Lean program to do the transformation
+- Or wrap the shell commands in a well-designed, tested shell script in `scripts/`
+
 ### Building
 
 Use the top-level Makefile:
 ```bash
-make lean       # Build Lean project
-make cerberus   # Build Cerberus (requires opam environment)
-make test       # Quick test (100 files)
-make test-full  # Full test suite (~5500 files)
-make clean      # Clean all build artifacts
+make lean             # Build Lean project
+make cerberus         # Build Cerberus (requires opam environment)
+make test             # Run all quick tests (parser + pretty-printer, 100 files)
+make test-parser-full # Full parser test suite (~5500 files, ~12 min)
+make clean            # Clean all build artifacts
 ```
 
 Or build individually:

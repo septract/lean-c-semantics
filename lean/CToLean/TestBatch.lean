@@ -11,7 +11,7 @@ def testFile (path : String) : IO Unit := do
   let contents ← IO.FS.readFile path
   match parseFileFromString contents with
   | .ok file =>
-    IO.println s!"✓ {path}: functions={file.funs.size}, tags={file.tagDefs.size}, globs={file.globs.length}"
+    IO.println s!"✓ {path}: functions={file.funs.length}, tags={file.tagDefs.size}, globs={file.globs.length}"
   | .error e =>
     IO.println s!"✗ {path}: {e}"
 

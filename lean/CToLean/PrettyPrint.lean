@@ -28,16 +28,9 @@ def parens (s : String) : String := s!"({s})"
 def indent (n : Indent) (s : String) : String :=
   String.ofList (List.replicate (n * 2) ' ') ++ s
 
-/-- Check if a string is "simple" (no newlines and not too long) -/
-def isSimple (s : String) (maxLen : Nat := 60) : Bool :=
-  !s.contains '\n' && s.length ≤ maxLen
-
-/-- Format with grouped argument: fits on one line if simple, otherwise multi-line -/
-def withGroupedArg (keyword : String) (arg : String) (ind : Indent) : String :=
-  if isSimple arg then
-    s!"{keyword}({arg})"
-  else
-    s!"{keyword}(\n{indent (ind + 1) ""}{arg}\n{indent ind ""})"
+/-- Simple inline formatting for keyword(arg) - no line breaking -/
+def withGroupedArg (keyword : String) (arg : String) (_ind : Indent) : String :=
+  s!"{keyword}({arg})"
 
 /-! ## Symbol and Identifier Printing -/
 
@@ -52,23 +45,31 @@ def ppIdentifier (id : Identifier) : String := id.name
 
 /-! ## Type Printing -/
 
-/-- Pretty-print signed integer kind -/
-def ppSignedIntKind : SignedIntKind → String
+/-- Pretty-print signed integer base kind -/
+def ppSignedIntKind : IntBaseKind → String
   | .ichar => "signed char"
   | .short => "short"
   | .int_ => "signed int"
   | .long => "long"
   | .longLong => "long long"
   | .intN n => s!"signed _BitInt({n})"
+  | .intLeastN n => s!"int_least{n}_t"
+  | .intFastN n => s!"int_fast{n}_t"
+  | .intmax => "intmax_t"
+  | .intptr => "intptr_t"
 
-/-- Pretty-print unsigned integer kind -/
-def ppUnsignedIntKind : UnsignedIntKind → String
+/-- Pretty-print unsigned integer base kind -/
+def ppUnsignedIntKind : IntBaseKind → String
   | .ichar => "unsigned char"
   | .short => "unsigned short"
   | .int_ => "unsigned int"
   | .long => "unsigned long"
   | .longLong => "unsigned long long"
   | .intN n => s!"unsigned _BitInt({n})"
+  | .intLeastN n => s!"uint_least{n}_t"
+  | .intFastN n => s!"uint_fast{n}_t"
+  | .intmax => "uintmax_t"
+  | .intptr => "uintptr_t"
 
 /-- Pretty-print integer type -/
 def ppIntegerType : IntegerType → String
@@ -77,6 +78,11 @@ def ppIntegerType : IntegerType → String
   | .signed k => ppSignedIntKind k
   | .unsigned k => ppUnsignedIntKind k
   | .enum s => s!"enum {ppSym s}"
+  | .size_t => "size_t"
+  | .wchar_t => "wchar_t"
+  | .wint_t => "wint_t"
+  | .ptrdiff_t => "ptrdiff_t"
+  | .ptraddr_t => "ptraddr_t"
 
 /-- Pretty-print floating type -/
 def ppFloatingType : FloatingType → String
@@ -104,19 +110,34 @@ partial def ppCtype : Ctype → String
   | .array elemTy size =>
     let sizeStr := match size with | some n => s!"{n}" | none => ""
     s!"{ppCtype elemTy}[{sizeStr}]"
-  | .function retTy params variadic =>
+  | .function _retQuals retTy params variadic =>
     let paramsStr := joinWith ", " (params.map fun (q, t) =>
       let qs := ppQualifiers q
       if qs.isEmpty then ppCtype t else s!"{qs} {ppCtype t}")
     let varStr := if variadic then ", ..." else ""
     s!"{ppCtype retTy}({paramsStr}{varStr})"
+  | .functionNoParams _retQuals retTy =>
+    s!"{ppCtype retTy}()"
   | .pointer quals pointeeTy =>
     let qs := ppQualifiers quals
-    if qs.isEmpty then s!"{ppCtype pointeeTy}*"
-    else s!"{qs} {ppCtype pointeeTy}*"
+    -- Special case: pointer to function uses C declaration syntax
+    match pointeeTy with
+    | .function _retQuals retTy params variadic =>
+      let paramsStr := if params.isEmpty then "void"
+        else joinWith ", " (params.map fun (q, t) =>
+          let qstr := ppQualifiers q
+          if qstr.isEmpty then ppCtype t else s!"{qstr} {ppCtype t}")
+      let varStr := if variadic then ", ..." else ""
+      s!"{ppCtype retTy} (*) ({paramsStr}{varStr})"
+    | .functionNoParams _retQuals retTy =>
+      s!"{ppCtype retTy} (*) ()"
+    | _ =>
+      if qs.isEmpty then s!"{ppCtype pointeeTy}*"
+      else s!"{qs} {ppCtype pointeeTy}*"
   | .atomic ty => s!"_Atomic({ppCtype ty})"
   | .struct_ tag => s!"struct {ppSym tag}"
   | .union_ tag => s!"union {ppSym tag}"
+  | .byte => "byte"
 
 /-- Pretty-print C type in quotes (as Cerberus does) -/
 def ppCtypeQuoted (ty : Ctype) : String := s!"'{ppCtype ty}'"
@@ -129,8 +150,8 @@ def ppObjectType : ObjectType → String
   | .floating => "floating"
   | .pointer => "pointer"
   | .array elemTy => s!"array({ppObjectType elemTy})"
-  | .struct_ tag => s!"struct({ppSym tag})"
-  | .union_ tag => s!"union({ppSym tag})"
+  | .struct_ tag => s!"struct {ppSym tag}"
+  | .union_ tag => s!"union {ppSym tag}"
 
 /-! ## Base Type Printing -/
 
@@ -140,7 +161,7 @@ def ppBaseType : BaseType → String
   | .boolean => "boolean"
   | .ctype => "ctype"
   | .list elemTy => s!"[{ppBaseType elemTy}]"
-  | .tuple elemTys => s!"({joinWith ", " (elemTys.map ppBaseType)})"
+  | .tuple elemTys => s!"({joinWith "," (elemTys.map ppBaseType)})"
   | .object objTy => ppObjectType objTy
   | .loaded objTy => s!"loaded {ppObjectType objTy}"
   | .storable => "storable"
@@ -297,7 +318,7 @@ mutual
 
   /-- Pretty-print pointer value base -/
   partial def ppPointerValueBase : PointerValueBase → String
-    | .null ty => s!"NULL({ppCtypeQuoted ty})"
+    | .null ty => s!"NULL({ppCtype ty})"
     | .function sym => s!"Cfunction({ppSym sym})"
     | .concrete _member addr => s!"0x{String.ofList (Nat.toDigits 16 addr)}"
 
@@ -373,7 +394,7 @@ mutual
     | .sym s => ppSym s
     | .impl c => ppImplConst c
     | .val v => ppValue v
-    | .undef _ ub => s!"undef<{ppUndefinedBehavior ub}>"
+    | .undef _ ub => s!"undef(<<{ppUndefinedBehavior ub}>>)"
     | .error msg e => s!"error(\"{msg}\", {ppPexpr ind e})"
     | .ctor c args =>
       match c with
@@ -385,7 +406,7 @@ mutual
         else s!"{ppCtor c}({joinWith ", " (args.map (ppPexpr ind))})"
     | .case_ scrut branches =>
       let branchesStr := branches.map fun (pat, e) =>
-        s!"\n{indent (ind + 1) ""}{ppAPattern pat} => {ppPexpr (ind + 1) e}"
+        s!"\n{indent (ind + 1) ""}| {ppAPattern pat} =>\n{indent (ind + 2) ""}{ppPexpr (ind + 2) e}"
       s!"case {ppPexpr ind scrut} of{joinWith "" branchesStr}\n{indent ind ""}end"
     | .arrayShift ptr ty idx =>
       s!"array_shift({ppPexpr ind ptr}, {ppCtypeQuoted ty}, {ppPexpr ind idx})"
@@ -395,10 +416,10 @@ mutual
     | .op op e1 e2 => s!"{ppPexpr ind e1} {ppBinop op} {ppPexpr ind e2}"
     | .struct_ tag members =>
       let membersStr := joinWith ", " (members.map fun (id, e) =>
-        s!".{ppIdentifier id}: {ppPexpr ind e}")
-      s!"(struct {ppSym tag}) \{ {membersStr} }"
+        s!".{ppIdentifier id}= {ppPexpr ind e}")
+      s!"(struct {ppSym tag})\{{membersStr}}"
     | .union_ tag member value =>
-      s!"(union {ppSym tag}) \{ .{ppIdentifier member}: {ppPexpr ind value} }"
+      s!"(union {ppSym tag})\{.{ppIdentifier member}= {ppPexpr ind value}}"
     | .cfunction e => s!"cfunction({ppPexpr ind e})"
     | .memberof tag member e =>
       s!"memberof({ppSym tag}, .{ppIdentifier member}, {ppPexpr ind e})"
@@ -412,12 +433,23 @@ mutual
     | .isInteger e => s!"is_integer({ppPexpr ind e})"
     | .isSigned e => s!"is_signed({ppPexpr ind e})"
     | .isUnsigned e => s!"is_unsigned({ppPexpr ind e})"
-    | .areCompatible e1 e2 => s!"are_compatible({ppPexpr ind e1}, {ppPexpr ind e2})"
-    | .convInt ty e => s!"conv_int({ppIntegerType ty}, {ppPexpr ind e})"
+    | .areCompatible e1 e2 => s!"are_compatible ({ppPexpr ind e1}, {ppPexpr ind e2})"
+    | .convInt ty e => s!"__conv_int__('{ppIntegerType ty}', {ppPexpr ind e})"
     | .wrapI ty op e1 e2 =>
-      s!"wrapI({ppIntegerType ty}, {ppIop op}, {ppPexpr ind e1}, {ppPexpr ind e2})"
+      let opSuffix := match op with
+        | .add => "_add"
+        | .sub => "_sub"
+        | .mul => "_mul"
+        | _ => s!"_{ppIop op}"
+      s!"wrapI{opSuffix}('{ppIntegerType ty}', {ppPexpr ind e1}, {ppPexpr ind e2})"
     | .catchExceptionalCondition ty op e1 e2 =>
-      s!"catch_exceptional_condition({ppIntegerType ty}, {ppIop op}, {ppPexpr ind e1}, {ppPexpr ind e2})"
+      let opSuffix := match op with
+        | .add => "_add"
+        | .sub => "_sub"
+        | .mul => "_mul"
+        | .div => "_div"
+        | _ => s!"_{ppIop op}"
+      s!"catch_exceptional_condition{opSuffix}('{ppIntegerType ty}', {ppPexpr ind e1}, {ppPexpr ind e2})"
     | .bmcAssume e => s!"bmc_assume({ppPexpr ind e})"
     | .pureMemop op args =>
       s!"{op}({joinWith ", " (args.map (ppPexpr ind))})"
@@ -468,10 +500,11 @@ partial def ppAction (ind : Indent) : Action → String
   | .compareExchangeWeak ty ptr expected desired successOrd failOrd =>
     s!"compare_exchange_weak({ppAPexpr ind ty}, {ppAPexpr ind ptr}, {ppAPexpr ind expected}, {ppAPexpr ind desired}, {ppMemoryOrder successOrd}, {ppMemoryOrder failOrd})"
   | .seqRmw isUpdate ty ptr sym val =>
+    -- Format: seq_rmw(ty, ptr, sym => val) - lambda-like syntax
     if isUpdate then
-      s!"seq_rmw_update({ppAPexpr ind ty}, {ppAPexpr ind ptr}, {ppSym sym}, {ppAPexpr ind val})"
+      s!"seq_rmw_with_forward({ppAPexpr ind ty}, {ppAPexpr ind ptr}, {ppSym sym} => {ppAPexpr ind val})"
     else
-      s!"seq_rmw({ppAPexpr ind ty}, {ppAPexpr ind ptr}, {ppSym sym}, {ppAPexpr ind val})"
+      s!"seq_rmw({ppAPexpr ind ty}, {ppAPexpr ind ptr}, {ppSym sym} => {ppAPexpr ind val})"
 
 /-! ## Effectful Expression Printing -/
 
@@ -483,26 +516,35 @@ def ppPolarity : Polarity → String
 mutual
   /-- Pretty-print effectful expression -/
   partial def ppExpr (ind : Indent) : Expr → String
-    | .pure e => s!"pure({ppAPexpr ind e})"
+    | .pure e =>
+      let inner := ppAPexpr (ind + 1) e
+      withGroupedArg "pure" inner ind
     | .memop op args =>
-      s!"{ppMemop op}({joinWith ", " (args.map (ppAPexpr ind))})"
+      s!"memop({ppMemop op}, {joinWith ", " (args.map (ppAPexpr ind))})"
     | .action pact =>
-      ppAction ind pact.action.action
+      let actionStr := ppAction ind pact.action.action
+      -- Apply polarity: Neg wraps with neg(...), Pos does nothing
+      match pact.polarity with
+      | .neg => s!"neg({actionStr})"
+      | .pos => actionStr
     | .case_ scrut branches =>
       let branchesStr := branches.map fun (pat, e) =>
-        s!"\n{indent (ind + 1) ""}{ppAPattern pat} =>\n{indent (ind + 2) ""}{ppExpr (ind + 2) e}"
+        s!"\n{indent (ind + 1) ""}| {ppAPattern pat} =>\n{indent (ind + 2) ""}{ppExpr (ind + 2) e}"
       s!"case {ppAPexpr ind scrut} of{joinWith "" branchesStr}\n{indent ind ""}end"
     | .let_ pat e1 e2 =>
       s!"let {ppAPattern pat} = {ppAPexpr ind e1} in\n{indent ind ""}{ppExpr ind e2}"
     | .if_ cond then_ else_ =>
       s!"if {ppAPexpr ind cond} then\n{indent (ind + 1) ""}{ppExpr (ind + 1) then_}\n{indent ind ""}else\n{indent (ind + 1) ""}{ppExpr (ind + 1) else_}"
     | .ccall funPtr funTy args =>
-      s!"ccall({ppAPexpr ind funPtr}, {ppAPexpr ind funTy}, {joinWith ", " (args.map (ppAPexpr ind))})"
+      -- Cerberus prints: ccall(ty, ptr, args...) as a single comma list
+      let allArgs := [ppAPexpr ind funTy, ppAPexpr ind funPtr] ++ args.map (ppAPexpr ind)
+      s!"ccall({joinWith ", " allArgs})"
     | .proc name args =>
       s!"pcall({ppName name}, {joinWith ", " (args.map (ppAPexpr ind))})"
     | .unseq es =>
-      let esStr := joinWith " ||| " (es.map (ppExpr ind))
-      s!"unseq({esStr})"
+      let innerExprs := es.map (ppExpr (ind + 1))
+      let inner := joinWith ", " innerExprs
+      withGroupedArg "unseq" inner ind
     | .wseq pat e1 e2 =>
       -- Cerberus: let weak pat = e1 in e2
       s!"let weak {ppAPattern pat} = {ppExpr ind e1} in\n{indent ind ""}{ppExpr ind e2}"
@@ -519,7 +561,7 @@ mutual
       let inner := ppExpr (ind + 1) e
       withGroupedArg "bound" inner ind
     | .nd es =>
-      let esStr := joinWith " || " (es.map (ppExpr ind))
+      let esStr := joinWith ", " (es.map (ppExpr ind))
       s!"nd({esStr})"
     | .save retSym retTy args body =>
       let argsStr := joinWith ", " (args.map fun (sym, ty, init) =>
@@ -566,12 +608,12 @@ def ppTagDef (sym : Sym) (tagDef : Loc × TagDef) : String :=
   match def_ with
   | .struct_ fields =>
     let fieldsStr := joinWith "\n  " (fields.map fun f =>
-      s!".{ppIdentifier f.name}: {ppCtypeQuoted f.ty}")
-    s!"def struct {ppSym sym} :\n  {fieldsStr}"
+      s!"{ppIdentifier f.name}: {ppCtypeQuoted f.ty}")
+    s!"def struct {ppSym sym} :=\n  {fieldsStr}"
   | .union_ fields =>
     let fieldsStr := joinWith "\n  " (fields.map fun f =>
-      s!".{ppIdentifier f.name}: {ppCtypeQuoted f.ty}")
-    s!"def union {ppSym sym} :\n  {fieldsStr}"
+      s!"{ppIdentifier f.name}: {ppCtypeQuoted f.ty}")
+    s!"def union {ppSym sym} :=\n  {fieldsStr}"
 
 /-! ## Global Definition Printing -/
 
@@ -589,17 +631,24 @@ def ppGlobDecl (sym : Sym) (decl : GlobDecl) : String :=
 def ppFile (file : File) : String :=
   let parts : List String := []
 
-  -- Tag definitions
-  let tagParts := file.tagDefs.toList.map fun (sym, def_) => ppTagDef sym def_
-  let parts := parts ++ tagParts
+  -- Tag definitions (structs/unions)
+  let hasAggregates := !file.tagDefs.isEmpty
+  let hasGlobs := !file.globs.isEmpty
+
+  let parts := if hasAggregates then
+    let tagParts := file.tagDefs.toList.map fun (sym, def_) => ppTagDef sym def_
+    parts ++ ["-- Aggregates"] ++ tagParts
+  else parts
 
   -- Global definitions
+  let globComment := if hasGlobs then ["-- Globals"] else []
   let globParts := file.globs.map fun (sym, decl) => ppGlobDecl sym decl
-  let parts := parts ++ globParts
+  let parts := parts ++ globComment ++ globParts
 
-  -- Functions
-  let funParts := file.funs.toList.map fun (sym, decl) => ppFunDecl sym decl
-  let parts := parts ++ funParts
+  -- Functions (funs is now a List, preserving order from JSON)
+  let funMapComment := if hasAggregates || hasGlobs then ["-- Fun map"] else []
+  let funParts := file.funs.map fun (sym, decl) => ppFunDecl sym decl
+  let parts := parts ++ funMapComment ++ funParts
 
   joinWith "\n\n" parts
 

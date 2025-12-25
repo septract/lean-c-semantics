@@ -17,29 +17,32 @@
 - [x] Define `Pexpr` (pure expressions)
 - [x] Define `Expr` (effectful expressions)
 - [x] Define `File` (program structure)
-- [ ] Add pretty-printer for round-trip validation
+- [x] Add pretty-printer for round-trip validation
 
 ### Phase 2: Core JSON Export & Parser
 - [x] Create `json_core.ml` in Cerberus for JSON serialization
 - [x] Add `--json_core_out` flag to Cerberus driver
-- [x] Implement JSON parser in Lean (**100% success rate on 1817 test files**)
-- [~] Write pretty-printer in Lean matching Cerberus format (in progress)
-- [ ] Validate: JSON parse → pretty-print == Cerberus pretty-print
+- [x] Add `--pp_core_compact` flag to Cerberus for compact output (easier diffing)
+- [x] Implement JSON parser in Lean (**100% success rate on 5500+ test files**)
+- [~] Write pretty-printer in Lean matching Cerberus format (~60% match rate)
+- [ ] Validate: JSON parse → pretty-print == Cerberus pretty-print (target: 90%+)
 
-#### Pretty-printer remaining work:
-1. ~~**Fill in JSON parser TODOs**~~ ✓ Complete - all TODOs in Parser.lean resolved:
-   - Fixed `OVfloating` with proper `FloatingValue` type (nan, posInf, negInf, unspecified)
-   - Fixed `OVpointer` to parse NULL, Cfunction, and concrete pointer strings
-   - Fixed `OVstruct` to parse member arrays
-   - Fixed `PEarray_shift` to parse ctype field
+#### Pretty-printer status:
+Current match rate: **60%** (48/80 files on first 100 CI tests)
 
-2. **Fix discrepancies in first 10 CI test files** (comparing Lean vs Cerberus output):
-   - `unseq` separator: Lean uses ` ||| `, Cerberus uses `, ` inside `unseq(...)`
-   - `0009-cond-pointer.c`: Cerberus outputs comments like `-- Aggregates --` we don't have
-   - Some whitespace/indentation differences (may need closer inspection)
-   - Current status: 3/10 passing (0001, 0004, 0006)
+Fixed issues:
+- [x] NULL type formatting (no quotes around type)
+- [x] memop formatting (`memop(PtrEq, ...)` not `PtrEq(...)`)
+- [x] Struct field syntax (`=` not `:` separator)
+- [x] Function pointer type printing (C declaration syntax)
+- [x] ccall trailing comma
+- [x] are_compatible spacing
+- [x] Tag definition format (`def struct NAME :=`)
+- [x] Object type format (`struct tag` not `struct(tag)`)
 
-3. **Run on larger test set** - validate pretty-printer on full CI suite (~100+ files)
+Remaining discrepancies to investigate:
+- Some files have `-- Aggregates` comment mismatch
+- Various minor formatting differences
 
 ### Phase 3: Memory Model Interface
 - [ ] Define `Memory` type class with core operations

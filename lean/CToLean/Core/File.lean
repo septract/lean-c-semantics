@@ -38,14 +38,14 @@ inductive FunDecl where
   | builtinDecl (loc : Loc) (retTy : BaseType) (paramTys : List BaseType)
   deriving Inhabited
 
-/-- Function map -/
-abbrev FunMap := Std.HashMap Sym FunDecl
+/-- Function map - using List to preserve definition order -/
+abbrev FunMap := List (Sym × FunDecl)
 
 /-! ## Implementation Definitions -/
 
 -- Hashable instances needed for HashMap keys
 
-instance : Hashable SignedIntKind where
+instance : Hashable IntBaseKind where
   hash
     | .ichar => 0
     | .short => 1
@@ -53,15 +53,10 @@ instance : Hashable SignedIntKind where
     | .long => 3
     | .longLong => 4
     | .intN n => mixHash 5 (hash n)
-
-instance : Hashable UnsignedIntKind where
-  hash
-    | .ichar => 0
-    | .short => 1
-    | .int_ => 2
-    | .long => 3
-    | .longLong => 4
-    | .intN n => mixHash 5 (hash n)
+    | .intLeastN n => mixHash 6 (hash n)
+    | .intFastN n => mixHash 7 (hash n)
+    | .intmax => 8
+    | .intptr => 9
 
 instance : Hashable IntegerType where
   hash
@@ -70,6 +65,11 @@ instance : Hashable IntegerType where
     | .signed k => mixHash 2 (hash k)
     | .unsigned k => mixHash 3 (hash k)
     | .enum s => mixHash 4 (hash s)
+    | .size_t => 5
+    | .wchar_t => 6
+    | .wint_t => 7
+    | .ptrdiff_t => 8
+    | .ptraddr_t => 9
 
 instance : Hashable FloatingType where
   hash
@@ -86,11 +86,13 @@ partial def Ctype.hash : Ctype → UInt64
   | .void => 0
   | .basic b => mixHash 1 (Hashable.hash b)
   | .array e _ => mixHash 2 (Ctype.hash e)
-  | .function r _ _ => mixHash 3 (Ctype.hash r)
-  | .pointer _ t => mixHash 4 (Ctype.hash t)
-  | .atomic t => mixHash 5 (Ctype.hash t)
-  | .struct_ s => mixHash 6 (Hashable.hash s)
-  | .union_ s => mixHash 7 (Hashable.hash s)
+  | .function _ r _ _ => mixHash 3 (Ctype.hash r)
+  | .functionNoParams _ r => mixHash 4 (Ctype.hash r)
+  | .pointer _ t => mixHash 5 (Ctype.hash t)
+  | .atomic t => mixHash 6 (Ctype.hash t)
+  | .struct_ s => mixHash 7 (Hashable.hash s)
+  | .union_ s => mixHash 8 (Hashable.hash s)
+  | .byte => 9
 
 instance : Hashable Ctype := ⟨Ctype.hash⟩
 
@@ -135,13 +137,13 @@ structure File where
   /-- Struct/union tag definitions -/
   tagDefs : TagDefs := {}
   /-- Standard library functions -/
-  stdlib : FunMap := {}
+  stdlib : FunMap := []
   /-- Implementation-defined constants -/
   impl : ImplDefs := {}
   /-- Global variables (in definition order) -/
   globs : List (Sym × GlobDecl) := []
-  /-- User-defined functions -/
-  funs : FunMap := {}
+  /-- User-defined functions (in definition order) -/
+  funs : FunMap := []
   /-- External symbol mapping -/
   extern : Std.HashMap Identifier (List Sym × LinkingKind) := {}
 
