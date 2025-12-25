@@ -5,9 +5,9 @@
 # Default target
 all: lean
 
-# Build Lean project
+# Build Lean project (library and test executables)
 lean:
-	cd lean && lake build
+	cd lean && lake build ctolean_testbatch
 
 # Build Cerberus (requires opam environment with lem)
 cerberus:

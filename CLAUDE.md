@@ -87,15 +87,26 @@ Focus on sequential Core initially:
 - `generic_file`: Complete Core program
 
 ### Running Cerberus
-```bash
-# Compile C to Core (pretty-printed)
-cerberus --pp-core-out=output.core input.c
 
-# Compile C to Core (JSON format for Lean parser)
-cerberus --json_core_out=output.json input.c
+The Cerberus executable is at `cerberus/_build/default/backend/driver/main.exe`.
+
+```bash
+CERBERUS=./cerberus/_build/default/backend/driver/main.exe
+
+# Pretty-print Core to stdout
+$CERBERUS --pp=core input.c
+
+# Pretty-print Core to file (requires --pp=core flag too)
+$CERBERUS --pp=core --pp_core_out=output.core input.c
+
+# Export Core as JSON (for Lean parser)
+$CERBERUS --json_core_out=output.json input.c
 
 # Execute C program
-cerberus --exec input.c
+$CERBERUS --exec input.c
+
+# Get help
+$CERBERUS --help
 ```
 
 ## Validation
@@ -117,17 +128,24 @@ Target: 90%+ agreement on sequential tests.
 
 ## Development Notes
 
-### Building Cerberus
+### Building
+
+Use the top-level Makefile:
 ```bash
-cd cerberus
-opam install . --deps-only
-dune build
+make lean       # Build Lean project
+make cerberus   # Build Cerberus (requires opam environment)
+make test       # Quick test (100 files)
+make test-full  # Full test suite (~5500 files)
+make clean      # Clean all build artifacts
 ```
 
-### Lean 4 Setup
+Or build individually:
 ```bash
-cd lean
-lake build
+# Cerberus - use 'make cerberus', NOT 'dune build' (avoids z3/coq deps)
+cd cerberus && make cerberus
+
+# Lean
+cd lean && lake build
 ```
 
 ## References

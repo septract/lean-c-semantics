@@ -13,26 +13,58 @@ These are abstract representations - actual memory values will be provided
 by the memory model implementation.
 -/
 
-/-- Integer value (arbitrary precision) -/
+/-- Provenance for pointers and integers (memory model tracking)
+    In Cerberus concrete memory model:
+    - none: no provenance (e.g., integer constants)
+    - some id: allocation ID this value came from
+    - symbolic iota: for PNVI-ae-udi model
+    - device: for memory-mapped I/O -/
+inductive Provenance where
+  | none
+  | some (allocId : Nat)
+  | symbolic (iota : Nat)
+  | device
+  deriving Repr, BEq, Inhabited
+
+/-- Integer value with provenance (arbitrary precision)
+    Provenance tracks which allocation the integer came from (for pointer-to-int casts) -/
 structure IntegerValue where
   val : Int
+  prov : Provenance := .none
   deriving Repr, BEq, Inhabited
 
-/-- Floating point value -/
-structure FloatingValue where
-  val : Float
+/-- Floating point value with proper handling of special cases -/
+inductive FloatingValue where
+  | finite (val : Float)
+  | nan
+  | posInf
+  | negInf
+  | unspecified
   deriving Repr, BEq, Inhabited
 
-/-- Pointer value (abstract - memory model provides concrete representation) -/
-inductive PointerValue where
+/-- Pointer value base - the actual pointer content -/
+inductive PointerValueBase where
   | null (ty : Ctype)
-  | ptr (addr : Nat) (allocId : Option Nat := none)  -- simplified for now
+  | function (sym : Sym)
+  | concrete (unionMember : Option Identifier) (addr : Nat)
   deriving Repr, BEq, Inhabited
 
-/-- Memory value (byte-level representation) -/
-structure MemValue where
-  bytes : List UInt8
+/-- Pointer value with provenance -/
+structure PointerValue where
+  prov : Provenance
+  base : PointerValueBase
   deriving Repr, BEq, Inhabited
+
+/-- Memory value - the actual representation of values in memory -/
+inductive MemValue where
+  | unspecified (ty : Ctype)
+  | integer (ity : IntegerType) (v : IntegerValue)
+  | floating (fty : FloatingType) (v : FloatingValue)
+  | pointer (ty : Ctype) (v : PointerValue)
+  | array (elems : List MemValue)
+  | struct_ (tag : Sym) (members : List (Identifier × Ctype × MemValue))
+  | union_ (tag : Sym) (member : Identifier) (value : MemValue)
+  deriving Repr, Inhabited
 
 /-! ## Object Values
 
