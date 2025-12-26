@@ -154,6 +154,9 @@ Target: 90%+ agreement on sequential tests.
 
 ## Development Notes
 
+### CRITICAL: Never Undo Changes Without Permission
+**NEVER revert, undo, or `git checkout` any changes without explicit user confirmation.** Even if you think a change caused a problem, ASK FIRST before reverting. The user may have made intentional changes you're not aware of.
+
 ### Shell Commands
 **IMPORTANT**: Do NOT use `sed`, `awk`, `tr`, or similar shell string manipulation tools for ad-hoc text processing. These commands are error-prone and often fail silently or produce unexpected results across different platforms.
 
