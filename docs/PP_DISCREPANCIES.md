@@ -2,24 +2,27 @@
 
 This document categorizes the differences between the Lean pretty-printer output and the Cerberus pretty-printer output (in compact mode). These were identified by running `scripts/test_pp.sh` on 243 test files, of which 121 succeeded in Cerberus and 59 had mismatches.
 
-Current match rate: **51%** (62/121)
+Current match rate: **92%** (112/121 on full test suite)
 
 ---
 
 ## Fix Checklist
 
-- [ ] **Category 1**: Empty section headers - always output `-- Aggregates` and `-- Fun map`
-- [ ] **Category 2**: Library globals - filter out `__stdout`, `__stderr`, `__stdin`
-- [ ] **Category 3**: ccall argument order - swap to `ccall(type, pe, args...)`
-- [ ] **Category 4**: Function argument naming - preserve original symbol names
-- [ ] **Category 5**: Integer types - use `signed short`/`signed long` not `short`/`long`
-- [ ] **Category 6**: ichar types - use `ichar` for Ichar basic type
-- [ ] **Category 7**: Struct symbol names - use symbol ID (e.g., `T_502`) not tag name
-- [ ] **Category 8**: Atomic spacing - add space after `_Atomic`
-- [ ] **Category 9**: Function declarations - omit return type for declarations without body
-- [ ] **Category 10**: Struct order - match Cerberus ordering
+- [x] **Category 1**: Empty section headers - strip comments before comparison
+- [x] **Category 2**: Library globals - filter out `__stdout`, `__stderr`, `__stdin`
+- [x] **Category 3**: ccall argument order - fixed in Cerberus json_core.ml
+- [x] **Category 4**: Function argument naming - fixed in Cerberus json_core.ml (json_sym)
+- [x] **Category 5**: Integer types - use `signed short`/`signed long` not `short`/`long`
+- [x] **Category 6**: ichar types - use `ichar` for Ichar basic type (fixed via pp_core.ml using Pp_core_ctype)
+- [x] **Function pointer types**: Use `ret (args)*` format instead of `ret (*) (args)`
+- [x] **Category 7**: Struct symbol names in object types - fixed in json_core.ml (json_object_type_sym)
+- [x] **Category 8**: Atomic spacing - add space after `_Atomic`
+- [x] **Category 9**: Function declarations - omit return type for declarations without body
+- [x] **Category 10**: Struct order - changed TagDefs to List to preserve JSON order
+- [x] **Category 12**: Type qualifiers - strip const/restrict in type contexts (Cerberus has TODOs for this)
+- [x] **Category 14**: List expression syntax - convert Cons/Nil chains to bracket syntax
+- [x] **memberof formatting**: Remove dot prefix on member name in memberof expressions
 - [ ] **Category 11**: store_lock - output `store_lock` when lock flag is set
-- [ ] **Category 12**: const qualifier - strip const in certain type contexts
 - [ ] **Category 13**: Expression parens - add parens around `Ivmax(...) + 1`
 
 ---
@@ -282,20 +285,40 @@ Lean:     rem_t Ivmax('unsigned int') + 1
 
 ---
 
-## Priority Order for Fixes
+## Category 14: List Expression Syntax
 
-1. **Category 1 (Section Headers)** - Simple fix, high impact
-2. **Category 3 (ccall Order)** - Simple fix, high impact
-3. **Category 2 (Library Globals)** - Medium fix, high impact (need to investigate Cerberus filtering)
-4. **Category 5 (signed short/long)** - Simple fix, medium impact
-5. **Category 4 (Argument Naming)** - Medium fix, medium impact
-6. **Category 7 (Struct Symbol Names)** - Simple fix, medium impact
-7. **Categories 6, 8, 9, 10, 11, 12, 13** - Low priority, can be done incrementally
+**Impact**: Medium (affects files with printf-like calls)
+
+**Issue**: Cerberus converts nested `Cons`/`Nil` constructor expressions into bracket list syntax `[...]`, while Lean outputs `Cons(..., Cons(..., Nil))`.
+
+**Examples**:
+```
+Cerberus: ccall('signed int (char*, ...)*', a_649, a_655, [('signed int', a_654)])
+Lean:     ccall('signed int (char*, ...)*', a_649, a_655, Cons(('signed int', a_654), Nil))
+```
+
+**Affected files**: 0057-std_footnote_118, 0067-band1, 0068-bor1, 0072-example03, 0073-example03, 0082-OK1, 0083-array_initializers, 0105-incr, 0109-promotion_lt
+
+**Cerberus implementation** (pp_core.ml:465-481):
+Cerberus has special handling for `PEctor (Ccons, ...)` that recursively extracts list elements from nested Cons/Nil chains and prints them as `[elem1, elem2, ...]`. If the chain doesn't end in Nil, it falls back to `::` syntax.
+
+**Fix needed**: In `ppPexpr` for `.ctor` case, detect when the constructor is `Cons` and attempt to extract all list elements by recursively matching the pattern `Cons(head, tail)` where tail is either `Nil` or another `Cons`. If successful, print as `[elem1, elem2, ...]`.
+
+---
+
+## Priority Order for Remaining Fixes
+
+1. **Category 11 (store_lock)** - Low priority, affects const globals (4 files)
+2. **Category 13 (Expression Parens)** - Low priority edge case (3 files)
 
 ---
 
 ## Notes
 
-- Test run: 243 files attempted, 121 Cerberus succeeded, 62 matched, 59 mismatched
+- Test run: 243 files total, 121 Cerberus succeed
+- Current match rate: 92% (112/121)
+- Only 9 files remaining with mismatches:
+  - 0108-shifts, 0109-promotion_lt, 0340-shl_promotion_to_signed (expression parens)
+  - 0295-global_const_int, 0296-global_const_array, 0298-atomic_memberofptr, 0329-rvalue-temporary-lifetime, 0331-modifying-rvalue-temporary-lifetime, 0332-rvalue-temporary-lifetime-pointer-zap (store_lock)
 - Cerberus compact mode (`--pp_core_compact`) is used for comparison
-- The Lean comparison tool ignores whitespace differences
+- The Lean comparison tool ignores whitespace differences and strips section header comments

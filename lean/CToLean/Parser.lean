@@ -1317,10 +1317,10 @@ def parseFile (j : Json) : Except String File := do
         .ok (some sym)
     | none => .ok none
 
-  -- Parse tag definitions
+  -- Parse tag definitions (preserve order from JSON)
   let tagDefsJ ← getArr j "tagDefs"
   let tagDefsList ← tagDefsJ.toList.mapM parseTagDef
-  let tagDefs : TagDefs := tagDefsList.foldl (fun m (s, l, d) => m.insert s (l, d)) {}
+  let tagDefs : TagDefs := tagDefsList.map fun (s, l, d) => (s, (l, d))
 
   -- Parse global declarations
   let globsJ ← getArr j "globs"

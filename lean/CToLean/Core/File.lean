@@ -22,8 +22,8 @@ inductive TagDef where
   | union_ (fields : List FieldDef)
   deriving Repr, Inhabited
 
-/-- Tag definitions map -/
-abbrev TagDefs := Std.HashMap Sym (Loc × TagDef)
+/-- Tag definitions - using List to preserve definition order -/
+abbrev TagDefs := List (Sym × (Loc × TagDef))
 
 /-! ## Function Definitions -/
 
