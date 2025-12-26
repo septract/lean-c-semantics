@@ -173,6 +173,18 @@ def ppBinop : Binop → String
   | .and => "/\\"
   | .or => "\\/"
 
+/-- Operator precedence (lower number = higher precedence, matching Cerberus pp_core.ml)
+    None means no parens needed (atoms, constructors, etc.)
+    Some n means binary op at precedence level n -/
+def binopPrecedence : Binop → Nat
+  | .exp => 1
+  | .mul | .div | .rem_t | .rem_f => 2
+  | .add | .sub => 3
+  | .lt | .le | .gt | .ge => 4
+  | .eq => 5
+  | .and => 6
+  | .or => 7
+
 /-- Pretty-print integer operation -/
 def ppIop : Iop → String
   | .add => "+"
@@ -418,9 +430,9 @@ mutual
         | _ =>
           -- Malformed Cons
           s!"{ppCtor c}({joinWith ", " (args.map (ppPexpr ind))})"
-      | .nil _ =>
-        -- Empty list
-        if args.isEmpty then "[]"
+      | .nil bTy =>
+        -- Empty list with type annotation: []: bTy (pp_core.ml:469)
+        if args.isEmpty then s!"[]: {ppBaseType bTy}"
         else s!"{ppCtor c}({joinWith ", " (args.map (ppPexpr ind))})"
       | _ =>
         if args.isEmpty then ppCtor c
@@ -434,7 +446,9 @@ mutual
     | .memberShift ptr tag member =>
       s!"member_shift({ppPexpr ind ptr}, {ppSym tag}, .{ppIdentifier member})"
     | .not_ e => s!"not({ppPexpr ind e})"
-    | .op op e1 e2 => s!"{ppPexpr ind e1} {ppBinop op} {ppPexpr ind e2}"
+    | .op op e1 e2 =>
+      -- Always wrap binary ops in parens (matches Cerberus compact mode)
+      s!"({ppPexpr ind e1} {ppBinop op} {ppPexpr ind e2})"
     | .struct_ tag members =>
       let membersStr := joinWith ", " (members.map fun (id, e) =>
         s!".{ppIdentifier id}= {ppPexpr ind e}")
@@ -472,9 +486,10 @@ mutual
         | .div => "_div"
         | _ => s!"_{ppIop op}"
       s!"catch_exceptional_condition{opSuffix}('{ppIntegerType ty}', {ppPexpr ind e1}, {ppPexpr ind e2})"
-    | .bmcAssume e => s!"bmc_assume({ppPexpr ind e})"
+    | .bmcAssume e => s!"__bmc_assume ({ppPexpr ind e})"  -- double underscore, space before paren
     | .pureMemop op args =>
-      s!"{op}({joinWith ", " (args.map (ppPexpr ind))})"
+      -- Cerberus uses memop(OpName, args...) format (pp_core.ml:501-502)
+      s!"memop({op}, {joinWith ", " (args.map (ppPexpr ind))})"
     | .constrained constraints =>
       let constraintsStr := joinWith ", " (constraints.map fun (name, e) =>
         s!"{name}: {ppPexpr ind e}")
@@ -503,11 +518,13 @@ partial def ppAction (ind : Indent) : Action → String
     s!"alloc({ppAPexpr ind align}, {ppAPexpr ind size})"
   | .kill kind ptr =>
     s!"kill({ppKillKind kind}, {ppAPexpr ind ptr})"
-  | .store _ ty ptr val order =>
+  | .store locking ty ptr val order =>
+    -- Cerberus uses store_lock for const globals (pp_core.ml:702)
+    let kw := if locking then "store_lock" else "store"
     if isNaOrder order then
-      s!"store({ppAPexpr ind ty}, {ppAPexpr ind ptr}, {ppAPexpr ind val})"
+      s!"{kw}({ppAPexpr ind ty}, {ppAPexpr ind ptr}, {ppAPexpr ind val})"
     else
-      s!"store({ppAPexpr ind ty}, {ppAPexpr ind ptr}, {ppAPexpr ind val}, {ppMemoryOrder order})"
+      s!"{kw}({ppAPexpr ind ty}, {ppAPexpr ind ptr}, {ppAPexpr ind val}, {ppMemoryOrder order})"
   | .load ty ptr order =>
     if isNaOrder order then
       s!"load({ppAPexpr ind ty}, {ppAPexpr ind ptr})"
@@ -593,8 +610,8 @@ mutual
     | .run label args =>
       s!"run {ppSym label}({joinWith ", " (args.map (ppAPexpr ind))})"
     | .par es =>
-      let esStr := joinWith " ||| " (es.map (ppExpr ind))
-      s!"par({esStr})"
+      -- Cerberus uses comma separator (with_grouped_args in cerb_pp_prelude.ml)
+      s!"par({joinWith ", " (es.map (ppExpr ind))})"
     | .wait tid =>
       s!"wait({tid})"
 
