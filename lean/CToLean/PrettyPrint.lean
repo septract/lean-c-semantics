@@ -47,12 +47,12 @@ def ppIdentifier (id : Identifier) : String := id.name
 
 /-- Pretty-print signed integer base kind -/
 def ppSignedIntKind : IntBaseKind → String
-  | .ichar => "signed char"
-  | .short => "short"
+  | .ichar => "signed ichar"
+  | .short => "signed short"
   | .int_ => "signed int"
-  | .long => "long"
-  | .longLong => "long long"
-  | .intN n => s!"signed _BitInt({n})"
+  | .long => "signed long"
+  | .longLong => "signed long_long"
+  | .intN n => s!"int{n}_t"
   | .intLeastN n => s!"int_least{n}_t"
   | .intFastN n => s!"int_fast{n}_t"
   | .intmax => "intmax_t"
@@ -60,12 +60,12 @@ def ppSignedIntKind : IntBaseKind → String
 
 /-- Pretty-print unsigned integer base kind -/
 def ppUnsignedIntKind : IntBaseKind → String
-  | .ichar => "unsigned char"
+  | .ichar => "unsigned ichar"
   | .short => "unsigned short"
   | .int_ => "unsigned int"
   | .long => "unsigned long"
-  | .longLong => "unsigned long long"
-  | .intN n => s!"unsigned _BitInt({n})"
+  | .longLong => "unsigned long_long"
+  | .intN n => s!"uint{n}_t"
   | .intLeastN n => s!"uint_least{n}_t"
   | .intFastN n => s!"uint_fast{n}_t"
   | .intmax => "uintmax_t"
@@ -536,7 +536,8 @@ mutual
     | .if_ cond then_ else_ =>
       s!"if {ppAPexpr ind cond} then\n{indent (ind + 1) ""}{ppExpr (ind + 1) then_}\n{indent ind ""}else\n{indent (ind + 1) ""}{ppExpr (ind + 1) else_}"
     | .ccall funPtr funTy args =>
-      -- Cerberus prints: ccall(ty, ptr, args...) as a single comma list
+      -- Cerberus prints: ccall(ty, ptr, args...) - type first, then pointer, then args
+      -- funPtr is parsed from JSON "function" field, funTy from "type" field
       let allArgs := [ppAPexpr ind funTy, ppAPexpr ind funPtr] ++ args.map (ppAPexpr ind)
       s!"ccall({joinWith ", " allArgs})"
     | .proc name args =>
@@ -627,22 +628,30 @@ def ppGlobDecl (sym : Sym) (decl : GlobDecl) : String :=
 
 /-! ## File Printing -/
 
+/-- Check if a symbol is a library-internal global that should be filtered out.
+    Cerberus doesn't print these in its output. -/
+def isLibraryGlobal (sym : Sym) : Bool :=
+  match sym.name with
+  | some name => name.startsWith "__std" || name.startsWith "__stderr" || name.startsWith "__stdin"
+  | none => false
+
 /-- Pretty-print a complete Core file -/
 def ppFile (file : File) : String :=
   let parts : List String := []
 
   -- Tag definitions (structs/unions)
   let hasAggregates := !file.tagDefs.isEmpty
-  let hasGlobs := !file.globs.isEmpty
 
   let parts := if hasAggregates then
     let tagParts := file.tagDefs.toList.map fun (sym, def_) => ppTagDef sym def_
     parts ++ ["-- Aggregates"] ++ tagParts
   else parts
 
-  -- Global definitions
+  -- Global definitions (filter out library globals like __stdout, __stderr, __stdin)
+  let filteredGlobs := file.globs.filter fun (sym, _) => !isLibraryGlobal sym
+  let hasGlobs := !filteredGlobs.isEmpty
   let globComment := if hasGlobs then ["-- Globals"] else []
-  let globParts := file.globs.map fun (sym, decl) => ppGlobDecl sym decl
+  let globParts := filteredGlobs.map fun (sym, decl) => ppGlobDecl sym decl
   let parts := parts ++ globComment ++ globParts
 
   -- Functions (funs is now a List, preserving order from JSON)
