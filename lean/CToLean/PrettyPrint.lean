@@ -111,21 +111,18 @@ partial def ppCtype : Ctype → String
     let sizeStr := match size with | some n => s!"{n}" | none => ""
     s!"{ppCtype elemTy}[{sizeStr}]"
   | .function _retQuals retTy params variadic =>
-    let paramsStr := joinWith ", " (params.map fun (q, t) =>
-      let qs := ppQualifiers q
-      if qs.isEmpty then ppCtype t else s!"{qs} {ppCtype t}")
+    -- pp_core_ctype.ml ignores qualifiers on function params (has TODO comment)
+    let paramsStr := joinWith ", " (params.map fun (_q, t) => ppCtype t)
     let varStr := if variadic then ", ..." else ""
     -- pp_core_ctype uses ^^^ which adds space before parens
     s!"{ppCtype retTy} ({paramsStr}{varStr})"
   | .functionNoParams _retQuals retTy =>
     s!"{ppCtype retTy} ()"
-  | .pointer quals pointeeTy =>
-    let qs := ppQualifiers quals
-    -- pp_core_ctype style: just append * to pointee type
+  | .pointer _quals pointeeTy =>
+    -- pp_core_ctype.ml ignores qualifiers on pointers (has TODO comment)
     -- Function pointers become: ret (args)* not ret (*) (args)
-    if qs.isEmpty then s!"{ppCtype pointeeTy}*"
-    else s!"{qs} {ppCtype pointeeTy}*"
-  | .atomic ty => s!"_Atomic({ppCtype ty})"
+    s!"{ppCtype pointeeTy}*"
+  | .atomic ty => s!"_Atomic ({ppCtype ty})"  -- space before paren (pp_core_ctype.ml uses ^^^)
   | .struct_ tag => s!"struct {ppSym tag}"
   | .union_ tag => s!"union {ppSym tag}"
   | .byte => "byte"
@@ -377,6 +374,20 @@ mutual
   partial def ppAPattern (p : APattern) : String := ppPattern p.pat
 end
 
+/-! ## List Expression Helpers -/
+
+/-- Try to extract list elements from a Cons/Nil chain.
+    Returns Some [e1, e2, ...] if successful, None otherwise.
+    This mirrors Cerberus pp_core.ml:465-481 which prints lists as [...] -/
+partial def tryExtractList (e : Pexpr) : Option (List Pexpr) :=
+  match e with
+  | .ctor (.nil _) [] => some []
+  | .ctor .cons [head, tail] =>
+    match tryExtractList tail with
+    | some rest => some (head :: rest)
+    | none => none
+  | _ => none
+
 /-! ## Expression Printing -/
 
 mutual
@@ -392,6 +403,25 @@ mutual
       | .tuple =>
         -- Tuples use (a, b) syntax, not Tuple(a, b)
         s!"({joinWith ", " (args.map (ppPexpr ind))})"
+      | .cons =>
+        -- Try to extract a proper list (Cons/Nil chain) and print as [...]
+        -- This mirrors Cerberus pp_core.ml:465-481
+        match args with
+        | [head, tail] =>
+          match tryExtractList tail with
+          | some rest =>
+            let allElems := head :: rest
+            s!"[{joinWith ", " (allElems.map (ppPexpr ind))}]"
+          | none =>
+            -- Fallback to :: syntax if not a proper list
+            s!"{ppPexpr ind head} :: {ppPexpr ind tail}"
+        | _ =>
+          -- Malformed Cons
+          s!"{ppCtor c}({joinWith ", " (args.map (ppPexpr ind))})"
+      | .nil _ =>
+        -- Empty list
+        if args.isEmpty then "[]"
+        else s!"{ppCtor c}({joinWith ", " (args.map (ppPexpr ind))})"
       | _ =>
         if args.isEmpty then ppCtor c
         else s!"{ppCtor c}({joinWith ", " (args.map (ppPexpr ind))})"
@@ -413,7 +443,8 @@ mutual
       s!"(union {ppSym tag})\{.{ppIdentifier member}= {ppPexpr ind value}}"
     | .cfunction e => s!"cfunction({ppPexpr ind e})"
     | .memberof tag member e =>
-      s!"memberof({ppSym tag}, .{ppIdentifier member}, {ppPexpr ind e})"
+      -- Cerberus uses pp_identifier without dot prefix
+      s!"memberof({ppSym tag}, {ppIdentifier member}, {ppPexpr ind e})"
     | .call name args =>
       s!"{ppName name}({joinWith ", " (args.map (ppPexpr ind))})"
     | .let_ pat e1 e2 =>
@@ -585,12 +616,14 @@ def ppFunDecl (sym : Sym) (decl : FunDecl) : String :=
     s!"fun {ppSym sym}{ppParams params}: {ppBaseType retTy} :=\n  {ppAPexpr 1 body}"
   | .proc _ retTy params body =>
     s!"proc {ppSym sym}{ppParams params}: eff {ppBaseType retTy} :=\n  {ppAExpr 1 body}"
-  | .procDecl _ retTy paramTys =>
+  | .procDecl _ _retTy paramTys =>
+    -- Cerberus omits return type for declarations without body (pp_core.ml:785)
     let paramsStr := joinWith ", " (paramTys.map ppBaseType)
-    s!"proc {ppSym sym} ({paramsStr}): eff {ppBaseType retTy}"
-  | .builtinDecl _ retTy paramTys =>
+    s!"proc {ppSym sym} ({paramsStr})"
+  | .builtinDecl _ _retTy paramTys =>
+    -- Cerberus omits return type for declarations without body (pp_core.ml:787)
     let paramsStr := joinWith ", " (paramTys.map ppBaseType)
-    s!"builtin {ppSym sym} ({paramsStr}): eff {ppBaseType retTy}"
+    s!"builtin {ppSym sym} ({paramsStr})"
 
 /-! ## Tag Definition Printing -/
 
@@ -634,7 +667,7 @@ def ppFile (file : File) : String :=
   let hasAggregates := !file.tagDefs.isEmpty
 
   let parts := if hasAggregates then
-    let tagParts := file.tagDefs.toList.map fun (sym, def_) => ppTagDef sym def_
+    let tagParts := file.tagDefs.map fun (sym, def_) => ppTagDef sym def_
     parts ++ ["-- Aggregates"] ++ tagParts
   else parts
 
