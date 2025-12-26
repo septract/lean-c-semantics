@@ -115,25 +115,16 @@ partial def ppCtype : Ctype → String
       let qs := ppQualifiers q
       if qs.isEmpty then ppCtype t else s!"{qs} {ppCtype t}")
     let varStr := if variadic then ", ..." else ""
-    s!"{ppCtype retTy}({paramsStr}{varStr})"
+    -- pp_core_ctype uses ^^^ which adds space before parens
+    s!"{ppCtype retTy} ({paramsStr}{varStr})"
   | .functionNoParams _retQuals retTy =>
-    s!"{ppCtype retTy}()"
+    s!"{ppCtype retTy} ()"
   | .pointer quals pointeeTy =>
     let qs := ppQualifiers quals
-    -- Special case: pointer to function uses C declaration syntax
-    match pointeeTy with
-    | .function _retQuals retTy params variadic =>
-      let paramsStr := if params.isEmpty then "void"
-        else joinWith ", " (params.map fun (q, t) =>
-          let qstr := ppQualifiers q
-          if qstr.isEmpty then ppCtype t else s!"{qstr} {ppCtype t}")
-      let varStr := if variadic then ", ..." else ""
-      s!"{ppCtype retTy} (*) ({paramsStr}{varStr})"
-    | .functionNoParams _retQuals retTy =>
-      s!"{ppCtype retTy} (*) ()"
-    | _ =>
-      if qs.isEmpty then s!"{ppCtype pointeeTy}*"
-      else s!"{qs} {ppCtype pointeeTy}*"
+    -- pp_core_ctype style: just append * to pointee type
+    -- Function pointers become: ret (args)* not ret (*) (args)
+    if qs.isEmpty then s!"{ppCtype pointeeTy}*"
+    else s!"{qs} {ppCtype pointeeTy}*"
   | .atomic ty => s!"_Atomic({ppCtype ty})"
   | .struct_ tag => s!"struct {ppSym tag}"
   | .union_ tag => s!"union {ppSym tag}"
