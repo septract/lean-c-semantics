@@ -648,8 +648,15 @@ def ppFunDecl (sym : Sym) (decl : FunDecl) : String :=
 def ppTagDef (sym : Sym) (tagDef : Loc × TagDef) : String :=
   let (_, def_) := tagDef
   match def_ with
-  | .struct_ fields =>
-    let fieldsStr := joinWith "\n  " (fields.map fun f =>
+  | .struct_ fields flexOpt =>
+    -- For flexible array member, wrap element type in array[] (Cerberus pp_core.ml:770)
+    let flexFields := match flexOpt with
+      | some flex =>
+        let arrayTy := Ctype.array flex.ty none  -- elem_ty[] with no size
+        [{ name := flex.name, ty := arrayTy : FieldDef }]
+      | none => []
+    let allFields := fields ++ flexFields
+    let fieldsStr := joinWith "\n  " (allFields.map fun f =>
       s!"{ppIdentifier f.name}: {ppCtypeQuoted f.ty}")
     s!"def struct {ppSym sym} :=\n  {fieldsStr}"
   | .union_ fields =>
