@@ -4,7 +4,7 @@ This document categorizes the differences between the Lean pretty-printer output
 
 Current match rate:
 - **CI tests**: 100% (121/121)
-- **Full test suite (5501 files)**: 88% (1610/1817)
+- **Full test suite (5501 files)**: 89% (1621/1817)
 
 ---
 
@@ -30,7 +30,14 @@ Current match rate:
 - [x] **__bmc_assume**: Use double underscore and space before paren
 - [x] **pureMemop format**: Use `memop(OpName, args...)` not `OpName(args...)`
 - [x] **par separator**: Use comma separator not `|||`
-- [ ] **Category 15**: Library globals from include files (optarg, etc.) - see Notes
+- [x] **Category 15**: Library globals from include files - fixed by filtering GlobalDecl in JSON
+- [x] **Category 16**: Floating point formatting - Cerberus now uses fixed precision in compact mode
+- [x] **Category 17**: Implementation-defined brackets - wrap impl constants in `<...>`
+- [x] **Category 18**: `long_double` type formatting - use underscore
+- [x] **Category 19**: `Cfvfromint`/`Civfromfloat` naming - use C prefix
+- [x] **Category 20**: NULL type preservation - parse ichar/long_long with underscore
+- [x] **Enum JSON serialization bug** - fixed `enum_tag` field name collision
+- [ ] **Category 21**: Flexible array members in structs - 1 file (low priority)
 
 ---
 
@@ -315,34 +322,132 @@ Cerberus has special handling for `PEctor (Ccons, ...)` that recursively extract
 
 ## Remaining Issues (Full Test Suite)
 
-### Category 15: Library Globals Filtering
+177 files still have mismatches. Analysis of failure categories:
 
-**Impact**: Medium (affects ~188 files on full 5501-file test suite)
+### Category 16: Floating Point Formatting
 
-**Issue**: Cerberus filters out certain library globals from `#include` headers (like `optarg`, `optind`, `opterr`, `optopt` from `<getopt.h>`), but Lean outputs them. This causes ordering differences since these globals appear at the start of the Lean output but are absent from Cerberus output.
+**Impact**: 74 files
+
+**Issue**: Lean outputs full precision (`0.000000`), Cerberus uses compact format (`0.`).
 
 **Examples**:
 ```
-Cerberus: glob buf: pointer [ail_ctype = 'char[512]'] := ...
-Lean:     glob optarg: pointer [ail_ctype = 'char*']
-          glob optind: pointer [ail_ctype = 'signed int']
-          glob opterr: pointer [ail_ctype = 'signed int']
-          glob optopt: pointer [ail_ctype = 'signed int']
-          glob buf: pointer [ail_ctype = 'char[512]'] := ...
+Cerberus: pure(Specified(0.))
+Lean:     pure(Specified(0.000000))
+
+Cerberus: pure(Specified(17.))
+Lean:     pure(Specified(17.000000))
 ```
 
-**Affected files**: Files using standard library headers like `<getopt.h>`, `<stdio.h>`, etc.
+**Test files**: 20000731-1, va-arg-7, 20031003-1, 20001017-1, and many others
 
-**Status**: Not fixed. These are edge cases in the broader test suite. The filtering logic in Cerberus appears to be based on whether globals come from include files (controlled by `show_include` flag in pp_core.ml CONFIG).
+**Fix needed**: Match Cerberus float formatting (strip trailing zeros, use `n.` for integers).
 
-**Workaround**: Current `isLibraryGlobal` function only filters `__stdout`, `__stderr`, `__stdin`. A more complete fix would require tracking which globals come from include files in the JSON export.
+---
+
+### Category 17: Implementation-Defined Behavior Brackets
+
+**Impact**: 59 files
+
+**Issue**: Cerberus wraps implementation-defined behavior names in angle brackets, Lean doesn't.
+
+**Examples**:
+```
+Cerberus: <SHR_signed_negative>('signed long', ...)
+Lean:     SHR_signed_negative('signed long', ...)
+
+Cerberus: <Cfvfromint>(a_1290)
+Lean:     Cfvfromint(a_1290)
+```
+
+**Test files**: 920501-9, 920618-1, 920710-1, and others with shift/conversion operations
+
+**Fix needed**: Wrap implementation-defined names in angle brackets `<...>`.
+
+---
+
+### Category 18: long_double Type Formatting
+
+**Impact**: 9 files
+
+**Issue**: Cerberus uses `long_double` (underscore), Lean uses `long double` (space).
+
+**Examples**:
+```
+Cerberus: Ivalignof('long_double')
+Lean:     Ivalignof('long double')
+```
+
+**Test files**: 20040208-1, 20051110-1, 20051110-2, and others using `long double`
+
+**Fix needed**: Use underscore in `long_double` type name.
+
+---
+
+### Category 19: Fvfromint vs Cfvfromint
+
+**Impact**: ~8 files
+
+**Issue**: Different naming for float-from-int conversion.
+
+**Examples**:
+```
+Cerberus: Cfvfromint(a_1290)
+Lean:     Fvfromint(a_1290)
+```
+
+**Test files**: 20010118-1, 20080529-1, 930702-1, 990117-1, cvt-1, pr42691
+
+**Fix needed**: Check JSON field naming for this operation.
+
+---
+
+### Category 20: NULL Type Preservation
+
+**Impact**: ~15 files
+
+**Issue**: Lean uses `NULL(void*)` while Cerberus preserves the actual pointer type.
+
+**Examples**:
+```
+Cerberus: NULL(signed ichar*)
+Lean:     NULL(void*)
+
+Cerberus: NULL(double (double)*)
+Lean:     NULL(void*)
+```
+
+**Test files**: 20020118-1, 20021024-1, 20120808-1, func-ptr-1, pr36038, pr42614, pr44555
+
+**Fix needed**: Preserve the actual type in NULL values instead of normalizing to `void*`.
+
+---
+
+### Category 21: Flexible Array Members
+
+**Impact**: 1 file
+
+**Issue**: Flexible array member (`char[]`) not being printed in struct definition.
+
+**Examples**:
+```
+Cerberus: def struct bar := data: 'char*' mem: 'char[]'
+Lean:     def struct bar := data: 'char*'
+```
+
+**Test files**: 80_flexarray
+
+**Fix needed**: Handle flexible array members in struct JSON/printing.
 
 ---
 
 ## Notes
 
 - CI tests (243 files): **100% match rate** (121/121 Cerberus successes)
-- Full test suite (5501 files): **88% match rate** (1610/1817 Cerberus successes)
-- Remaining 188 mismatches are primarily due to library globals filtering (Category 15)
+- Full test suite (5501 files): **89% match rate** (1621/1817 Cerberus successes)
+- Remaining 177 mismatches breakdown:
+  - Floating point formatting: 74 files
+  - Impl-defined brackets: 59 files
+  - Misc (types, NULL, etc.): 44 files
 - Cerberus compact mode (`--pp_core_compact`) is used for comparison
 - The Lean comparison tool ignores whitespace differences and strips section header comments

@@ -88,7 +88,7 @@ def ppIntegerType : IntegerType → String
 def ppFloatingType : FloatingType → String
   | .float => "float"
   | .double => "double"
-  | .longDouble => "long double"
+  | .longDouble => "long_double"
 
 /-- Pretty-print basic type -/
 def ppBasicType : BasicType → String
@@ -230,8 +230,8 @@ def ppCtor : Ctor → String
   | .ivXOR => "IvXOR"
   | .specified => "Specified"
   | .unspecified => "Unspecified"
-  | .fvfromint => "Fvfromint"
-  | .ivfromfloat => "Ivfromfloat"
+  | .fvfromint => "Cfvfromint"
+  | .ivfromfloat => "Civfromfloat"
 
 /-! ## Implementation Constant Printing -/
 
@@ -241,7 +241,7 @@ def ppImplConst : ImplConst → String
   | .intMin ty => s!"Ivmin({ppIntegerType ty})"
   | .sizeof_ ty => s!"Ivsizeof({ppCtypeQuoted ty})"
   | .alignof_ ty => s!"Ivalignof({ppCtypeQuoted ty})"
-  | .other name => name
+  | .other name => s!"<{name}>"  -- Cerberus wraps impl constants in angle brackets
 
 /-! ## Name Printing -/
 
@@ -669,13 +669,6 @@ def ppGlobDecl (sym : Sym) (decl : GlobDecl) : String :=
 
 /-! ## File Printing -/
 
-/-- Check if a symbol is a library-internal global that should be filtered out.
-    Cerberus doesn't print these in its output. -/
-def isLibraryGlobal (sym : Sym) : Bool :=
-  match sym.name with
-  | some name => name.startsWith "__std" || name.startsWith "__stderr" || name.startsWith "__stdin"
-  | none => false
-
 /-- Pretty-print a complete Core file -/
 def ppFile (file : File) : String :=
   let parts : List String := []
@@ -688,11 +681,12 @@ def ppFile (file : File) : String :=
     parts ++ ["-- Aggregates"] ++ tagParts
   else parts
 
-  -- Global definitions (filter out library globals like __stdout, __stderr, __stdin)
-  let filteredGlobs := file.globs.filter fun (sym, _) => !isLibraryGlobal sym
-  let hasGlobs := !filteredGlobs.isEmpty
+  -- Global definitions
+  -- Note: JSON export (json_core.ml) now filters out GlobalDecl (like pp_globs does),
+  -- so we only get GlobalDef entries and don't need to filter library globals here
+  let hasGlobs := !file.globs.isEmpty
   let globComment := if hasGlobs then ["-- Globals"] else []
-  let globParts := filteredGlobs.map fun (sym, decl) => ppGlobDecl sym decl
+  let globParts := file.globs.map fun (sym, decl) => ppGlobDecl sym decl
   let parts := parts ++ globComment ++ globParts
 
   -- Functions (funs is now a List, preserving order from JSON)
