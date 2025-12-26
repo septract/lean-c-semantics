@@ -18,7 +18,7 @@ structure FieldDef where
 
 /-- Tag definition (struct or union layout) -/
 inductive TagDef where
-  | struct_ (fields : List FieldDef)
+  | struct_ (fields : List FieldDef) (flexibleArray : Option FieldDef := none)
   | union_ (fields : List FieldDef)
   deriving Repr, Inhabited
 

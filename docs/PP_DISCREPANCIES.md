@@ -37,7 +37,7 @@ Current match rate:
 - [x] **Category 19**: `Cfvfromint`/`Civfromfloat` naming - use C prefix
 - [x] **Category 20**: NULL type preservation - parse ichar/long_long with underscore
 - [x] **Enum JSON serialization bug** - fixed `enum_tag` field name collision
-- [ ] **Category 21**: Flexible array members in structs - 1 file (low priority)
+- [x] **Category 21**: Flexible array members in structs - wrap element type in array[]
 
 ---
 

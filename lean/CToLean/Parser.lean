@@ -1229,7 +1229,18 @@ def parseTagDef (j : Json) : Except String (Sym × Loc × TagDef) := do
       let (_, ctypeJ) ← getTaggedFieldMulti f "ctype" ctypeTags
       let cty ← parseCtype ctypeJ
       .ok { name := n, ty := cty : FieldDef }
-    .ok (TagDef.struct_ fs)
+    -- Parse optional flexible array member
+    let flexOpt ← match getFieldOpt defJ "flexible_array" with
+      | some flexJ =>
+        if flexJ.isNull then .ok none
+        else do
+          let name ← getField flexJ "name"
+          let n ← parseIdentifier name
+          let (_, ctypeJ) ← getTaggedFieldMulti flexJ "ctype" ctypeTags
+          let cty ← parseCtype ctypeJ
+          .ok (some { name := n, ty := cty : FieldDef })
+      | none => .ok none
+    .ok (TagDef.struct_ fs flexOpt)
   | "UnionDef" =>
     let fields ← getArr defJ "fields"
     let fs ← fields.toList.mapM fun f => do
