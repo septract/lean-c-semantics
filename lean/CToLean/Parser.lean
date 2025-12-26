@@ -416,6 +416,16 @@ partial def parseCtypeStr (s : String) : Except String Ctype := do
     let inner := s.dropRight 1 |>.trim
     let innerTy ← parseCtypeStr inner
     return .pointer {} innerTy
+  -- Handle atomic types: _Atomic (T) or _Atomic(T)
+  else if s.startsWith "_Atomic " || s.startsWith "_Atomic(" then
+    let inner := if s.startsWith "_Atomic (" then
+      -- _Atomic (T) - strip "_Atomic (" and ")"
+      (s.drop 9).dropRight 1 |>.trim
+    else
+      -- _Atomic(T) - strip "_Atomic(" and ")"
+      (s.drop 8).dropRight 1 |>.trim
+    let innerTy ← parseCtypeStr inner
+    return .atomic innerTy
   -- Handle struct/union types
   else if s.startsWith "struct " then
     let tag := s.drop 7

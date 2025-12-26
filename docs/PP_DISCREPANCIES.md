@@ -2,7 +2,9 @@
 
 This document categorizes the differences between the Lean pretty-printer output and the Cerberus pretty-printer output (in compact mode). These were identified by running `scripts/test_pp.sh` on 243 test files, of which 121 succeeded in Cerberus and 59 had mismatches.
 
-Current match rate: **92%** (112/121 on full test suite)
+Current match rate:
+- **CI tests**: 100% (121/121)
+- **Full test suite (5501 files)**: 88% (1610/1817)
 
 ---
 
@@ -19,11 +21,16 @@ Current match rate: **92%** (112/121 on full test suite)
 - [x] **Category 8**: Atomic spacing - add space after `_Atomic`
 - [x] **Category 9**: Function declarations - omit return type for declarations without body
 - [x] **Category 10**: Struct order - changed TagDefs to List to preserve JSON order
+- [x] **Category 11**: store_lock - output `store_lock` when lock flag is set
 - [x] **Category 12**: Type qualifiers - strip const/restrict in type contexts (Cerberus has TODOs for this)
+- [x] **Category 13**: Expression parens - always wrap binops in parens (compact mode)
 - [x] **Category 14**: List expression syntax - convert Cons/Nil chains to bracket syntax
 - [x] **memberof formatting**: Remove dot prefix on member name in memberof expressions
-- [ ] **Category 11**: store_lock - output `store_lock` when lock flag is set
-- [ ] **Category 13**: Expression parens - add parens around `Ivmax(...) + 1`
+- [x] **Empty list type annotation**: Print `[]: bTy` instead of `[]`
+- [x] **__bmc_assume**: Use double underscore and space before paren
+- [x] **pureMemop format**: Use `memop(OpName, args...)` not `OpName(args...)`
+- [x] **par separator**: Use comma separator not `|||`
+- [ ] **Category 15**: Library globals from include files (optarg, etc.) - see Notes
 
 ---
 
@@ -306,19 +313,36 @@ Cerberus has special handling for `PEctor (Ccons, ...)` that recursively extract
 
 ---
 
-## Priority Order for Remaining Fixes
+## Remaining Issues (Full Test Suite)
 
-1. **Category 11 (store_lock)** - Low priority, affects const globals (4 files)
-2. **Category 13 (Expression Parens)** - Low priority edge case (3 files)
+### Category 15: Library Globals Filtering
+
+**Impact**: Medium (affects ~188 files on full 5501-file test suite)
+
+**Issue**: Cerberus filters out certain library globals from `#include` headers (like `optarg`, `optind`, `opterr`, `optopt` from `<getopt.h>`), but Lean outputs them. This causes ordering differences since these globals appear at the start of the Lean output but are absent from Cerberus output.
+
+**Examples**:
+```
+Cerberus: glob buf: pointer [ail_ctype = 'char[512]'] := ...
+Lean:     glob optarg: pointer [ail_ctype = 'char*']
+          glob optind: pointer [ail_ctype = 'signed int']
+          glob opterr: pointer [ail_ctype = 'signed int']
+          glob optopt: pointer [ail_ctype = 'signed int']
+          glob buf: pointer [ail_ctype = 'char[512]'] := ...
+```
+
+**Affected files**: Files using standard library headers like `<getopt.h>`, `<stdio.h>`, etc.
+
+**Status**: Not fixed. These are edge cases in the broader test suite. The filtering logic in Cerberus appears to be based on whether globals come from include files (controlled by `show_include` flag in pp_core.ml CONFIG).
+
+**Workaround**: Current `isLibraryGlobal` function only filters `__stdout`, `__stderr`, `__stdin`. A more complete fix would require tracking which globals come from include files in the JSON export.
 
 ---
 
 ## Notes
 
-- Test run: 243 files total, 121 Cerberus succeed
-- Current match rate: 92% (112/121)
-- Only 9 files remaining with mismatches:
-  - 0108-shifts, 0109-promotion_lt, 0340-shl_promotion_to_signed (expression parens)
-  - 0295-global_const_int, 0296-global_const_array, 0298-atomic_memberofptr, 0329-rvalue-temporary-lifetime, 0331-modifying-rvalue-temporary-lifetime, 0332-rvalue-temporary-lifetime-pointer-zap (store_lock)
+- CI tests (243 files): **100% match rate** (121/121 Cerberus successes)
+- Full test suite (5501 files): **88% match rate** (1610/1817 Cerberus successes)
+- Remaining 188 mismatches are primarily due to library globals filtering (Category 15)
 - Cerberus compact mode (`--pp_core_compact`) is used for comparison
 - The Lean comparison tool ignores whitespace differences and strips section header comments
