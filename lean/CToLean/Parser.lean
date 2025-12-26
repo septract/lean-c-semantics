@@ -301,7 +301,7 @@ def parseIntegerTypeStruct (j : Json) : Except String IntegerType := do
     let k ← parseIntBaseKind kind
     .ok (.unsigned k)
   | "Enum" =>
-    let tagSym ← getField j "tag"
+    let tagSym ← getField j "enum_tag"
     let sym ← parseSym tagSym
     .ok (.enum sym)
   | "Size_t" => .ok .size_t
@@ -398,19 +398,19 @@ partial def parseCtypeStr (s : String) : Except String Ctype := do
   if s == "void" then return .void
   else if s == "char" then return .basic (.integer .char)
   else if s == "_Bool" then return .basic (.integer .bool)
-  else if s == "signed char" then return .basic (.integer (.signed .ichar))
-  else if s == "unsigned char" then return .basic (.integer (.unsigned .ichar))
+  else if s == "signed char" || s == "signed ichar" then return .basic (.integer (.signed .ichar))
+  else if s == "unsigned char" || s == "unsigned ichar" then return .basic (.integer (.unsigned .ichar))
   else if s == "short" || s == "signed short" then return .basic (.integer (.signed .short))
   else if s == "unsigned short" then return .basic (.integer (.unsigned .short))
   else if s == "int" || s == "signed int" then return .basic (.integer (.signed .int_))
   else if s == "unsigned int" then return .basic (.integer (.unsigned .int_))
   else if s == "long" || s == "signed long" then return .basic (.integer (.signed .long))
   else if s == "unsigned long" then return .basic (.integer (.unsigned .long))
-  else if s == "long long" || s == "signed long long" then return .basic (.integer (.signed .longLong))
-  else if s == "unsigned long long" then return .basic (.integer (.unsigned .longLong))
+  else if s == "long long" || s == "signed long long" || s == "signed long_long" then return .basic (.integer (.signed .longLong))
+  else if s == "unsigned long long" || s == "unsigned long_long" then return .basic (.integer (.unsigned .longLong))
   else if s == "float" then return .basic (.floating .float)
   else if s == "double" then return .basic (.floating .double)
-  else if s == "long double" then return .basic (.floating .longDouble)
+  else if s == "long double" || s == "long_double" then return .basic (.floating .longDouble)
   -- Handle pointer types
   else if s.endsWith "*" then
     let inner := s.dropRight 1 |>.trim
