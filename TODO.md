@@ -28,7 +28,7 @@
 - [ ] Validate: JSON parse → pretty-print == Cerberus pretty-print (target: 90%+)
 
 #### Pretty-printer status:
-Current match rate: **60%** (48/80 files on first 100 CI tests)
+Current match rate: **51%** (62/121 files on CI tests)
 
 Fixed issues:
 - [x] NULL type formatting (no quotes around type)
@@ -40,9 +40,7 @@ Fixed issues:
 - [x] Tag definition format (`def struct NAME :=`)
 - [x] Object type format (`struct tag` not `struct(tag)`)
 
-Remaining discrepancies to investigate:
-- Some files have `-- Aggregates` comment mismatch
-- Various minor formatting differences
+Remaining discrepancies: See `docs/PP_DISCREPANCIES.md` for full categorization and checklist.
 
 ### Phase 3: Memory Model Interface
 - [ ] Define `Memory` type class with core operations

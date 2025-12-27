@@ -141,7 +141,27 @@ Compares Lean pretty-printer output against Cerberus pretty-printer output.
 ```
 The script generates JSON from Cerberus, runs the Lean pretty-printer, compares with Cerberus compact output, and reports match rate. Output files are saved to a temp directory for investigation.
 
-Current status: ~60% match rate (improving as we fix formatting discrepancies).
+Current status:
+- **CI tests**: 100% match rate (121/121 files)
+- **Full test suite (5501 files)**: 99% match rate (1809/1817 files)
+
+See `docs/PP_DISCREPANCIES.md` for remaining issues (NULL type parsing for complex types - deferred pending Cerberus-side fix).
+
+**Investigating Pretty-Printer Mismatches**:
+The test script outputs files to a temp directory. To investigate a specific mismatch:
+```bash
+# Run tests and note the output directory
+./scripts/test_pp.sh --max 250
+
+# Use the Lean comparison tool directly (normalizes whitespace, strips section comments)
+./lean/.lake/build/bin/ctolean_pp /path/to/OUTPUT_DIR/filename.json --compare /path/to/OUTPUT_DIR/filename.cerberus.core
+
+# Example output showing the first difference:
+# First difference at position 458:
+#   Lean:     'store('signed int', a_530,'
+#   Cerberus: 'store_lock('signed int', a'
+```
+Do NOT use `diff` directly - it doesn't normalize whitespace. Always use the `--compare` flag with the Lean tool.
 
 ### Differential Testing (Future)
 Compare Lean interpreter output against Cerberus:
@@ -153,6 +173,9 @@ Compare Lean interpreter output against Cerberus:
 Target: 90%+ agreement on sequential tests.
 
 ## Development Notes
+
+### CRITICAL: Never Undo Changes Without Permission
+**NEVER revert, undo, or `git checkout` any changes without explicit user confirmation.** Even if you think a change caused a problem, ASK FIRST before reverting. The user may have made intentional changes you're not aware of.
 
 ### Shell Commands
 **IMPORTANT**: Do NOT use `sed`, `awk`, `tr`, or similar shell string manipulation tools for ad-hoc text processing. These commands are error-prone and often fail silently or produce unexpected results across different platforms.
