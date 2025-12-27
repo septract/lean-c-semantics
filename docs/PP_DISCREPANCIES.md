@@ -4,7 +4,7 @@ This document categorizes the differences between the Lean pretty-printer output
 
 Current match rate:
 - **CI tests**: 100% (121/121)
-- **Full test suite (5501 files)**: 89% (1621/1817)
+- **Full test suite (5501 files)**: 99% (1809/1817)
 
 ---
 
@@ -38,6 +38,44 @@ Current match rate:
 - [x] **Category 20**: NULL type preservation - parse ichar/long_long with underscore
 - [x] **Enum JSON serialization bug** - fixed `enum_tag` field name collision
 - [x] **Category 21**: Flexible array members in structs - wrap element type in array[]
+- [ ] **Category 22**: NULL type parsing - complex types in `parseCtypeStr` (7 files) - deferred, needs Cerberus-side fix
+- [x] **Category 23**: Infinity formatting - `Infinity` vs `inf` (1 file)
+
+---
+
+## Remaining Issues (8 files)
+
+### Category 22: NULL Type Parsing - Complex Types
+
+**Impact**: 7 files
+
+**Issue**: `parseCtypeStr` (used to parse pointer value strings like `NULL(T)`) doesn't handle complex types: `ptrdiff_t`, function types `ret (args)`, enum types `enum X`, array types `T[N]`.
+
+**Examples**:
+```
+Cerberus: NULL(ptrdiff_t*)
+Lean:     NULL(void*)
+
+Cerberus: NULL(double (double)*)
+Lean:     NULL(void*)
+
+Cerberus: NULL(enum e*)
+Lean:     NULL(void*)
+
+Cerberus: NULL(char[100]*)
+Lean:     NULL(void*)
+
+Cerberus: NULL(void (signed int)*)
+Lean:     NULL(void*)
+```
+
+**Test files**: 930930-1, func-ptr-1, enum-3 (x2), pr44555 (x2), pr54937, declarator_visibility
+
+**Fix needed**: Extend `parseCtypeStr` to handle:
+- `ptrdiff_t`, `size_t`, `wchar_t`, `wint_t`, `ptraddr_t`
+- Function types: `ret (args)` or `ret (args, ...)`
+- Enum types: `enum X`
+- Array types: `T[N]` or `T[]`
 
 ---
 
@@ -444,10 +482,8 @@ Lean:     def struct bar := data: 'char*'
 ## Notes
 
 - CI tests (243 files): **100% match rate** (121/121 Cerberus successes)
-- Full test suite (5501 files): **89% match rate** (1621/1817 Cerberus successes)
-- Remaining 177 mismatches breakdown:
-  - Floating point formatting: 74 files
-  - Impl-defined brackets: 59 files
-  - Misc (types, NULL, etc.): 44 files
+- Full test suite (5501 files): **99% match rate** (1809/1817 Cerberus successes)
+- Remaining 8 mismatches: NULL type parsing for complex types (7 files, some counted twice)
+  - Deferred: requires Cerberus-side fix to emit structured NULL type JSON instead of string parsing
 - Cerberus compact mode (`--pp_core_compact`) is used for comparison
 - The Lean comparison tool ignores whitespace differences and strips section header comments

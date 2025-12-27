@@ -305,8 +305,8 @@ mutual
   partial def ppFloatingValue : FloatingValue → String
     | .finite f => s!"{f}"
     | .nan => "NaN"
-    | .posInf => "Infinity"
-    | .negInf => "-Infinity"
+    | .posInf => "inf"      -- Cerberus uses "inf" not "Infinity"
+    | .negInf => "-inf"     -- Cerberus uses "-inf" not "-Infinity"
     | .unspecified => "unspecified"
 
   /-- Pretty-print provenance -/

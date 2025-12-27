@@ -411,6 +411,12 @@ partial def parseCtypeStr (s : String) : Except String Ctype := do
   else if s == "float" then return .basic (.floating .float)
   else if s == "double" then return .basic (.floating .double)
   else if s == "long double" || s == "long_double" then return .basic (.floating .longDouble)
+  -- Handle size/width types
+  else if s == "size_t" then return .basic (.integer .size_t)
+  else if s == "ptrdiff_t" then return .basic (.integer .ptrdiff_t)
+  else if s == "wchar_t" then return .basic (.integer .wchar_t)
+  else if s == "wint_t" then return .basic (.integer .wint_t)
+  else if s == "ptraddr_t" then return .basic (.integer .ptraddr_t)
   -- Handle pointer types
   else if s.endsWith "*" then
     let inner := s.dropRight 1 |>.trim

@@ -143,9 +143,9 @@ The script generates JSON from Cerberus, runs the Lean pretty-printer, compares 
 
 Current status:
 - **CI tests**: 100% match rate (121/121 files)
-- **Full test suite (5501 files)**: 88% match rate (1610/1817 files)
+- **Full test suite (5501 files)**: 99% match rate (1809/1817 files)
 
-See `docs/PP_DISCREPANCIES.md` for remaining issues (primarily library globals filtering).
+See `docs/PP_DISCREPANCIES.md` for remaining issues (NULL type parsing for complex types - deferred pending Cerberus-side fix).
 
 **Investigating Pretty-Printer Mismatches**:
 The test script outputs files to a temp directory. To investigate a specific mismatch:
