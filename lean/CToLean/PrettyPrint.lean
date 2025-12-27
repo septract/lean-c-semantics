@@ -47,12 +47,12 @@ def ppIdentifier (id : Identifier) : String := id.name
 
 /-- Pretty-print signed integer base kind -/
 def ppSignedIntKind : IntBaseKind → String
-  | .ichar => "signed char"
-  | .short => "short"
+  | .ichar => "signed ichar"
+  | .short => "signed short"
   | .int_ => "signed int"
-  | .long => "long"
-  | .longLong => "long long"
-  | .intN n => s!"signed _BitInt({n})"
+  | .long => "signed long"
+  | .longLong => "signed long_long"
+  | .intN n => s!"int{n}_t"
   | .intLeastN n => s!"int_least{n}_t"
   | .intFastN n => s!"int_fast{n}_t"
   | .intmax => "intmax_t"
@@ -60,12 +60,12 @@ def ppSignedIntKind : IntBaseKind → String
 
 /-- Pretty-print unsigned integer base kind -/
 def ppUnsignedIntKind : IntBaseKind → String
-  | .ichar => "unsigned char"
+  | .ichar => "unsigned ichar"
   | .short => "unsigned short"
   | .int_ => "unsigned int"
   | .long => "unsigned long"
-  | .longLong => "unsigned long long"
-  | .intN n => s!"unsigned _BitInt({n})"
+  | .longLong => "unsigned long_long"
+  | .intN n => s!"uint{n}_t"
   | .intLeastN n => s!"uint_least{n}_t"
   | .intFastN n => s!"uint_fast{n}_t"
   | .intmax => "uintmax_t"
@@ -88,7 +88,7 @@ def ppIntegerType : IntegerType → String
 def ppFloatingType : FloatingType → String
   | .float => "float"
   | .double => "double"
-  | .longDouble => "long double"
+  | .longDouble => "long_double"
 
 /-- Pretty-print basic type -/
 def ppBasicType : BasicType → String
@@ -111,30 +111,18 @@ partial def ppCtype : Ctype → String
     let sizeStr := match size with | some n => s!"{n}" | none => ""
     s!"{ppCtype elemTy}[{sizeStr}]"
   | .function _retQuals retTy params variadic =>
-    let paramsStr := joinWith ", " (params.map fun (q, t) =>
-      let qs := ppQualifiers q
-      if qs.isEmpty then ppCtype t else s!"{qs} {ppCtype t}")
+    -- pp_core_ctype.ml ignores qualifiers on function params (has TODO comment)
+    let paramsStr := joinWith ", " (params.map fun (_q, t) => ppCtype t)
     let varStr := if variadic then ", ..." else ""
-    s!"{ppCtype retTy}({paramsStr}{varStr})"
+    -- pp_core_ctype uses ^^^ which adds space before parens
+    s!"{ppCtype retTy} ({paramsStr}{varStr})"
   | .functionNoParams _retQuals retTy =>
-    s!"{ppCtype retTy}()"
-  | .pointer quals pointeeTy =>
-    let qs := ppQualifiers quals
-    -- Special case: pointer to function uses C declaration syntax
-    match pointeeTy with
-    | .function _retQuals retTy params variadic =>
-      let paramsStr := if params.isEmpty then "void"
-        else joinWith ", " (params.map fun (q, t) =>
-          let qstr := ppQualifiers q
-          if qstr.isEmpty then ppCtype t else s!"{qstr} {ppCtype t}")
-      let varStr := if variadic then ", ..." else ""
-      s!"{ppCtype retTy} (*) ({paramsStr}{varStr})"
-    | .functionNoParams _retQuals retTy =>
-      s!"{ppCtype retTy} (*) ()"
-    | _ =>
-      if qs.isEmpty then s!"{ppCtype pointeeTy}*"
-      else s!"{qs} {ppCtype pointeeTy}*"
-  | .atomic ty => s!"_Atomic({ppCtype ty})"
+    s!"{ppCtype retTy} ()"
+  | .pointer _quals pointeeTy =>
+    -- pp_core_ctype.ml ignores qualifiers on pointers (has TODO comment)
+    -- Function pointers become: ret (args)* not ret (*) (args)
+    s!"{ppCtype pointeeTy}*"
+  | .atomic ty => s!"_Atomic ({ppCtype ty})"  -- space before paren (pp_core_ctype.ml uses ^^^)
   | .struct_ tag => s!"struct {ppSym tag}"
   | .union_ tag => s!"union {ppSym tag}"
   | .byte => "byte"
@@ -185,6 +173,18 @@ def ppBinop : Binop → String
   | .and => "/\\"
   | .or => "\\/"
 
+/-- Operator precedence (lower number = higher precedence, matching Cerberus pp_core.ml)
+    None means no parens needed (atoms, constructors, etc.)
+    Some n means binary op at precedence level n -/
+def binopPrecedence : Binop → Nat
+  | .exp => 1
+  | .mul | .div | .rem_t | .rem_f => 2
+  | .add | .sub => 3
+  | .lt | .le | .gt | .ge => 4
+  | .eq => 5
+  | .and => 6
+  | .or => 7
+
 /-- Pretty-print integer operation -/
 def ppIop : Iop → String
   | .add => "+"
@@ -230,8 +230,8 @@ def ppCtor : Ctor → String
   | .ivXOR => "IvXOR"
   | .specified => "Specified"
   | .unspecified => "Unspecified"
-  | .fvfromint => "Fvfromint"
-  | .ivfromfloat => "Ivfromfloat"
+  | .fvfromint => "Cfvfromint"
+  | .ivfromfloat => "Civfromfloat"
 
 /-! ## Implementation Constant Printing -/
 
@@ -241,7 +241,7 @@ def ppImplConst : ImplConst → String
   | .intMin ty => s!"Ivmin({ppIntegerType ty})"
   | .sizeof_ ty => s!"Ivsizeof({ppCtypeQuoted ty})"
   | .alignof_ ty => s!"Ivalignof({ppCtypeQuoted ty})"
-  | .other name => name
+  | .other name => s!"<{name}>"  -- Cerberus wraps impl constants in angle brackets
 
 /-! ## Name Printing -/
 
@@ -305,8 +305,8 @@ mutual
   partial def ppFloatingValue : FloatingValue → String
     | .finite f => s!"{f}"
     | .nan => "NaN"
-    | .posInf => "Infinity"
-    | .negInf => "-Infinity"
+    | .posInf => "inf"      -- Cerberus uses "inf" not "Infinity"
+    | .negInf => "-inf"     -- Cerberus uses "-inf" not "-Infinity"
     | .unspecified => "unspecified"
 
   /-- Pretty-print provenance -/
@@ -386,6 +386,20 @@ mutual
   partial def ppAPattern (p : APattern) : String := ppPattern p.pat
 end
 
+/-! ## List Expression Helpers -/
+
+/-- Try to extract list elements from a Cons/Nil chain.
+    Returns Some [e1, e2, ...] if successful, None otherwise.
+    This mirrors Cerberus pp_core.ml:465-481 which prints lists as [...] -/
+partial def tryExtractList (e : Pexpr) : Option (List Pexpr) :=
+  match e with
+  | .ctor (.nil _) [] => some []
+  | .ctor .cons [head, tail] =>
+    match tryExtractList tail with
+    | some rest => some (head :: rest)
+    | none => none
+  | _ => none
+
 /-! ## Expression Printing -/
 
 mutual
@@ -401,6 +415,25 @@ mutual
       | .tuple =>
         -- Tuples use (a, b) syntax, not Tuple(a, b)
         s!"({joinWith ", " (args.map (ppPexpr ind))})"
+      | .cons =>
+        -- Try to extract a proper list (Cons/Nil chain) and print as [...]
+        -- This mirrors Cerberus pp_core.ml:465-481
+        match args with
+        | [head, tail] =>
+          match tryExtractList tail with
+          | some rest =>
+            let allElems := head :: rest
+            s!"[{joinWith ", " (allElems.map (ppPexpr ind))}]"
+          | none =>
+            -- Fallback to :: syntax if not a proper list
+            s!"{ppPexpr ind head} :: {ppPexpr ind tail}"
+        | _ =>
+          -- Malformed Cons
+          s!"{ppCtor c}({joinWith ", " (args.map (ppPexpr ind))})"
+      | .nil bTy =>
+        -- Empty list with type annotation: []: bTy (pp_core.ml:469)
+        if args.isEmpty then s!"[]: {ppBaseType bTy}"
+        else s!"{ppCtor c}({joinWith ", " (args.map (ppPexpr ind))})"
       | _ =>
         if args.isEmpty then ppCtor c
         else s!"{ppCtor c}({joinWith ", " (args.map (ppPexpr ind))})"
@@ -413,7 +446,9 @@ mutual
     | .memberShift ptr tag member =>
       s!"member_shift({ppPexpr ind ptr}, {ppSym tag}, .{ppIdentifier member})"
     | .not_ e => s!"not({ppPexpr ind e})"
-    | .op op e1 e2 => s!"{ppPexpr ind e1} {ppBinop op} {ppPexpr ind e2}"
+    | .op op e1 e2 =>
+      -- Always wrap binary ops in parens (matches Cerberus compact mode)
+      s!"({ppPexpr ind e1} {ppBinop op} {ppPexpr ind e2})"
     | .struct_ tag members =>
       let membersStr := joinWith ", " (members.map fun (id, e) =>
         s!".{ppIdentifier id}= {ppPexpr ind e}")
@@ -422,7 +457,8 @@ mutual
       s!"(union {ppSym tag})\{.{ppIdentifier member}= {ppPexpr ind value}}"
     | .cfunction e => s!"cfunction({ppPexpr ind e})"
     | .memberof tag member e =>
-      s!"memberof({ppSym tag}, .{ppIdentifier member}, {ppPexpr ind e})"
+      -- Cerberus uses pp_identifier without dot prefix
+      s!"memberof({ppSym tag}, {ppIdentifier member}, {ppPexpr ind e})"
     | .call name args =>
       s!"{ppName name}({joinWith ", " (args.map (ppPexpr ind))})"
     | .let_ pat e1 e2 =>
@@ -450,9 +486,10 @@ mutual
         | .div => "_div"
         | _ => s!"_{ppIop op}"
       s!"catch_exceptional_condition{opSuffix}('{ppIntegerType ty}', {ppPexpr ind e1}, {ppPexpr ind e2})"
-    | .bmcAssume e => s!"bmc_assume({ppPexpr ind e})"
+    | .bmcAssume e => s!"__bmc_assume ({ppPexpr ind e})"  -- double underscore, space before paren
     | .pureMemop op args =>
-      s!"{op}({joinWith ", " (args.map (ppPexpr ind))})"
+      -- Cerberus uses memop(OpName, args...) format (pp_core.ml:501-502)
+      s!"memop({op}, {joinWith ", " (args.map (ppPexpr ind))})"
     | .constrained constraints =>
       let constraintsStr := joinWith ", " (constraints.map fun (name, e) =>
         s!"{name}: {ppPexpr ind e}")
@@ -481,11 +518,13 @@ partial def ppAction (ind : Indent) : Action → String
     s!"alloc({ppAPexpr ind align}, {ppAPexpr ind size})"
   | .kill kind ptr =>
     s!"kill({ppKillKind kind}, {ppAPexpr ind ptr})"
-  | .store _ ty ptr val order =>
+  | .store locking ty ptr val order =>
+    -- Cerberus uses store_lock for const globals (pp_core.ml:702)
+    let kw := if locking then "store_lock" else "store"
     if isNaOrder order then
-      s!"store({ppAPexpr ind ty}, {ppAPexpr ind ptr}, {ppAPexpr ind val})"
+      s!"{kw}({ppAPexpr ind ty}, {ppAPexpr ind ptr}, {ppAPexpr ind val})"
     else
-      s!"store({ppAPexpr ind ty}, {ppAPexpr ind ptr}, {ppAPexpr ind val}, {ppMemoryOrder order})"
+      s!"{kw}({ppAPexpr ind ty}, {ppAPexpr ind ptr}, {ppAPexpr ind val}, {ppMemoryOrder order})"
   | .load ty ptr order =>
     if isNaOrder order then
       s!"load({ppAPexpr ind ty}, {ppAPexpr ind ptr})"
@@ -536,7 +575,8 @@ mutual
     | .if_ cond then_ else_ =>
       s!"if {ppAPexpr ind cond} then\n{indent (ind + 1) ""}{ppExpr (ind + 1) then_}\n{indent ind ""}else\n{indent (ind + 1) ""}{ppExpr (ind + 1) else_}"
     | .ccall funPtr funTy args =>
-      -- Cerberus prints: ccall(ty, ptr, args...) as a single comma list
+      -- Cerberus prints: ccall(ty, ptr, args...) - type first, then pointer, then args
+      -- funPtr is parsed from JSON "function" field, funTy from "type" field
       let allArgs := [ppAPexpr ind funTy, ppAPexpr ind funPtr] ++ args.map (ppAPexpr ind)
       s!"ccall({joinWith ", " allArgs})"
     | .proc name args =>
@@ -570,8 +610,8 @@ mutual
     | .run label args =>
       s!"run {ppSym label}({joinWith ", " (args.map (ppAPexpr ind))})"
     | .par es =>
-      let esStr := joinWith " ||| " (es.map (ppExpr ind))
-      s!"par({esStr})"
+      -- Cerberus uses comma separator (with_grouped_args in cerb_pp_prelude.ml)
+      s!"par({joinWith ", " (es.map (ppExpr ind))})"
     | .wait tid =>
       s!"wait({tid})"
 
@@ -593,12 +633,14 @@ def ppFunDecl (sym : Sym) (decl : FunDecl) : String :=
     s!"fun {ppSym sym}{ppParams params}: {ppBaseType retTy} :=\n  {ppAPexpr 1 body}"
   | .proc _ retTy params body =>
     s!"proc {ppSym sym}{ppParams params}: eff {ppBaseType retTy} :=\n  {ppAExpr 1 body}"
-  | .procDecl _ retTy paramTys =>
+  | .procDecl _ _retTy paramTys =>
+    -- Cerberus omits return type for declarations without body (pp_core.ml:785)
     let paramsStr := joinWith ", " (paramTys.map ppBaseType)
-    s!"proc {ppSym sym} ({paramsStr}): eff {ppBaseType retTy}"
-  | .builtinDecl _ retTy paramTys =>
+    s!"proc {ppSym sym} ({paramsStr})"
+  | .builtinDecl _ _retTy paramTys =>
+    -- Cerberus omits return type for declarations without body (pp_core.ml:787)
     let paramsStr := joinWith ", " (paramTys.map ppBaseType)
-    s!"builtin {ppSym sym} ({paramsStr}): eff {ppBaseType retTy}"
+    s!"builtin {ppSym sym} ({paramsStr})"
 
 /-! ## Tag Definition Printing -/
 
@@ -606,8 +648,15 @@ def ppFunDecl (sym : Sym) (decl : FunDecl) : String :=
 def ppTagDef (sym : Sym) (tagDef : Loc × TagDef) : String :=
   let (_, def_) := tagDef
   match def_ with
-  | .struct_ fields =>
-    let fieldsStr := joinWith "\n  " (fields.map fun f =>
+  | .struct_ fields flexOpt =>
+    -- For flexible array member, wrap element type in array[] (Cerberus pp_core.ml:770)
+    let flexFields := match flexOpt with
+      | some flex =>
+        let arrayTy := Ctype.array flex.ty none  -- elem_ty[] with no size
+        [{ name := flex.name, ty := arrayTy : FieldDef }]
+      | none => []
+    let allFields := fields ++ flexFields
+    let fieldsStr := joinWith "\n  " (allFields.map fun f =>
       s!"{ppIdentifier f.name}: {ppCtypeQuoted f.ty}")
     s!"def struct {ppSym sym} :=\n  {fieldsStr}"
   | .union_ fields =>
@@ -633,14 +682,16 @@ def ppFile (file : File) : String :=
 
   -- Tag definitions (structs/unions)
   let hasAggregates := !file.tagDefs.isEmpty
-  let hasGlobs := !file.globs.isEmpty
 
   let parts := if hasAggregates then
-    let tagParts := file.tagDefs.toList.map fun (sym, def_) => ppTagDef sym def_
+    let tagParts := file.tagDefs.map fun (sym, def_) => ppTagDef sym def_
     parts ++ ["-- Aggregates"] ++ tagParts
   else parts
 
   -- Global definitions
+  -- Note: JSON export (json_core.ml) now filters out GlobalDecl (like pp_globs does),
+  -- so we only get GlobalDef entries and don't need to filter library globals here
+  let hasGlobs := !file.globs.isEmpty
   let globComment := if hasGlobs then ["-- Globals"] else []
   let globParts := file.globs.map fun (sym, decl) => ppGlobDecl sym decl
   let parts := parts ++ globComment ++ globParts

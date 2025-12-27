@@ -9,9 +9,19 @@ open CToLean.Core
 open CToLean.Parser
 open CToLean.PrettyPrint
 
+/-- Strip Core section header comments from a string.
+    These are: "-- Aggregates", "-- Globals", "-- Fun map"
+    In compact mode they can appear mid-line, so we remove them as substrings. -/
+def stripSectionComments (s : String) : String :=
+  s.replace "-- Aggregates" ""
+   |>.replace "-- Globals" ""
+   |>.replace "-- Fun map" ""
+
 /-- Normalize whitespace for comparison: collapse all whitespace to single spaces -/
 def normalizeWhitespace (s : String) : String :=
-  let chars := s.toList
+  -- First strip section comments, then normalize whitespace
+  let noComments := stripSectionComments s
+  let chars := noComments.toList
   let rec go (acc : List Char) (inWs : Bool) : List Char → List Char
     | [] => acc.reverse
     | c :: rest =>

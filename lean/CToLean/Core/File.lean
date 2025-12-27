@@ -18,12 +18,12 @@ structure FieldDef where
 
 /-- Tag definition (struct or union layout) -/
 inductive TagDef where
-  | struct_ (fields : List FieldDef)
+  | struct_ (fields : List FieldDef) (flexibleArray : Option FieldDef := none)
   | union_ (fields : List FieldDef)
   deriving Repr, Inhabited
 
-/-- Tag definitions map -/
-abbrev TagDefs := Std.HashMap Sym (Loc × TagDef)
+/-- Tag definitions - using List to preserve definition order -/
+abbrev TagDefs := List (Sym × (Loc × TagDef))
 
 /-! ## Function Definitions -/
 
