@@ -24,7 +24,7 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --quick)
             QUICK_MODE=true
-            MAX_TESTS=10
+            MAX_TESTS=50
             shift
             ;;
         --verbose|-v)
@@ -42,9 +42,9 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Default test directory - use CI tests for pretty-printer comparison
+# Default test directory
 if [[ -z "$TEST_DIR" ]]; then
-    TEST_DIR="$CERBERUS_DIR/tests/ci"
+    TEST_DIR="$CERBERUS_DIR/tests"
 fi
 
 # Check prerequisites
