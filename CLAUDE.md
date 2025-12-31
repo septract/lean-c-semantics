@@ -29,7 +29,7 @@ c-to-lean/
 │       ├── Core/      # Core AST types
 │       ├── Parser.lean      # JSON parser (100% success on test suite)
 │       ├── PrettyPrint.lean # Pretty-printer matching Cerberus output
-│       ├── Memory/    # Memory model implementations (future)
+│       ├── Memory/    # Memory model (concrete with allocation-ID provenance)
 │       ├── Semantics/ # Interpreter (future)
 │       ├── Theorems/  # UB-freeness definitions (future)
 │       └── Test*.lean # Test utilities
@@ -147,6 +147,14 @@ Current status:
 
 See `docs/PP_DISCREPANCIES.md` for remaining issues (NULL type parsing for complex types - deferred pending Cerberus-side fix).
 
+**Memory Model Tests** (`make test-memory`):
+Unit tests for the memory model implementation.
+```bash
+make test-memory                           # Run memory model unit tests
+cd lean && .lake/build/bin/ctolean_memtest # Run directly
+```
+Tests include: layout (sizeof/alignof), allocation, store/load roundtrip, null dereference detection, use-after-free detection, double-free detection, out-of-bounds detection, read-only protection, pointer arithmetic.
+
 **Investigating Pretty-Printer Mismatches**:
 The test script outputs files to a temp directory. To investigate a specific mismatch:
 ```bash
@@ -190,8 +198,10 @@ Use the top-level Makefile:
 ```bash
 make lean             # Build Lean project
 make cerberus         # Build Cerberus (requires opam environment)
-make test             # Run all quick tests (parser + pretty-printer, 100 files)
+make test             # Run all quick tests (parser + PP + memory)
+make test-memory      # Run memory model unit tests only
 make test-parser-full # Full parser test suite (~5500 files, ~12 min)
+make test-pp-full     # Full pretty-printer test (all CI files)
 make clean            # Clean all build artifacts
 ```
 

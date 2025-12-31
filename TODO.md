@@ -1,6 +1,6 @@
 # TODO - C-to-Lean Project
 
-## Current Phase: 3 - Memory Model Interface (starting)
+## Current Phase: 4 - Core Interpreter (next)
 
 ### Phase 0 & 1 Complete
 - [x] Initialize Lean 4 project in `lean/` directory
@@ -42,10 +42,18 @@ Fixed issues:
 
 Remaining discrepancies: See `docs/PP_DISCREPANCIES.md` for full categorization and checklist.
 
-### Phase 3: Memory Model Interface
-- [ ] Define `Memory` type class with core operations
-- [ ] Implement `Simple` memory model (integer addresses)
-- [ ] Implement `Concrete` memory model (allocation IDs)
+### Phase 3: Memory Model Interface ✓
+- [x] Define `MemoryOps` type class with core operations
+- [x] Implement `Concrete` memory model (allocation-ID provenance)
+- [x] Add memory model unit tests (`make test-memory`)
+
+See `docs/MEMORY_MODEL.md` for design details.
+
+### Phase 3.5: Test Infrastructure Cleanup (before Phase 4)
+- [ ] Create `docs/TESTING.md` with unified test documentation
+- [ ] Reorganize test files for consistency (all in `CToLean/Test/` subdirectory?)
+- [ ] Consider adding CI workflow (`.github/workflows/test.yml`)
+- [ ] Prepare test harness for interpreter differential testing
 
 ### Phase 4: Core Interpreter
 - [ ] Implement pure expression evaluation
