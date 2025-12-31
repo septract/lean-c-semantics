@@ -49,11 +49,12 @@ Remaining discrepancies: See `docs/PP_DISCREPANCIES.md` for full categorization 
 
 See `docs/MEMORY_MODEL.md` for design details.
 
-### Phase 3.5: Test Infrastructure Cleanup (before Phase 4)
-- [ ] Create `docs/TESTING.md` with unified test documentation
-- [ ] Reorganize test files for consistency (all in `CToLean/Test/` subdirectory?)
-- [ ] Consider adding CI workflow (`.github/workflows/test.yml`)
-- [ ] Prepare test harness for interpreter differential testing
+### Phase 3.5: Test Infrastructure Cleanup ✓
+- [x] Create `docs/TESTING.md` with unified test documentation
+- [x] Reorganize test files into `CToLean/Test/` subdirectory
+- [x] Add `make test-unit` target for Cerberus-independent testing
+- [ ] Consider adding CI workflow (`.github/workflows/test.yml`) - deferred (private submodule)
+- [ ] Prepare test harness for interpreter differential testing - Phase 5
 
 ### Phase 4: Core Interpreter
 - [ ] Implement pure expression evaluation
