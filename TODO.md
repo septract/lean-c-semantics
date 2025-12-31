@@ -1,6 +1,6 @@
 # TODO - C-to-Lean Project
 
-## Current Phase: 2 - Core JSON Export & Parser (nearly complete)
+## Current Phase: 3 - Memory Model Interface (starting)
 
 ### Phase 0 & 1 Complete
 - [x] Initialize Lean 4 project in `lean/` directory
@@ -24,11 +24,11 @@
 - [x] Add `--json_core_out` flag to Cerberus driver
 - [x] Add `--pp_core_compact` flag to Cerberus for compact output (easier diffing)
 - [x] Implement JSON parser in Lean (**100% success rate on 5500+ test files**)
-- [~] Write pretty-printer in Lean matching Cerberus format (~60% match rate)
-- [ ] Validate: JSON parse → pretty-print == Cerberus pretty-print (target: 90%+)
+- [x] Write pretty-printer in Lean matching Cerberus format (**99% match rate**)
+- [x] Validate: JSON parse → pretty-print == Cerberus pretty-print (target: 90%+) ✓
 
 #### Pretty-printer status:
-Current match rate: **51%** (62/121 files on CI tests)
+Current match rate: **99%** (1809/1817 files on full test suite, 100% on CI tests)
 
 Fixed issues:
 - [x] NULL type formatting (no quotes around type)
