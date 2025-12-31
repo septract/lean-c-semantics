@@ -16,3 +16,7 @@ root = "CToLean.TestBatch"
 [[lean_exe]]
 name = "ctolean_pp"
 root = "CToLean.TestPrettyPrint"
+
+[[lean_exe]]
+name = "ctolean_memtest"
+root = "CToLean.TestMemory"
