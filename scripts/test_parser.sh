@@ -23,7 +23,7 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --quick)
             QUICK_MODE=true
-            MAX_TESTS=100
+            MAX_TESTS=50
             shift
             ;;
         --verbose|-v)

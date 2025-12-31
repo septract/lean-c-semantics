@@ -18,11 +18,11 @@ clean:
 	cd lean && lake clean
 	cd cerberus && make clean 2>/dev/null || true
 
-# Run all quick tests (unit tests + parser + pretty-printer with 100 files each)
+# Run all quick tests (unit tests + parser + pretty-printer with 50 files each)
 test: lean cerberus
 	cd lean && .lake/build/bin/ctolean_test
 	./scripts/test_parser.sh --quick
-	./scripts/test_pp.sh --max 100
+	./scripts/test_pp.sh --quick
 
 # Run unit tests only (no Cerberus required)
 test-unit: lean
@@ -36,7 +36,7 @@ test-memory: lean
 test-parser-full: lean cerberus
 	./scripts/test_parser.sh
 
-# Run full pretty-printer test (all CI files)
+# Run full pretty-printer test (~5500 files)
 test-pp-full: lean cerberus
 	./scripts/test_pp.sh
 
@@ -63,9 +63,9 @@ help:
 	@echo "  test-memory       Run memory model unit tests only"
 	@echo ""
 	@echo "Testing (requires Cerberus):"
-	@echo "  test              Run quick tests (unit + 100 parser + 100 PP files)"
+	@echo "  test              Run quick tests (unit + 50 parser + 50 PP files)"
 	@echo "  test-parser-full  Run full parser test (~5500 files, ~12 min)"
-	@echo "  test-pp-full      Run full pretty-printer test (all CI files)"
+	@echo "  test-pp-full      Run full pretty-printer test (~5500 files)"
 	@echo ""
 	@echo "Setup:"
 	@echo "  init              Initialize git submodules"
