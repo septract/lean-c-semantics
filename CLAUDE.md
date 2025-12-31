@@ -32,7 +32,8 @@ c-to-lean/
 │       ├── Memory/    # Memory model (concrete with allocation-ID provenance)
 │       ├── Semantics/ # Interpreter (future)
 │       ├── Theorems/  # UB-freeness definitions (future)
-│       └── Test*.lean # Test utilities
+│       ├── Test/      # Unit tests (Memory, Parser smoke tests)
+│       └── Test*.lean # Test CLI entry points
 ├── scripts/           # Development scripts
 │   ├── test_parser.sh # Run parser against Cerberus test suite
 │   └── test_pp.sh     # Run pretty-printer comparison tests
@@ -198,12 +199,19 @@ Use the top-level Makefile:
 ```bash
 make lean             # Build Lean project
 make cerberus         # Build Cerberus (requires opam environment)
-make test             # Run all quick tests (parser + PP + memory)
+make clean            # Clean all build artifacts
+
+# Testing (no Cerberus required)
+make test-unit        # Run all unit tests (parser smoke + memory)
 make test-memory      # Run memory model unit tests only
+
+# Testing (requires Cerberus)
+make test             # Quick tests: unit + 100 parser + 100 PP files
 make test-parser-full # Full parser test suite (~5500 files, ~12 min)
 make test-pp-full     # Full pretty-printer test (all CI files)
-make clean            # Clean all build artifacts
 ```
+
+See `docs/TESTING.md` for full testing documentation.
 
 Or build individually:
 ```bash

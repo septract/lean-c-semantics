@@ -1,0 +1,144 @@
+# Testing Guide
+
+This document describes the test infrastructure for the C-to-Lean project.
+
+## Quick Reference
+
+```bash
+# No Cerberus required
+make test-unit         # Run all unit tests (~2s)
+make test-memory       # Run memory model tests only
+
+# Requires Cerberus
+make test              # Quick tests: unit + 100 parser + 100 PP files (~1min)
+make test-parser-full  # Full parser test (~5500 files, ~12 min)
+make test-pp-full      # Full pretty-printer test (121 CI files)
+```
+
+## Test Categories
+
+### 1. Unit Tests (No Cerberus Required)
+
+These tests run entirely within Lean and don't require Cerberus.
+
+**Parser Smoke Tests** (`CToLean/Test/Parser.lean`)
+- Tests that malformed JSON is rejected
+- Tests that incomplete JSON is rejected
+- Tests that minimal valid JSON is accepted
+- Run with: `make test-unit` or `.lake/build/bin/ctolean_test`
+
+**Memory Model Tests** (`CToLean/Test/Memory.lean`)
+- Layout tests: sizeof, alignof for various types
+- Allocation and store/load roundtrip
+- Error detection: null deref, use-after-free, double-free, out-of-bounds
+- Read-only memory protection
+- Pointer arithmetic and comparison
+- Run with: `make test-memory` or `.lake/build/bin/ctolean_memtest`
+
+### 2. Comparative Tests (Require Cerberus)
+
+These tests validate against Cerberus output.
+
+**Parser Tests** (`scripts/test_parser.sh`)
+- Runs Cerberus on C files to generate JSON
+- Tests that Lean parser can parse all Cerberus JSON output
+- Current status: **100% success rate** on 5500+ files
+- Run with: `make test-parser-full` (full) or `--quick` (100 files)
+
+**Pretty-Printer Tests** (`scripts/test_pp.sh`)
+- Compares Lean pretty-printer output against Cerberus pretty-printer
+- Uses whitespace-normalized comparison
+- Current status: **99% match rate** (1809/1817 files)
+- CI tests: **100% match rate** (121/121 files)
+- Run with: `make test-pp-full` (CI files) or `--max N` (first N files)
+
+## Test File Structure
+
+```
+lean/CToLean/
+├── Test/
+│   ├── Memory.lean      # Memory model unit tests
+│   ├── Parser.lean      # Parser smoke tests
+│   ├── PrettyPrint.lean # PP comparison utilities
+│   └── Batch.lean       # Batch processing utilities
+├── Test.lean            # Unified test runner (ctolean_test)
+├── TestBatch.lean       # Batch parser CLI (ctolean_testbatch)
+├── TestPrettyPrint.lean # PP comparison CLI (ctolean_pp)
+└── TestMemory.lean      # Memory test CLI (ctolean_memtest)
+
+scripts/
+├── test_parser.sh       # Parser test script
+├── test_pp.sh           # Pretty-printer test script
+├── test_pp_category.sh  # Category-specific PP tests
+└── find_problem_tests.sh # Categorize PP mismatches
+```
+
+## Executables
+
+| Executable | Purpose | Cerberus Required |
+|------------|---------|-------------------|
+| `ctolean_test` | Run all unit tests | No |
+| `ctolean_memtest` | Run memory tests only | No |
+| `ctolean_testbatch` | Batch parse JSON files | No (Lean-side) |
+| `ctolean_pp` | Pretty-print/compare JSON | No (Lean-side) |
+
+## Investigating Failures
+
+### Parser Failures
+
+If `test_parser.sh` reports failures:
+1. Check Cerberus can process the file: `cerberus --json_core_out=out.json file.c`
+2. Run Lean parser on the JSON: `.lake/build/bin/ctolean_testbatch out.json`
+3. The error message will indicate which JSON field failed to parse
+
+### Pretty-Printer Mismatches
+
+If `test_pp.sh` reports mismatches:
+1. Run tests and note the output directory
+2. Use the comparison tool for details:
+   ```bash
+   .lake/build/bin/ctolean_pp /path/to/file.json --compare /path/to/file.cerberus.core
+   ```
+3. The tool shows the first difference with context
+
+Known remaining issues are documented in `docs/PP_DISCREPANCIES.md`.
+
+## Adding New Tests
+
+### Adding Memory Tests
+
+Add test functions to `CToLean/Test/Memory.lean`:
+
+```lean
+def testNewFeature : IO Unit := do
+  let result := runConcreteMemM emptyEnv (do
+    -- Memory operations here
+    pure someValue
+  )
+  match result with
+  | .ok (expected, _) => IO.println "✓ Test passed"
+  | .error e => throw (IO.userError s!"unexpected error: {e}")
+```
+
+Then call it from `runAll`.
+
+### Adding Parser Tests
+
+For smoke tests, add to `CToLean/Test/Parser.lean`.
+
+For real validation, the comparative tests (`test_parser.sh`) automatically test
+against all Cerberus test files - no manual test case creation needed.
+
+## CI Integration
+
+Currently no CI workflow is configured. The project depends on a private
+Cerberus fork, making automated CI testing challenging.
+
+**Tests that could run in CI** (no Cerberus):
+- `make test-unit` - All unit tests
+- `lake build` - Build verification
+
+**Tests requiring local execution**:
+- `make test` - Full quick test suite
+- `make test-parser-full` - Full parser validation
+- `make test-pp-full` - Full pretty-printer validation

@@ -5,7 +5,7 @@
 
 import CToLean.Memory
 
-namespace CToLean.Memory.Test
+namespace CToLean.Test.Memory
 
 open CToLean.Core
 open CToLean.Memory
@@ -34,8 +34,6 @@ def expectError (m : ConcreteMemM α) (check : MemError → Bool) (msg : String 
     else throw (IO.userError s!"{msg}: got wrong error {e}")
 
 /-! ## Layout Tests -/
-
-#check sizeof emptyEnv (.basic (.integer (.signed .int_))) -- Should be 4
 
 /-- Test basic type sizes -/
 def testBasicSizes : IO Unit := do
@@ -295,17 +293,17 @@ def testPointerComparison : IO Unit := do
 /-! ## Run All Tests -/
 
 /-- Run all memory model tests -/
-def runAllTests : IO Unit := do
-  IO.println "Running memory model tests..."
+def runAll : IO Unit := do
+  IO.println "=== Memory Model Tests ==="
   IO.println ""
 
-  IO.println "=== Layout Tests ==="
+  IO.println "Layout Tests:"
   testBasicSizes
   testAlignment
   testArraySizes
   IO.println ""
 
-  IO.println "=== Memory Operation Tests ==="
+  IO.println "Memory Operation Tests:"
   testAllocation
   testStoreLoad
   testNullDeref
@@ -317,6 +315,6 @@ def runAllTests : IO Unit := do
   testPointerComparison
   IO.println ""
 
-  IO.println "All tests passed!"
+  IO.println "All memory tests passed!"
 
-end CToLean.Memory.Test
+end CToLean.Test.Memory

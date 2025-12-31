@@ -1,48 +1,30 @@
 /-
-  Simple test for the parser
+  Unified test module
+  Imports all test modules and provides a unified test runner.
 -/
 
-import CToLean.Parser
+import CToLean.Test.Memory
+import CToLean.Test.Parser
+import CToLean.Test.PrettyPrint
+import CToLean.Test.Batch
 
-open CToLean.Parser
-open CToLean.Core
+namespace CToLean.Test
 
-def testJson : String := r#"{
-  "main": { "id": 502, "name": "main" },
-  "tagDefs": [],
-  "globs": [],
-  "funs": [
-    {
-      "symbol": { "id": 502, "name": "main" },
-      "declaration": {
-        "tag": "Proc",
-        "loc": "<tests/ci/0001-emptymain.c:1:0>",
-        "return_type": {
-          "tag": "BTy_loaded",
-          "object_type": { "tag": "OTy_integer" }
-        },
-        "params": [],
-        "body": {
-          "loc": null,
-          "expr": {
-            "tag": "Epure",
-            "expr": {
-              "loc": null,
-              "expr": { "tag": "PEval", "value": { "tag": "Vunit" } }
-            }
-          }
-        }
-      }
-    }
-  ]
-}"#
+/-- Run all unit tests (parser + memory) -/
+def runAll : IO Unit := do
+  IO.println "Running all unit tests..."
+  IO.println ""
 
-def main : IO Unit := do
-  IO.println "Testing JSON parser..."
-  match parseFileFromString testJson with
-  | .ok file =>
-    IO.println s!"✓ Parsed successfully!"
-    IO.println s!"  main: {repr file.main}"
-    IO.println s!"  functions: {file.funs.length}"
-  | .error e =>
-    IO.println s!"✗ Parse error: {e}"
+  Parser.runAll
+  IO.println ""
+
+  Memory.runAll
+  IO.println ""
+
+  IO.println "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  IO.println "All unit tests passed!"
+
+end CToLean.Test
+
+/-- Main entry point for ctolean_test executable -/
+def main : IO Unit := CToLean.Test.runAll
