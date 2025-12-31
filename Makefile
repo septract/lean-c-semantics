@@ -1,6 +1,10 @@
 # C-to-Lean Project Makefile
 
-.PHONY: all lean cerberus clean test test-unit test-memory test-parser-full test-pp-full help
+.PHONY: all lean cerberus cerberus-setup clean test test-unit test-memory test-parser-full test-pp-full help
+
+# Cerberus requires OCaml 4.14.1 (crashes on OCaml 5.x)
+OPAM_SWITCH := cerberus-414
+OPAM_EXEC := OPAMSWITCH=$(OPAM_SWITCH) opam exec --
 
 # Default target
 all: lean
@@ -9,9 +13,23 @@ all: lean
 lean:
 	cd lean && lake build
 
-# Build Cerberus (requires opam environment with lem)
+# Build Cerberus (requires cerberus-414 opam switch)
 cerberus:
-	cd cerberus && make cerberus
+	cd cerberus && $(OPAM_EXEC) make cerberus
+
+# First-time Cerberus setup: create opam switch and install
+cerberus-setup:
+	@echo "Creating opam switch $(OPAM_SWITCH) with OCaml 4.14.1..."
+	opam switch create $(OPAM_SWITCH) 4.14.1 || true
+	@echo "Installing Cerberus dependencies..."
+	cd cerberus && $(OPAM_EXEC) opam install --deps-only -y ./cerberus-lib.opam ./cerberus.opam
+	@echo "Pinning and installing Cerberus..."
+	cd cerberus && $(OPAM_EXEC) opam pin --yes --no-action add cerberus-lib .
+	cd cerberus && $(OPAM_EXEC) opam pin --yes --no-action add cerberus .
+	$(OPAM_EXEC) opam install --yes cerberus
+	@echo "Verifying Cerberus works..."
+	$(OPAM_EXEC) cerberus --exec cerberus/tests/ci/0001-emptymain.c
+	@echo "Cerberus setup complete!"
 
 # Clean build artifacts
 clean:
@@ -52,10 +70,14 @@ init:
 help:
 	@echo "C-to-Lean Project"
 	@echo ""
+	@echo "Setup (first time):"
+	@echo "  init              Initialize git submodules"
+	@echo "  cerberus-setup    Create OCaml 4.14 switch and install Cerberus"
+	@echo ""
 	@echo "Targets:"
 	@echo "  all               Build Lean project (default)"
 	@echo "  lean              Build Lean project"
-	@echo "  cerberus          Build Cerberus (requires opam)"
+	@echo "  cerberus          Build Cerberus (requires cerberus-setup first)"
 	@echo "  clean             Clean all build artifacts"
 	@echo ""
 	@echo "Testing (no Cerberus required):"
@@ -67,7 +89,6 @@ help:
 	@echo "  test-parser-full  Run full parser test (~5500 files, ~12 min)"
 	@echo "  test-pp-full      Run full pretty-printer test (~5500 files)"
 	@echo ""
-	@echo "Setup:"
-	@echo "  init              Initialize git submodules"
+	@echo "Maintenance:"
 	@echo "  update-cerberus   Update Cerberus submodule"
 	@echo "  help              Show this help"
