@@ -8,7 +8,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 CERBERUS_DIR="$PROJECT_DIR/cerberus"
 LEAN_DIR="$PROJECT_DIR/lean"
-CERBERUS="$CERBERUS_DIR/_build/install/default/bin/cerberus"
+
+# Cerberus requires OCaml 4.14.1 (crashes on OCaml 5.x)
+OPAM_SWITCH="cerberus-414"
+CERBERUS="OPAMSWITCH=$OPAM_SWITCH opam exec -- cerberus"
 
 # Configuration
 QUICK_MODE=false
@@ -46,10 +49,10 @@ if [[ -z "$TEST_DIR" ]]; then
     TEST_DIR="$CERBERUS_DIR/tests"
 fi
 
-# Check prerequisites
-if [[ ! -x "$CERBERUS" ]]; then
-    echo "Error: Cerberus not found at $CERBERUS"
-    echo "Build it with: cd cerberus && dune build @cerberus.install"
+# Check prerequisites - verify opam switch exists
+if ! opam switch list 2>/dev/null | grep -q "$OPAM_SWITCH"; then
+    echo "Error: opam switch '$OPAM_SWITCH' not found"
+    echo "Run 'make cerberus-setup' first"
     exit 1
 fi
 
@@ -108,7 +111,7 @@ while IFS= read -r cfile; do
 
     # Run Cerberus to generate JSON
     cerberus_err_file=$(mktemp)
-    if ! "$CERBERUS" --json_core_out="$json_file" "$cfile" 2>"$cerberus_err_file"; then
+    if ! eval $CERBERUS --json_core_out="$json_file" "$cfile" 2>"$cerberus_err_file"; then
         ((cerberus_fail++)) || true
         # Log the error
         cerberus_err=$(head -1 "$cerberus_err_file")

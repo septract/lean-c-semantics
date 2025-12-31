@@ -89,30 +89,49 @@ Focus on sequential Core initially:
 - `generic_expr`: Effectful expressions (memory operations)
 - `generic_file`: Complete Core program
 
+### Cerberus Setup
+
+**IMPORTANT**: Cerberus requires OCaml 4.14.1. It crashes on OCaml 5.x.
+
+First-time setup:
+```bash
+# Create dedicated opam switch with OCaml 4.14.1
+opam switch create cerberus-414 4.14.1
+
+# Install dependencies and Cerberus
+cd cerberus
+OPAMSWITCH=cerberus-414 opam exec -- opam install --deps-only -y ./cerberus-lib.opam ./cerberus.opam
+OPAMSWITCH=cerberus-414 opam exec -- opam pin --yes --no-action add cerberus-lib .
+OPAMSWITCH=cerberus-414 opam exec -- opam pin --yes --no-action add cerberus .
+OPAMSWITCH=cerberus-414 opam exec -- opam install --yes cerberus
+```
+
+Verify it works:
+```bash
+OPAMSWITCH=cerberus-414 opam exec -- cerberus --exec tests/ci/0001-emptymain.c
+```
+
 ### Running Cerberus
 
-The Cerberus executable is at `cerberus/_build/default/backend/driver/main.exe`.
-
+Always use the opam switch wrapper:
 ```bash
-CERBERUS=./cerberus/_build/default/backend/driver/main.exe
-
 # Pretty-print Core to stdout
-$CERBERUS --pp=core input.c
+OPAMSWITCH=cerberus-414 opam exec -- cerberus --pp=core input.c
 
 # Pretty-print Core in compact mode (single line, for diffing)
-$CERBERUS --pp=core --pp_core_compact input.c
-
-# Pretty-print Core to file (requires --pp=core flag too)
-$CERBERUS --pp=core --pp_core_out=output.core input.c
+OPAMSWITCH=cerberus-414 opam exec -- cerberus --pp=core --pp_core_compact input.c
 
 # Export Core as JSON (for Lean parser)
-$CERBERUS --json_core_out=output.json input.c
+OPAMSWITCH=cerberus-414 opam exec -- cerberus --json_core_out=output.json input.c
 
 # Execute C program
-$CERBERUS --exec input.c
+OPAMSWITCH=cerberus-414 opam exec -- cerberus --exec input.c
+
+# Execute with batch output (for differential testing)
+OPAMSWITCH=cerberus-414 opam exec -- cerberus --exec --batch input.c
 
 # Get help
-$CERBERUS --help
+OPAMSWITCH=cerberus-414 opam exec -- cerberus --help
 ```
 
 ## Validation
