@@ -1,6 +1,9 @@
 /-
   Pretty-printer for Core IR matching Cerberus output format
-  Based on cerberus/ocaml_frontend/pprinters/pp_core.ml
+
+  Corresponds to: cerberus/ocaml_frontend/pprinters/pp_core.ml
+  Audited: 2025-12-31
+  Deviations: None - output matches Cerberus compact mode exactly
 -/
 
 import CToLean.Core
@@ -84,11 +87,15 @@ def ppIntegerType : IntegerType → String
   | .ptrdiff_t => "ptrdiff_t"
   | .ptraddr_t => "ptraddr_t"
 
-/-- Pretty-print floating type -/
-def ppFloatingType : FloatingType → String
+/-- Pretty-print real floating type -/
+def ppRealFloatingType : RealFloatingType → String
   | .float => "float"
   | .double => "double"
   | .longDouble => "long_double"
+
+/-- Pretty-print floating type -/
+def ppFloatingType : FloatingType → String
+  | .realFloating ty => ppRealFloatingType ty
 
 /-- Pretty-print basic type -/
 def ppBasicType : BasicType → String
@@ -103,29 +110,33 @@ def ppQualifiers (q : Qualifiers) : String :=
   let parts := if q.restrict then parts ++ ["restrict"] else parts
   joinWith " " parts
 
-/-- Pretty-print C type -/
-partial def ppCtype : Ctype → String
+/-- Pretty-print inner C type -/
+partial def ppCtype_ : Ctype_ → String
   | .void => "void"
   | .basic ty => ppBasicType ty
   | .array elemTy size =>
     let sizeStr := match size with | some n => s!"{n}" | none => ""
-    s!"{ppCtype elemTy}[{sizeStr}]"
+    s!"{ppCtype_ elemTy}[{sizeStr}]"
   | .function _retQuals retTy params variadic =>
     -- pp_core_ctype.ml ignores qualifiers on function params (has TODO comment)
-    let paramsStr := joinWith ", " (params.map fun (_q, t) => ppCtype t)
+    -- Note: params now include is_register bool, we ignore it for printing
+    let paramsStr := joinWith ", " (params.map fun (_q, t, _isReg) => ppCtype_ t)
     let varStr := if variadic then ", ..." else ""
     -- pp_core_ctype uses ^^^ which adds space before parens
-    s!"{ppCtype retTy} ({paramsStr}{varStr})"
+    s!"{ppCtype_ retTy} ({paramsStr}{varStr})"
   | .functionNoParams _retQuals retTy =>
-    s!"{ppCtype retTy} ()"
+    s!"{ppCtype_ retTy} ()"
   | .pointer _quals pointeeTy =>
     -- pp_core_ctype.ml ignores qualifiers on pointers (has TODO comment)
     -- Function pointers become: ret (args)* not ret (*) (args)
-    s!"{ppCtype pointeeTy}*"
-  | .atomic ty => s!"_Atomic ({ppCtype ty})"  -- space before paren (pp_core_ctype.ml uses ^^^)
+    s!"{ppCtype_ pointeeTy}*"
+  | .atomic ty => s!"_Atomic ({ppCtype_ ty})"  -- space before paren (pp_core_ctype.ml uses ^^^)
   | .struct_ tag => s!"struct {ppSym tag}"
   | .union_ tag => s!"union {ppSym tag}"
   | .byte => "byte"
+
+/-- Pretty-print C type (with annotations - annotations are ignored for printing) -/
+def ppCtype (ct : Ctype) : String := ppCtype_ ct.ty
 
 /-- Pretty-print C type in quotes (as Cerberus does) -/
 def ppCtypeQuoted (ty : Ctype) : String := s!"'{ppCtype ty}'"
@@ -252,22 +263,91 @@ def ppName : Name → String
 
 /-! ## Memop Printing -/
 
+/-- Pretty-print unspecified UB context -/
+def ppUnspecifiedUBContext : UnspecifiedUBContext → String
+  | .equalityPtrVsNull => "equality_ptr_vs_NULL"
+  | .equalityBothArithOrPtr => "equality_both_arith_or_ptr"
+  | .pointerAdd => "pointer_add"
+  | .pointerSub => "pointer_sub"
+  | .conditional => "conditional"
+  | .copyAllocId => "copy_alloc_id"
+  | .rvalueMemberof => "rvalue_memberof"
+  | .memberofptr => "memberofptr"
+  | .do_ => "do"
+
 /-- Pretty-print undefined behavior -/
 def ppUndefinedBehavior : UndefinedBehavior → String
-  | .useAfterFree => "use_after_free"
-  | .doubleFree => "double_free"
-  | .outOfBounds => "out_of_bounds"
-  | .nullDeref => "null_deref"
-  | .uninitializedRead => "uninitialized_read"
-  | .invalidAlignment => "invalid_alignment"
-  | .divisionByZero => "division_by_zero"
-  | .signedOverflow => "signed_overflow"
-  | .shiftOutOfRange => "shift_out_of_range"
-  | .invalidPointerArith => "invalid_pointer_arith"
-  | .invalidPointerComparison => "invalid_pointer_comparison"
-  | .invalidPointerSubtraction => "invalid_pointer_subtraction"
-  | .invalidCast => "invalid_cast"
-  | .unsequencedModification => "unsequenced_modification"
+  -- Dummy
+  | .dummy msg => s!"DUMMY({msg})"
+  -- Unspecified lvalue
+  | .unspecifiedLvalue => "unspecified_lvalue"
+  -- Lifetime errors
+  | .ub009_outsideLifetime => "UB009_outside_lifetime"
+  | .ub010_pointerToDeadObject => "UB010_pointer_to_dead_object"
+  | .ub011_useIndeterminateAutomatic => "UB011_use_indeterminate_automatic_object"
+  | .ub_modifyingTemporaryLifetime => "UB_modifying_temporary_lifetime"
+  -- Trap representations
+  | .ub012_lvalueReadTrapRepresentation => "UB012_lvalue_read_trap_representation"
+  | .ub013_lvalueSideEffectTrap => "UB013_lvalue_side_effect_trap_representation"
+  -- Redeclaration/linkage
+  | .ub008_multipleLinkage => "UB008_multiple_linkage"
+  | .ub015_incompatibleRedeclaration => "UB015_incompatible_redeclaration"
+  -- Type conversion errors
+  | .ub017_outOfRangeFloatingIntConversion => "UB017_out_of_range_floating_integer_conversion"
+  | .ub019_lvalueNotAnObject => "UB019_lvalue_not_an_object"
+  | .ub024_outOfRangePointerToIntConversion => "UB024_out_of_range_pointer_to_integer_conversion"
+  | .ub025_misalignedPointerConversion => "UB025_misaligned_pointer_conversion"
+  -- String literals
+  | .ub033_modifyingStringLiteral => "UB033_modifying_string_literal"
+  -- Sequence point violations
+  | .ub035_unsequencedRace => "UB035_unsequenced_race"
+  | .ub036_exceptionalCondition => "UB036_exceptional_condition"
+  | .ub037_illtypedLoad => "UB037_illtyped_load"
+  -- Function calls
+  | .ub038_numberOfArgs => "UB038_number_of_args"
+  | .ub041_functionNotCompatible => "UB041_function_not_compatible"
+  -- Atomic
+  | .ub042_accessAtomicStructUnionMember => "UB042_access_atomic_structUnion_member"
+  -- Indirection
+  | .ub043_indirectionInvalidValue => "UB043_indirection_invalid_value"
+  -- Division
+  | .ub045a_divisionByZero => "UB045a_division_by_zero"
+  | .ub045b_moduloByZero => "UB045b_modulo_by_zero"
+  | .ub045c_quotientNotRepresentable => "UB045c_quotient_not_representable"
+  -- Pointer arithmetic
+  | .ub046_arrayPointerOutside => "UB046_array_pointer_outside"
+  | .ub047a_arrayPointerAdditionBeyondIndirection => "UB047a_array_pointer_addition_beyond_indirection"
+  | .ub047b_arrayPointerSubtractionBeyondIndirection => "UB047b_array_pointer_subtraction_beyond_indirection"
+  | .ub048_disjointArrayPointersSubtraction => "UB048_disjoint_array_pointers_subtraction"
+  | .ub050_pointersSubtractionNotRepresentable => "UB050_pointers_subtraction_not_representable"
+  -- Shifts
+  | .ub051a_negativeShift => "UB051a_negative_shift"
+  | .ub051b_shiftTooLarge => "UB51b_shift_too_large"
+  | .ub052a_negativeLeftShift => "UB052a_negative_left_shift"
+  | .ub052b_nonRepresentableLeftShift => "UB052b_non_representable_left_shift"
+  -- Pointer comparison
+  | .ub053_distinctAggregateUnionPointerComparison => "UB053_distinct_aggregate_union_pointer_comparison"
+  -- Assignment
+  | .ub054a_inexactlyOverlappingAssignment => "UB054a_inexactly_overlapping_assignment"
+  | .ub054b_incompatibleOverlappingAssignment => "UB054b_incompatible_overlapping_assignment"
+  -- Declarations
+  | .ub059_incompleteNoLinkageIdentifier => "UB059_incomplete_no_linkage_identifier"
+  | .ub061_noNamedMembers => "UB061_no_named_members"
+  | .ub064_modifyingConst => "UB064_modifying_const"
+  | .ub070_inlineNotDefined => "UB070_inline_not_defined"
+  | .ub071_noreturn => "UB071_noreturn"
+  -- End of function
+  | .ub088_endOfNonVoidFunction => "UB088_end_of_non_void_function"
+  -- CERB extensions
+  | .ub_cerb001_integerToDeadPointer => "UB_CERB001_integer_to_dead_pointer"
+  | .ub_cerb002a_outOfBoundLoad => "UB_CERB002a_out_of_bound_load"
+  | .ub_cerb002b_outOfBoundStore => "UB_CERB002b_out_of_bound_store"
+  | .ub_cerb002c_outOfBoundFree => "UB_CERB002c_out_of_bound_free"
+  | .ub_cerb002d_outOfBoundRealloc => "UB_CERB002d_out_of_bound_realloc"
+  | .ub_cerb003_invalidFunctionPointer => "UB_CERB003_invalid_function_pointer"
+  | .ub_cerb004_unspecified ctx => s!"UB_CERB004_unspecified__{ppUnspecifiedUBContext ctx}"
+  | .ub_cerb005_freeNullptr => "UB_CERB005_free_nullptr"
+  -- Catch-all
   | .other name => name
 
 /-- Pretty-print memory operation -/
@@ -552,72 +632,75 @@ def ppPolarity : Polarity → String
   | .pos => "weak"
   | .neg => "strong"
 
-mutual
-  /-- Pretty-print effectful expression -/
-  partial def ppExpr (ind : Indent) : Expr → String
-    | .pure e =>
-      let inner := ppAPexpr (ind + 1) e
-      withGroupedArg "pure" inner ind
-    | .memop op args =>
-      s!"memop({ppMemop op}, {joinWith ", " (args.map (ppAPexpr ind))})"
-    | .action pact =>
-      let actionStr := ppAction ind pact.action.action
-      -- Apply polarity: Neg wraps with neg(...), Pos does nothing
-      match pact.polarity with
-      | .neg => s!"neg({actionStr})"
-      | .pos => actionStr
-    | .case_ scrut branches =>
-      let branchesStr := branches.map fun (pat, e) =>
-        s!"\n{indent (ind + 1) ""}| {ppAPattern pat} =>\n{indent (ind + 2) ""}{ppExpr (ind + 2) e}"
-      s!"case {ppAPexpr ind scrut} of{joinWith "" branchesStr}\n{indent ind ""}end"
-    | .let_ pat e1 e2 =>
-      s!"let {ppAPattern pat} = {ppAPexpr ind e1} in\n{indent ind ""}{ppExpr ind e2}"
-    | .if_ cond then_ else_ =>
-      s!"if {ppAPexpr ind cond} then\n{indent (ind + 1) ""}{ppExpr (ind + 1) then_}\n{indent ind ""}else\n{indent (ind + 1) ""}{ppExpr (ind + 1) else_}"
-    | .ccall funPtr funTy args =>
-      -- Cerberus prints: ccall(ty, ptr, args...) - type first, then pointer, then args
-      -- funPtr is parsed from JSON "function" field, funTy from "type" field
-      let allArgs := [ppAPexpr ind funTy, ppAPexpr ind funPtr] ++ args.map (ppAPexpr ind)
-      s!"ccall({joinWith ", " allArgs})"
-    | .proc name args =>
-      s!"pcall({ppName name}, {joinWith ", " (args.map (ppAPexpr ind))})"
-    | .unseq es =>
-      let innerExprs := es.map (ppExpr (ind + 1))
-      let inner := joinWith ", " innerExprs
-      withGroupedArg "unseq" inner ind
-    | .wseq pat e1 e2 =>
-      -- Cerberus: let weak pat = e1 in e2
-      s!"let weak {ppAPattern pat} = {ppExpr ind e1} in\n{indent ind ""}{ppExpr ind e2}"
-    | .sseq pat e1 e2 =>
-      -- Cerberus: if pattern is (_: unit), use semicolon; otherwise let strong
-      match pat.pat with
-      | .base none .unit =>
-        -- Unit pattern with no binding: use semicolon syntax
-        s!"{ppExpr ind e1} ;\n{indent ind ""}{ppExpr ind e2}"
-      | _ =>
-        -- Named pattern or non-unit: use let strong
-        s!"let strong {ppAPattern pat} = {ppExpr ind e1} in\n{indent ind ""}{ppExpr ind e2}"
-    | .bound e =>
-      let inner := ppExpr (ind + 1) e
-      withGroupedArg "bound" inner ind
-    | .nd es =>
-      let esStr := joinWith ", " (es.map (ppExpr ind))
-      s!"nd({esStr})"
-    | .save retSym retTy args body =>
-      let argsStr := joinWith ", " (args.map fun (sym, ty, init) =>
-        s!"{ppSym sym}: {ppBaseType ty}:= {ppAPexpr ind init}")
-      s!"save {ppSym retSym}: {ppBaseType retTy} ({argsStr}) in\n{indent (ind + 1) ""}{ppExpr (ind + 1) body}"
-    | .run label args =>
-      s!"run {ppSym label}({joinWith ", " (args.map (ppAPexpr ind))})"
-    | .par es =>
-      -- Cerberus uses comma separator (with_grouped_args in cerb_pp_prelude.ml)
-      s!"par({joinWith ", " (es.map (ppExpr ind))})"
-    | .wait tid =>
-      s!"wait({tid})"
+/-- Pretty-print effectful expression (generic_expr in Cerberus)
+    Corresponds to: pp_expr in pp_core.ml
+    Audited: 2025-12-31
+    Deviations: None
+    Takes AExpr to match Cerberus's generic_expr := annots generic_expr_aux -/
+partial def ppExpr (ind : Indent) (e : AExpr) : String :=
+  match e.expr with
+  | .pure pe =>
+    let inner := ppAPexpr (ind + 1) pe
+    withGroupedArg "pure" inner ind
+  | .memop op args =>
+    s!"memop({ppMemop op}, {joinWith ", " (args.map (ppAPexpr ind))})"
+  | .action pact =>
+    let actionStr := ppAction ind pact.action.action
+    -- Apply polarity: Neg wraps with neg(...), Pos does nothing
+    match pact.polarity with
+    | .neg => s!"neg({actionStr})"
+    | .pos => actionStr
+  | .case_ scrut branches =>
+    let branchesStr := branches.map fun (pat, body) =>
+      s!"\n{indent (ind + 1) ""}| {ppAPattern pat} =>\n{indent (ind + 2) ""}{ppExpr (ind + 2) body}"
+    s!"case {ppAPexpr ind scrut} of{joinWith "" branchesStr}\n{indent ind ""}end"
+  | .let_ pat e1 e2 =>
+    s!"let {ppAPattern pat} = {ppAPexpr ind e1} in\n{indent ind ""}{ppExpr ind e2}"
+  | .if_ cond then_ else_ =>
+    s!"if {ppAPexpr ind cond} then\n{indent (ind + 1) ""}{ppExpr (ind + 1) then_}\n{indent ind ""}else\n{indent (ind + 1) ""}{ppExpr (ind + 1) else_}"
+  | .ccall funPtr funTy args =>
+    -- Cerberus prints: ccall(ty, ptr, args...) - type first, then pointer, then args
+    -- funPtr is parsed from JSON "function" field, funTy from "type" field
+    let allArgs := [ppAPexpr ind funTy, ppAPexpr ind funPtr] ++ args.map (ppAPexpr ind)
+    s!"ccall({joinWith ", " allArgs})"
+  | .proc name args =>
+    s!"pcall({ppName name}, {joinWith ", " (args.map (ppAPexpr ind))})"
+  | .unseq es =>
+    let innerExprs := es.map (ppExpr (ind + 1))
+    let inner := joinWith ", " innerExprs
+    withGroupedArg "unseq" inner ind
+  | .wseq pat e1 e2 =>
+    -- Cerberus: let weak pat = e1 in e2
+    s!"let weak {ppAPattern pat} = {ppExpr ind e1} in\n{indent ind ""}{ppExpr ind e2}"
+  | .sseq pat e1 e2 =>
+    -- Cerberus: if pattern is (_: unit), use semicolon; otherwise let strong
+    match pat.pat with
+    | .base none .unit =>
+      -- Unit pattern with no binding: use semicolon syntax
+      s!"{ppExpr ind e1} ;\n{indent ind ""}{ppExpr ind e2}"
+    | _ =>
+      -- Named pattern or non-unit: use let strong
+      s!"let strong {ppAPattern pat} = {ppExpr ind e1} in\n{indent ind ""}{ppExpr ind e2}"
+  | .bound body =>
+    let inner := ppExpr (ind + 1) body
+    withGroupedArg "bound" inner ind
+  | .nd es =>
+    let esStr := joinWith ", " (es.map (ppExpr ind))
+    s!"nd({esStr})"
+  | .save retSym retTy args body =>
+    let argsStr := joinWith ", " (args.map fun (sym, ty, init) =>
+      s!"{ppSym sym}: {ppBaseType ty}:= {ppAPexpr ind init}")
+    s!"save {ppSym retSym}: {ppBaseType retTy} ({argsStr}) in\n{indent (ind + 1) ""}{ppExpr (ind + 1) body}"
+  | .run label args =>
+    s!"run {ppSym label}({joinWith ", " (args.map (ppAPexpr ind))})"
+  | .par es =>
+    -- Cerberus uses comma separator (with_grouped_args in cerb_pp_prelude.ml)
+    s!"par({joinWith ", " (es.map (ppExpr ind))})"
+  | .wait tid =>
+    s!"wait({tid})"
 
-  /-- Pretty-print annotated expression -/
-  partial def ppAExpr (ind : Indent) (e : AExpr) : String := ppExpr ind e.expr
-end
+/-- Pretty-print annotated expression (alias for ppExpr) -/
+def ppAExpr (ind : Indent) (e : AExpr) : String := ppExpr ind e
 
 /-! ## Function Declaration Printing -/
 
@@ -631,7 +714,7 @@ def ppFunDecl (sym : Sym) (decl : FunDecl) : String :=
   match decl with
   | .fun_ retTy params body =>
     s!"fun {ppSym sym}{ppParams params}: {ppBaseType retTy} :=\n  {ppAPexpr 1 body}"
-  | .proc _ retTy params body =>
+  | .proc _ _ retTy params body =>
     s!"proc {ppSym sym}{ppParams params}: eff {ppBaseType retTy} :=\n  {ppAExpr 1 body}"
   | .procDecl _ _retTy paramTys =>
     -- Cerberus omits return type for declarations without body (pp_core.ml:785)

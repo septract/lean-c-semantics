@@ -4,6 +4,6 @@
 import CToLean.Core
 import CToLean.Parser
 import CToLean.Memory
-import CToLean.Semantics
+-- import CToLean.Semantics  -- Temporarily disabled during Core refactor
 import CToLean.Theorems
 import CToLean.Test
