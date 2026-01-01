@@ -213,7 +213,7 @@ def allocateImpl (name : String) (size : Nat) (ty : Option Ctype)
 
 /-- Reconstruct memory value from bytes -/
 partial def reconstructValue (env : TypeEnv) (ty : Ctype) (bytes : List AbsByte) : ConcreteMemM MemValue := do
-  match ty with
+  match ty.ty with
   | .basic (.integer ity) =>
     let signed := match ity with
       | .signed _ => true
@@ -236,21 +236,23 @@ partial def reconstructValue (env : TypeEnv) (ty : Ctype) (bytes : List AbsByte)
       pure (.unspecified ty)
 
   | .pointer quals pointeeTy =>
+    let pointeeCty : Ctype := { ty := pointeeTy }
     match bytesToInt bytes false with
     | some 0 =>
-      pure (.pointer (.pointer quals pointeeTy) (nullPtrval pointeeTy))
+      pure (.pointer (Ctype.pointer quals pointeeCty) (nullPtrval pointeeCty))
     | some addr =>
       let prov := bytesProvenance bytes
-      pure (.pointer (.pointer quals pointeeTy) { prov := prov, base := .concrete none addr.toNat })
+      pure (.pointer (Ctype.pointer quals pointeeCty) { prov := prov, base := .concrete none addr.toNat })
     | none =>
       pure (.unspecified ty)
 
   | .array elemTy (some n) =>
-    let elemSize := sizeof env elemTy
+    let elemCty : Ctype := { ty := elemTy }
+    let elemSize := sizeof env elemCty
     let elems ← List.range n |>.mapM fun i => do
       let start := i * elemSize
       let elemBytes := bytes.drop start |>.take elemSize
-      reconstructValue env elemTy elemBytes
+      reconstructValue env elemCty elemBytes
     pure (.array elems)
 
   | _ =>
