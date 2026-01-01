@@ -81,6 +81,14 @@ See `docs/MEMORY_MODEL.md` for design details.
 - Floating point operations
 - Full C standard library
 
+## MUST FIX (Blocking Issues)
+- [ ] **Export pointer values as structured JSON instead of strings**
+  - Currently `OVpointer` values (including function pointers) are exported as `"Cfunction(f)"` strings
+  - This loses symbol IDs, causing lookup failures when the same function has different IDs in different contexts
+  - Workaround: `cfunction` looks up funinfo by name only (see `File.lookupFunInfoByName`)
+  - Proper fix: Modify `json_core.ml` to export `PVfunction sym` with full symbol data
+  - Risk: Current workaround assumes function names are unique; will break with static functions in different TUs
+
 ## Low Priority
 - [ ] Fix Cerberus `--pp_core_out` flag to work without requiring `--pp=core`
 - [ ] Audit all type definitions for hacky special cases - use proper type system representations
