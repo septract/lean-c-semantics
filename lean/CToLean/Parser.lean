@@ -1335,6 +1335,34 @@ def parseFunDecl (j : Json) : Except String (Sym × FunDecl) := do
     .ok (s, .builtinDecl loc rt pts)
   | other => .error s!"unknown fun decl tag '{other}', expected one of {funDeclTags}"
 
+/-- Parse a FunInfo entry from JSON -/
+def parseFunInfoEntry (j : Json) : Except String (Sym × FunInfo) := do
+  let symJ ← getField j "symbol"
+  let sym ← parseSym symJ
+  let locJ ← getField j "loc"
+  let loc := match parseLoc locJ with
+    | .ok l => l
+    | .error _ => Loc.unknown
+  let (_, retTyJ) ← getTaggedFieldMulti j "return_type" ctypeTags
+  let returnType ← parseCtype retTyJ
+  let paramsJ ← getArr j "params"
+  let params ← paramsJ.toList.mapM fun p => do
+    let symOpt ← match getFieldOpt p "symbol" with
+      | some s => if s.isNull then pure none else do
+          let sym ← parseSym s
+          pure (some sym)
+      | none => pure none
+    let (_, tyJ) ← getTaggedFieldMulti p "type" ctypeTags
+    let ty ← parseCtype tyJ
+    pure { sym := symOpt, ty := ty : FunParam }
+  let isVariadic ← match getFieldOpt j "is_variadic" with
+    | some (.bool b) => pure b
+    | _ => pure false
+  let hasProto ← match getFieldOpt j "has_proto" with
+    | some (.bool b) => pure b
+    | _ => pure true
+  pure (sym, { loc, returnType, params, isVariadic, hasProto })
+
 /-- Parse a complete Core File from JSON -/
 def parseFile (j : Json) : Except String File := do
   -- Parse main symbol
@@ -1349,6 +1377,15 @@ def parseFile (j : Json) : Except String File := do
   let tagDefsList ← tagDefsJ.toList.mapM parseTagDef
   let tagDefs : TagDefs := tagDefsList.map fun (s, l, d) => (s, (l, d))
 
+  -- Parse stdlib functions (if present)
+  let stdlib ← match getFieldOpt j "stdlib" with
+    | some stdlibJ =>
+      let arr ← match stdlibJ with
+        | .arr a => .ok a
+        | _ => .error "stdlib must be an array"
+      arr.toList.mapM parseFunDecl
+    | none => .ok []
+
   -- Parse global declarations
   let globsJ ← getArr j "globs"
   let globs ← globsJ.toList.mapM parseGlobDecl
@@ -1357,11 +1394,24 @@ def parseFile (j : Json) : Except String File := do
   let funsJ ← getArr j "funs"
   let funs ← funsJ.toList.mapM parseFunDecl
 
+  -- Parse function info map (for cfunction expression)
+  let funinfo ← match getFieldOpt j "funinfo" with
+    | some funinfoJ =>
+      let arr ← match funinfoJ with
+        | .arr a => .ok a
+        | _ => .error "funinfo must be an array"
+      let entries ← arr.toList.mapM parseFunInfoEntry
+      let map := entries.foldl (fun m (s, fi) => m.insert s fi) ({} : FunInfoMap)
+      .ok map
+    | none => .ok {}
+
   .ok {
     main := main
     tagDefs := tagDefs
+    stdlib := stdlib
     globs := globs
     funs := funs
+    funinfo := funinfo
   }
 
 /-- Parse a Core File from a JSON string -/

@@ -128,6 +128,33 @@ inductive LinkingKind where
   | normal (sym : Sym)
   deriving Repr, BEq, Inhabited
 
+/-! ## Function Info (for cfunction expression) -/
+
+/-- Function parameter info -/
+structure FunParam where
+  /-- Parameter symbol (may be None for unnamed parameters) -/
+  sym : Option Sym
+  /-- Parameter C type -/
+  ty : Ctype
+  deriving Repr, Inhabited
+
+/-- Function type info - used by cfunction() expression -/
+structure FunInfo where
+  /-- Source location -/
+  loc : Loc
+  /-- Return type -/
+  returnType : Ctype
+  /-- Parameter types (with optional names) -/
+  params : List FunParam
+  /-- Whether the function is variadic (takes ...) -/
+  isVariadic : Bool
+  /-- Whether the function has a prototype -/
+  hasProto : Bool
+  deriving Repr, Inhabited
+
+/-- Function info map: symbol -> function type information -/
+abbrev FunInfoMap := Std.HashMap Sym FunInfo
+
 /-! ## Core File -/
 
 /-- A complete Core program file -/
@@ -146,10 +173,19 @@ structure File where
   funs : FunMap := []
   /-- External symbol mapping -/
   extern : Std.HashMap Identifier (List Sym × LinkingKind) := {}
+  /-- Function type information (for cfunction expression) -/
+  funinfo : FunInfoMap := {}
 
 instance : Inhabited File := ⟨{}⟩
 
 /-- Create an empty Core file -/
 def File.empty : File := {}
+
+/-- Look up function info by symbol name.
+    Note: This is a workaround because pointer values in JSON are exported as strings,
+    losing the symbol ID. We look up by name only, which works in practice since
+    function names are unique within a translation unit. -/
+def File.lookupFunInfoByName (file : File) (name : Option String) : Option FunInfo :=
+  file.funinfo.toList.find? (fun (sym, _) => sym.name == name) |>.map (·.2)
 
 end CToLean.Core

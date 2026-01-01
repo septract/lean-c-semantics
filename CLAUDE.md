@@ -98,18 +98,52 @@ First-time setup:
 # Create dedicated opam switch with OCaml 4.14.1
 opam switch create cerberus-414 4.14.1
 
-# Install dependencies and Cerberus
+# Install dependencies
 cd cerberus
 OPAMSWITCH=cerberus-414 opam exec -- opam install --deps-only -y ./cerberus-lib.opam ./cerberus.opam
-OPAMSWITCH=cerberus-414 opam exec -- opam pin --yes --no-action add cerberus-lib .
-OPAMSWITCH=cerberus-414 opam exec -- opam pin --yes --no-action add cerberus .
-OPAMSWITCH=cerberus-414 opam exec -- opam install --yes cerberus
+
+# Install Cerberus using path pins (uses working directory, not git state)
+# CRITICAL: Use `-k path` to ensure uncommitted changes are picked up!
+OPAMSWITCH=cerberus-414 opam exec -- opam pin add cerberus-lib . -k path --yes
+OPAMSWITCH=cerberus-414 opam exec -- opam pin add cerberus . -k path --yes
 ```
 
 Verify it works:
 ```bash
 OPAMSWITCH=cerberus-414 opam exec -- cerberus --exec tests/ci/0001-emptymain.c
 ```
+
+### Updating Cerberus After Local Changes
+
+If you modify Cerberus source code (in `cerberus/`), reinstall to pick up changes:
+```bash
+cd cerberus
+OPAMSWITCH=cerberus-414 opam exec -- opam reinstall cerberus --yes
+```
+
+### Troubleshooting: Changes Not Being Picked Up
+
+**CRITICAL**: By default, opam pins to git repos only use **committed** changes. If your changes aren't being picked up after `opam reinstall`:
+
+1. **Check pin kind** - Run `opam pin list` and look for the kind:
+   - `path` = Good, uses working directory
+   - `git` or `rsync` with no `-dirty` suffix = Bad, only uses committed changes
+
+2. **Fix incorrect pins** - Remove and re-add with `-k path`:
+   ```bash
+   cd cerberus
+   OPAMSWITCH=cerberus-414 opam exec -- opam pin remove cerberus cerberus-lib --yes
+   OPAMSWITCH=cerberus-414 opam exec -- opam pin add cerberus-lib . -k path --yes
+   OPAMSWITCH=cerberus-414 opam exec -- opam pin add cerberus . -k path --yes
+   ```
+
+3. **Verify changes are detected** - After re-pinning, the version should show `-dirty` suffix if you have uncommitted changes:
+   ```bash
+   OPAMSWITCH=cerberus-414 opam exec -- opam pin list
+   # Should show: cerberus.cn-pin-XX-gXXXXXXX-dirty
+   ```
+
+See [opam GitHub issue #4010](https://github.com/ocaml/opam/issues/4010) for more details on this behavior.
 
 ### Running Cerberus
 
@@ -207,6 +241,8 @@ Target: 90%+ agreement on sequential tests.
 
 ### Shell Commands
 **IMPORTANT**: Do NOT use `sed`, `awk`, `tr`, or similar shell string manipulation tools for ad-hoc text processing. These commands are error-prone and often fail silently or produce unexpected results across different platforms.
+
+**CRITICAL**: NEVER use `sed -n 'X,Yp'` or similar to read file contents. ALWAYS use the Read tool to read files. The Read tool is reliable and works consistently.
 
 If string manipulation is needed:
 - Write a proper Lean program to do the transformation

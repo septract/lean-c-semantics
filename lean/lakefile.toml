@@ -1,6 +1,6 @@
 name = "CToLean"
 version = "0.1.0"
-defaultTargets = ["CToLean", "ctolean_pp", "ctolean_test", "ctolean_testbatch"]
+defaultTargets = ["CToLean", "ctolean_pp", "ctolean_test", "ctolean_testbatch", "ctolean_interp"]
 
 [[lean_lib]]
 name = "CToLean"
@@ -20,3 +20,7 @@ root = "CToLean.TestPrettyPrint"
 [[lean_exe]]
 name = "ctolean_memtest"
 root = "CToLean.TestMemory"
+
+[[lean_exe]]
+name = "ctolean_interp"
+root = "CToLean.TestInterpreter"
