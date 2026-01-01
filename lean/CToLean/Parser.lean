@@ -175,7 +175,8 @@ def parseSymOpt (j : Json) : Except String (Option Sym) :=
 /-- Parse an Identifier from JSON -/
 def parseIdentifier (j : Json) : Except String Identifier := do
   let s ← j.getStr?
-  .ok { name := s }
+  -- Identifier in JSON is just a string; we create a dummy location
+  .ok { loc := Loc.unknown, name := s }
 
 /-- Parse a Loc from JSON -/
 def parseLoc (j : Json) : Except String Loc := do
@@ -311,14 +312,19 @@ def parseIntegerTypeStruct (j : Json) : Except String IntegerType := do
   | "Ptraddr_t" => .ok .ptraddr_t
   | other => .error s!"unknown integer type tag '{other}', expected one of {integerTypeTags}"
 
-/-- Parse FloatingType from JSON string -/
-def parseFloatingTypeStruct (j : Json) : Except String FloatingType := do
+/-- Parse RealFloatingType from JSON string -/
+def parseRealFloatingType (j : Json) : Except String RealFloatingType := do
   let s ← j.getStr?
   match s with
   | "Float" => .ok .float
   | "Double" => .ok .double
   | "LongDouble" => .ok .longDouble
-  | _ => .error s!"unknown floating type: {s}"
+  | _ => .error s!"unknown real floating type: {s}"
+
+/-- Parse FloatingType from JSON string -/
+def parseFloatingTypeStruct (j : Json) : Except String FloatingType := do
+  let rft ← parseRealFloatingType j
+  .ok (.realFloating rft)
 
 /-- Parse BasicType from structured JSON -/
 def parseBasicType (j : Json) : Except String BasicType := do
@@ -334,8 +340,8 @@ def parseBasicType (j : Json) : Except String BasicType := do
     .ok (.floating fty)
   | other => .error s!"unknown basic type tag '{other}', expected one of {basicTypeTags}"
 
-/-- Parse a Ctype from structured JSON -/
-partial def parseCtype (j : Json) : Except String Ctype := do
+/-- Parse a Ctype_ (inner type) from structured JSON -/
+partial def parseCtype_ (j : Json) : Except String Ctype_ := do
   let tag ← getTag j
   match tag with
   | "Void" => .ok .void
@@ -346,13 +352,13 @@ partial def parseCtype (j : Json) : Except String Ctype := do
     .ok (.basic bty)
   | "Array" =>
     let (_, elemTy) ← getTaggedFieldMulti j "element_type" ctypeTags
-    let elem ← parseCtype elemTy
+    let elem ← parseCtype_ elemTy
     let sizeJ ← getField j "size"
     let size := if sizeJ.isNull then none else sizeJ.getInt?.toOption.map (·.toNat)
     .ok (.array elem size)
   | "Function" =>
     let (_, retTy) ← getTaggedFieldMulti j "return_type" ctypeTags
-    let ret ← parseCtype retTy
+    let ret ← parseCtype_ retTy
     let retQualsJ ← getField j "return_qualifiers"
     let retQuals ← parseQualifiers retQualsJ
     let paramsJ ← getArr j "params"
@@ -360,13 +366,17 @@ partial def parseCtype (j : Json) : Except String Ctype := do
       let qualsJ ← getField p "qualifiers"
       let quals ← parseQualifiers qualsJ
       let (_, tyJ) ← getTaggedFieldMulti p "type" ctypeTags
-      let ty ← parseCtype tyJ
-      .ok (quals, ty)
+      let ty ← parseCtype_ tyJ
+      -- Parse is_register, defaulting to false if not present
+      let isRegister ← match j.getObjValD "is_register" with
+        | .bool b => .ok b
+        | _ => .ok false
+      .ok (quals, ty, isRegister)
     let variadic ← getBool j "variadic"
     .ok (.function retQuals ret params variadic)
   | "FunctionNoParams" =>
     let (_, retTy) ← getTaggedFieldMulti j "return_type" ctypeTags
-    let ret ← parseCtype retTy
+    let ret ← parseCtype_ retTy
     let retQualsJ ← getField j "return_qualifiers"
     let retQuals ← parseQualifiers retQualsJ
     .ok (.functionNoParams retQuals ret)
@@ -374,11 +384,11 @@ partial def parseCtype (j : Json) : Except String Ctype := do
     let qualsJ ← getField j "qualifiers"
     let quals ← parseQualifiers qualsJ
     let (_, pointeeTy) ← getTaggedFieldMulti j "pointee_type" ctypeTags
-    let pointee ← parseCtype pointeeTy
+    let pointee ← parseCtype_ pointeeTy
     .ok (.pointer quals pointee)
   | "Atomic" =>
     let (_, innerTy) ← getTaggedFieldMulti j "inner_type" ctypeTags
-    let inner ← parseCtype innerTy
+    let inner ← parseCtype_ innerTy
     .ok (.atomic inner)
   | "Struct" =>
     let tagSym ← getField j "struct_tag"
@@ -390,57 +400,70 @@ partial def parseCtype (j : Json) : Except String Ctype := do
     .ok (.union_ sym)
   | other => .error s!"unknown ctype tag '{other}', expected one of {ctypeTags}"
 
+/-- Parse a Ctype (with annotations) from structured JSON -/
+partial def parseCtype (j : Json) : Except String Ctype := do
+  -- Parse inner type
+  let ty ← parseCtype_ j
+  -- Parse annotations (currently just location, same as parseAnnots)
+  let annots := parseAnnots j
+  .ok { annots := annots, ty := ty }
+
 /-- Parse a ctype from a string representation (for embedded ctypes in pp_pointer_value output) -/
 -- This is a simplified parser for ctypes that appear inside string values
+-- Returns a Ctype with empty annotations
 partial def parseCtypeStr (s : String) : Except String Ctype := do
-  let s := s.trim
-  -- Handle basic types
-  if s == "void" then return .void
-  else if s == "char" then return .basic (.integer .char)
-  else if s == "_Bool" then return .basic (.integer .bool)
-  else if s == "signed char" || s == "signed ichar" then return .basic (.integer (.signed .ichar))
-  else if s == "unsigned char" || s == "unsigned ichar" then return .basic (.integer (.unsigned .ichar))
-  else if s == "short" || s == "signed short" then return .basic (.integer (.signed .short))
-  else if s == "unsigned short" then return .basic (.integer (.unsigned .short))
-  else if s == "int" || s == "signed int" then return .basic (.integer (.signed .int_))
-  else if s == "unsigned int" then return .basic (.integer (.unsigned .int_))
-  else if s == "long" || s == "signed long" then return .basic (.integer (.signed .long))
-  else if s == "unsigned long" then return .basic (.integer (.unsigned .long))
-  else if s == "long long" || s == "signed long long" || s == "signed long_long" then return .basic (.integer (.signed .longLong))
-  else if s == "unsigned long long" || s == "unsigned long_long" then return .basic (.integer (.unsigned .longLong))
-  else if s == "float" then return .basic (.floating .float)
-  else if s == "double" then return .basic (.floating .double)
-  else if s == "long double" || s == "long_double" then return .basic (.floating .longDouble)
-  -- Handle size/width types
-  else if s == "size_t" then return .basic (.integer .size_t)
-  else if s == "ptrdiff_t" then return .basic (.integer .ptrdiff_t)
-  else if s == "wchar_t" then return .basic (.integer .wchar_t)
-  else if s == "wint_t" then return .basic (.integer .wint_t)
-  else if s == "ptraddr_t" then return .basic (.integer .ptraddr_t)
-  -- Handle pointer types
-  else if s.endsWith "*" then
-    let inner := s.dropRight 1 |>.trim
-    let innerTy ← parseCtypeStr inner
-    return .pointer {} innerTy
-  -- Handle atomic types: _Atomic (T) or _Atomic(T)
-  else if s.startsWith "_Atomic " || s.startsWith "_Atomic(" then
-    let inner := if s.startsWith "_Atomic (" then
-      -- _Atomic (T) - strip "_Atomic (" and ")"
-      (s.drop 9).dropRight 1 |>.trim
-    else
-      -- _Atomic(T) - strip "_Atomic(" and ")"
-      (s.drop 8).dropRight 1 |>.trim
-    let innerTy ← parseCtypeStr inner
-    return .atomic innerTy
-  -- Handle struct/union types
-  else if s.startsWith "struct " then
-    let tag := s.drop 7
-    return .struct_ { id := 0, name := some tag }
-  else if s.startsWith "union " then
-    let tag := s.drop 6
-    return .union_ { id := 0, name := some tag }
-  -- Default to void for unrecognized types
-  else return .void
+  let ty ← parseCtypeStr_ s
+  return { annots := [], ty := ty }
+where
+  parseCtypeStr_ (s : String) : Except String Ctype_ := do
+    let s := s.trim
+    -- Handle basic types
+    if s == "void" then return .void
+    else if s == "char" then return .basic (.integer .char)
+    else if s == "_Bool" then return .basic (.integer .bool)
+    else if s == "signed char" || s == "signed ichar" then return .basic (.integer (.signed .ichar))
+    else if s == "unsigned char" || s == "unsigned ichar" then return .basic (.integer (.unsigned .ichar))
+    else if s == "short" || s == "signed short" then return .basic (.integer (.signed .short))
+    else if s == "unsigned short" then return .basic (.integer (.unsigned .short))
+    else if s == "int" || s == "signed int" then return .basic (.integer (.signed .int_))
+    else if s == "unsigned int" then return .basic (.integer (.unsigned .int_))
+    else if s == "long" || s == "signed long" then return .basic (.integer (.signed .long))
+    else if s == "unsigned long" then return .basic (.integer (.unsigned .long))
+    else if s == "long long" || s == "signed long long" || s == "signed long_long" then return .basic (.integer (.signed .longLong))
+    else if s == "unsigned long long" || s == "unsigned long_long" then return .basic (.integer (.unsigned .longLong))
+    else if s == "float" then return .basic (.floating (.realFloating .float))
+    else if s == "double" then return .basic (.floating (.realFloating .double))
+    else if s == "long double" || s == "long_double" then return .basic (.floating (.realFloating .longDouble))
+    -- Handle size/width types
+    else if s == "size_t" then return .basic (.integer .size_t)
+    else if s == "ptrdiff_t" then return .basic (.integer .ptrdiff_t)
+    else if s == "wchar_t" then return .basic (.integer .wchar_t)
+    else if s == "wint_t" then return .basic (.integer .wint_t)
+    else if s == "ptraddr_t" then return .basic (.integer .ptraddr_t)
+    -- Handle pointer types
+    else if s.endsWith "*" then
+      let inner := s.dropRight 1 |>.trim
+      let innerTy ← parseCtypeStr_ inner
+      return .pointer {} innerTy
+    -- Handle atomic types: _Atomic (T) or _Atomic(T)
+    else if s.startsWith "_Atomic " || s.startsWith "_Atomic(" then
+      let inner := if s.startsWith "_Atomic (" then
+        -- _Atomic (T) - strip "_Atomic (" and ")"
+        (s.drop 9).dropRight 1 |>.trim
+      else
+        -- _Atomic(T) - strip "_Atomic(" and ")"
+        (s.drop 8).dropRight 1 |>.trim
+      let innerTy ← parseCtypeStr_ inner
+      return .atomic innerTy
+    -- Handle struct/union types
+    else if s.startsWith "struct " then
+      let tag := s.drop 7
+      return .struct_ { id := 0, name := some tag }
+    else if s.startsWith "union " then
+      let tag := s.drop 6
+      return .union_ { id := 0, name := some tag }
+    -- Default to void for unrecognized types
+    else return .void
 
 /-! ## Value Parsing -/
 
@@ -1118,7 +1141,7 @@ mutual
         let body ← getField b "body"
         let p ← parsePattern pat
         let e ← parseExpr body
-        .ok (p, e.expr)
+        .ok (p, e)
       .ok (Expr.case_ s bs)
     | "Elet" =>
       let (_, pat) ← getTaggedFieldMulti exprJ "pattern" patternTags
@@ -1127,7 +1150,7 @@ mutual
       let e1 ← parsePexpr binding
       let body ← getField exprJ "body"
       let e2 ← parseExpr body
-      .ok (Expr.let_ p e1 e2.expr)
+      .ok (Expr.let_ p e1 e2)
     | "Eif" =>
       let cond ← getField exprJ "condition"
       let c ← parsePexpr cond
@@ -1135,7 +1158,7 @@ mutual
       let t ← parseExpr then_
       let else_ ← getField exprJ "else_branch"
       let e ← parseExpr else_
-      .ok (Expr.if_ c t.expr e.expr)
+      .ok (Expr.if_ c t e)
     | "Eccall" =>
       -- "type" field contains the function type as a pexpr
       -- This is typically a PEval(Vctype(...)) but can also be a symbol or other
@@ -1156,7 +1179,7 @@ mutual
     | "Eunseq" =>
       let es ← getArr exprJ "exprs"
       let exprs ← es.toList.mapM parseExpr
-      .ok (Expr.unseq (exprs.map (·.expr)))
+      .ok (Expr.unseq exprs)
     | "Ewseq" =>
       let (_, pat) ← getTaggedFieldMulti exprJ "pattern" patternTags
       let p ← parsePattern pat
@@ -1164,7 +1187,7 @@ mutual
       let l ← parseExpr left
       let right ← getField exprJ "right"
       let r ← parseExpr right
-      .ok (Expr.wseq p l.expr r.expr)
+      .ok (Expr.wseq p l r)
     | "Esseq" =>
       let (_, pat) ← getTaggedFieldMulti exprJ "pattern" patternTags
       let p ← parsePattern pat
@@ -1172,15 +1195,15 @@ mutual
       let l ← parseExpr left
       let right ← getField exprJ "right"
       let r ← parseExpr right
-      .ok (Expr.sseq p l.expr r.expr)
+      .ok (Expr.sseq p l r)
     | "Ebound" =>
       let e ← getField exprJ "expr"
       let ex ← parseExpr e
-      .ok (Expr.bound ex.expr)
+      .ok (Expr.bound ex)
     | "End" =>
       let es ← getArr exprJ "exprs"
       let exprs ← es.toList.mapM parseExpr
-      .ok (Expr.nd (exprs.map (·.expr)))
+      .ok (Expr.nd exprs)
     | "Esave" =>
       let label ← getField exprJ "label"  -- Sym is not a tagged type
       let l ← parseSym label
@@ -1197,7 +1220,7 @@ mutual
         .ok (s, t, v)
       let body ← getField exprJ "body"
       let b ← parseExpr body
-      .ok (Expr.save l rt as b.expr)
+      .ok (Expr.save l rt as b)
     | "Erun" =>
       let label ← getField exprJ "label"
       let l ← parseSym label
@@ -1207,7 +1230,7 @@ mutual
     | "Epar" =>
       let es ← getArr exprJ "exprs"
       let exprs ← es.toList.mapM parseExpr
-      .ok (Expr.par (exprs.map (·.expr)))
+      .ok (Expr.par exprs)
     | "Ewait" =>
       let tid ← getNat exprJ "thread_id"
       .ok (Expr.wait tid)
@@ -1301,6 +1324,10 @@ def parseFunDecl (j : Json) : Except String (Sym × FunDecl) := do
     let loc := match parseLoc locJ with
       | .ok l => l
       | .error _ => Loc.unknown
+    -- Parse optional marker_env field
+    let markerEnv : Option Nat := match declJ.getObjValAs? Json "marker_env" with
+      | .ok (.num n) => some n.mantissa.toNat
+      | _ => none
     let (_, retTy) ← getTaggedFieldMulti declJ "return_type" baseTypeTags
     let rt ← parseBaseType retTy
     let params ← getArr declJ "params"
@@ -1312,7 +1339,7 @@ def parseFunDecl (j : Json) : Except String (Sym × FunDecl) := do
       .ok (s, t)
     let body ← getField declJ "body"
     let b ← parseExpr body
-    .ok (s, .proc loc rt ps b)
+    .ok (s, .proc loc markerEnv rt ps b)
   | "ProcDecl" =>
     let locJ ← getField declJ "loc"
     let loc := match parseLoc locJ with

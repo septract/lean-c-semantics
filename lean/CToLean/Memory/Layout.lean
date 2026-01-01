@@ -59,11 +59,15 @@ def integerTypeSize : IntegerType → Nat
   | .ptrdiff_t => targetPtrSize
   | .ptraddr_t => targetPtrSize
 
-/-- Size of floating type in bytes -/
-def floatingTypeSize : FloatingType → Nat
+/-- Size of real floating type in bytes -/
+def realFloatingTypeSize : RealFloatingType → Nat
   | .float => 4
   | .double => 8
   | .longDouble => 16  -- x86-64 long double
+
+/-- Size of floating type in bytes -/
+def floatingTypeSize : FloatingType → Nat
+  | .realFloating ty => realFloatingTypeSize ty
 
 /-- Size of basic type in bytes -/
 def basicTypeSize : BasicType → Nat
@@ -106,11 +110,15 @@ def integerTypeAlign : IntegerType → Nat
   | .ptrdiff_t => targetPtrSize
   | .ptraddr_t => targetPtrSize
 
-/-- Alignment of floating type -/
-def floatingTypeAlign : FloatingType → Nat
+/-- Alignment of real floating type -/
+def realFloatingTypeAlign : RealFloatingType → Nat
   | .float => 4
   | .double => 8
   | .longDouble => 16
+
+/-- Alignment of floating type -/
+def floatingTypeAlign : FloatingType → Nat
+  | .realFloating ty => realFloatingTypeAlign ty
 
 /-- Alignment of basic type -/
 def basicTypeAlign : BasicType → Nat
@@ -147,16 +155,16 @@ def alignUp (n : Nat) (align : Nat) : Nat :=
   else ((n + align - 1) / align) * align
 
 mutual
-  /-- Compute sizeof for a type -/
-  partial def sizeof (env : TypeEnv) : Ctype → Nat
+  /-- Compute sizeof for inner ctype -/
+  partial def sizeof_ (env : TypeEnv) : Ctype_ → Nat
     | .void => 0  -- void has size 0
     | .basic bty => basicTypeSize bty
-    | .array elemTy (some n) => n * sizeof env elemTy
+    | .array elemTy (some n) => n * sizeof_ env elemTy
     | .array _ none => 0  -- Flexible array member
     | .function .. => 0  -- Functions don't have size
     | .functionNoParams .. => 0
     | .pointer .. => targetPtrSize
-    | .atomic ty => sizeof env ty
+    | .atomic ty => sizeof_ env ty
     | .struct_ tag =>
       match env.lookupTag tag with
       | some (.struct_ members _) => structSize env members
@@ -167,15 +175,19 @@ mutual
       | _ => 0
     | .byte => 1
 
-  /-- Compute alignof for a type -/
-  partial def alignof (env : TypeEnv) : Ctype → Nat
+  /-- Compute sizeof for a type -/
+  partial def sizeof (env : TypeEnv) (ct : Ctype) : Nat :=
+    sizeof_ env ct.ty
+
+  /-- Compute alignof for inner ctype -/
+  partial def alignof_ (env : TypeEnv) : Ctype_ → Nat
     | .void => 1
     | .basic bty => basicTypeAlign bty
-    | .array elemTy _ => alignof env elemTy
+    | .array elemTy _ => alignof_ env elemTy
     | .function .. => 1
     | .functionNoParams .. => 1
     | .pointer .. => targetPtrSize
-    | .atomic ty => alignof env ty
+    | .atomic ty => alignof_ env ty
     | .struct_ tag =>
       match env.lookupTag tag with
       | some (.struct_ members _) => structAlign env members
@@ -185,6 +197,10 @@ mutual
       | some (.union_ members) => unionAlign env members
       | _ => 1
     | .byte => 1
+
+  /-- Compute alignof for a type -/
+  partial def alignof (env : TypeEnv) (ct : Ctype) : Nat :=
+    alignof_ env ct.ty
 
   /-- Compute struct size including padding and tail padding -/
   partial def structSize (env : TypeEnv) (members : List FieldDef) : Nat :=
