@@ -46,6 +46,20 @@ c-to-lean/
 
 ## Key Design Decisions
 
+### 0. CRITICAL: Interpreter Must Match Cerberus EXACTLY
+
+**The Lean interpreter MUST mirror Cerberus semantics EXACTLY.**
+
+- Each function must be auditable against the corresponding Cerberus code
+- NO innovation or "improvements" - only faithful translation
+- Any deviation from Cerberus must be explicitly signed off by the user
+- When in doubt, copy Cerberus's approach exactly
+- Document correspondence with comments linking to Cerberus source (file:lines)
+
+This is not about writing "good Lean code" - it's about creating a verifiable translation that can be audited for correctness against the Cerberus reference implementation.
+
+See `docs/INTERPRETER_REFACTOR.md` for the audit checklist and correspondence documentation requirements.
+
 ### 1. Manual Translation (not Lem/Ott backends)
 We manually translate Cerberus Core semantics to Lean rather than creating automated backends because:
 - Allows idiomatic Lean 4 code
