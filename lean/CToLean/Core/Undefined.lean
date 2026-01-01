@@ -132,6 +132,9 @@ inductive UndefinedBehavior where
   | other (name : String)
   deriving Repr, BEq, Inhabited
 
+instance : ToString UndefinedBehavior where
+  toString ub := repr ub |>.pretty
+
 /-! ## Legacy Aliases
 
 For backwards compatibility with existing code that uses the old simplified names.

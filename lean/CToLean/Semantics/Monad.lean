@@ -1,6 +1,16 @@
 /-
   Interpreter monad and core types
-  Based on cerberus/frontend/model/core_run.lem
+  Corresponds to: cerberus/frontend/model/core_run.lem
+
+  The monad structure follows Cerberus's execution model:
+  - Reader for file and type environment (immutable during execution)
+  - State for memory and I/O (mutable)
+  - Except for errors and undefined behavior
+
+  Cerberus uses:
+  - `core_run_state` in core_run_aux.lem:235 for global execution state
+  - `Exception` monad throughout for error handling
+  - `Undefined.t` for tracking undefined behavior (undefined.lem)
 -/
 
 import CToLean.Core.File
@@ -11,38 +21,17 @@ namespace CToLean.Semantics
 open CToLean.Core
 open CToLean.Memory
 
-/-! ## Undefined Behavior Tracking -/
+/-! ## Interpreter Errors
 
-/-- Specific undefined behavior detected during execution -/
-inductive UB where
-  | divByZero
-  | intOverflow (ty : IntegerType) (op : Iop)
-  | shiftOutOfRange (ty : IntegerType) (amount : Int)
-  | nullDeref
-  | useAfterFree
-  | outOfBounds
-  | uninitializedRead
-  | invalidAlignment
-  | other (msg : String)
-  deriving Repr, Inhabited
+Corresponds to: Error handling in Cerberus
+- `core_run_cause` in errors.lem:48 for execution errors
+- `Errors.error` for general errors
+-/
 
-instance : ToString UB where
-  toString
-    | .divByZero => "division by zero"
-    | .intOverflow ty op => s!"integer overflow: {repr ty} {repr op}"
-    | .shiftOutOfRange ty amt => s!"shift out of range: {repr ty} by {amt}"
-    | .nullDeref => "null pointer dereference"
-    | .useAfterFree => "use after free"
-    | .outOfBounds => "out of bounds access"
-    | .uninitializedRead => "read of uninitialized memory"
-    | .invalidAlignment => "invalid alignment"
-    | .other msg => msg
-
-/-! ## Interpreter Errors -/
-
-/-- Interpreter error type -/
+/-- Interpreter error type.
+    Corresponds to: core_run_cause in errors.lem:48 -/
 inductive InterpError where
-  | undefinedBehavior (ub : UB) (loc : Option Loc)
+  | undefinedBehavior (ub : UndefinedBehavior) (loc : Option Loc)
   | memoryError (err : MemError)
   | typeError (msg : String)
   | notImplemented (feature : String)
@@ -124,7 +113,7 @@ def writeStderr (s : String) : InterpM Unit := do
   modify fun st => { st with stderr := st.stderr ++ s }
 
 /-- Throw undefined behavior error -/
-def throwUB (ub : UB) (loc : Option Loc := none) : InterpM α :=
+def throwUB (ub : UndefinedBehavior) (loc : Option Loc := none) : InterpM α :=
   throw (.undefinedBehavior ub loc)
 
 /-- Throw not implemented error -/

@@ -541,6 +541,80 @@ theorem cn_soundness :
 - [POPL 2023 Paper](https://www.cl.cam.ac.uk/~cp526/popl23.html)
 - [Iris Workshop 2024 Slides](https://iris-project.org/workshop-2024/slides/pulte.pdf)
 
+### Where Do CN Types Live?
+
+**Key finding**: CN specs are attached at the **AIL level** (Cerberus's intermediate language), NOT in Core IR.
+
+The Cerberus pipeline:
+```
+C source → Cabs → AIL (CN specs attached here) → Core IR (CN stripped) → JSON
+                    ↓                               ↓
+              (typing only)                   (executable semantics)
+```
+
+**Important**: AIL has no interpreter - it's only for typing/elaboration. The executable semantics are defined **only at the Core level**:
+- `core_eval.lem` - Big-step semantics for pure expressions
+- `core_run.lem` - Small-step semantics for effectful expressions
+- `driver.lem` - Drives Core execution with memory model
+
+This means CN type-checks against AIL structure but the *meaning* of programs (including UB) is defined by Core execution. So our approach of defining a refinement type system over Core IR and proving it sound w.r.t. the Core interpreter is the right architecture - it matches how Cerberus itself works.
+
+AIL's sigma structure includes CN fields:
+```ocaml
+(* cerberus/frontend/model/ail/ailSyntax.lem *)
+type sigma 'a = <|
+  ...
+  cn_functions: list sigma_cn_function;
+  cn_predicates: list sigma_cn_predicate;
+  cn_datatypes: list sigma_cn_datatype;
+  cn_decl_specs: list sigma_cn_decl_spec;  (* function specs *)
+  ...
+|>
+```
+
+But Core's `generic_file` has **no CN fields** - they're deliberately excluded.
+
+### Option: Add CN Specs to JSON Export
+
+We could potentially modify Cerberus to export CN specs alongside Core IR:
+
+**What would be needed:**
+1. Modify `cerberus/ocaml_frontend/pprinters/json_core.ml` to include CN specs
+2. Either:
+   - Add CN fields to Core's `generic_file` type, or
+   - Export a separate JSON file with CN specs indexed by symbol
+3. Extend our Lean parser to handle CN spec types
+4. Coordinate with Cerberus team (they might be interested!)
+
+**Example extended JSON structure:**
+```json
+{
+  "funs": { ... },  // existing Core functions
+  "cn_specs": {     // NEW: CN specifications
+    "add": {
+      "requires": ["let sum = (i64) x + (i64) y", "sum <= INT_MAX"],
+      "ensures": ["return == (i32) sum"]
+    },
+    "write": {
+      "requires": [{"take": "old", "resource": "Owned<int>(p)"}],
+      "ensures": [{"take": "new", "resource": "Owned<int>(p)"}, "new == v"]
+    }
+  }
+}
+```
+
+**Pros:**
+- Users write specs in CN (familiar, tested)
+- Single source of truth
+- Could verify CN-annotated code directly
+
+**Cons:**
+- Requires Cerberus modification
+- CN spec language is complex
+- Ties us to CN's design decisions
+
+**Assessment**: Worth proposing to the Cerberus team. Even a minimal export of function pre/postconditions would be valuable.
+
 ---
 
 ## Approach 10: Refinement Types over Core IR (CN-style in Lean)
@@ -845,6 +919,99 @@ The refinement predicates let us state and prove **arbitrary correctness propert
 2. **Termination of type checking**: Bidirectional systems need care
 3. **Resource inference**: CN has clever tricks for inferring iterated resources
 4. **Completeness**: Will we reject valid programs?
+
+### The Separation Logic Question
+
+**Key issue**: The resource types (`Owned<T>(p)`, `Block<T>(p)`) and their composition are fundamentally separation logic concepts. To reason about them properly, we need:
+
+- **Separating conjunction (∗)**: "I own P and separately own Q"
+- **Frame rule**: If `{P} c {Q}` and c doesn't touch R, then `{P ∗ R} c {Q ∗ R}`
+- **Magic wand (−∗)**: For describing how ownership transfers
+
+#### Option A: Minimal Custom Separation Logic
+
+Build just enough separation logic for our needs:
+
+```lean
+-- Minimal separation logic for resources
+structure SepState where
+  heap : Pointer → Option Value
+
+-- Separating conjunction: disjoint heaps
+def sepConj (P Q : SepState → Prop) : SepState → Prop :=
+  fun s => ∃ s1 s2, s = s1 ⊕ s2 ∧ disjoint s1 s2 ∧ P s1 ∧ Q s2
+
+-- Prove frame rule, etc. for our specific use case
+theorem frame_rule : ...
+```
+
+**Pros**: Lightweight, tailored to our needs, no external dependencies
+**Cons**: Reinventing the wheel, may miss subtleties, limited reuse
+
+#### Option B: Use iris-lean
+
+Instantiate iris-lean with our memory model:
+
+```lean
+-- Our memory as a CMRA (commutative resource algebra)
+instance : CMRA CMemory where
+  ...
+
+-- Get separation logic for free
+-- Owned<T>(p) becomes a points-to assertion in Iris
+def Owned (T : CType) (p : Pointer) : iProp := p ↦ᵢ v
+```
+
+**Pros**: Battle-tested separation logic, MoSeL tactics, future-proof
+**Cons**: Steep learning curve, need to instantiate CMRA, iris-lean still maturing
+
+#### Option C: Hybrid - Simple Now, Iris Later
+
+Start with a simple resource model that's *compatible* with separation logic but doesn't require the full machinery:
+
+```lean
+-- Resources as a multiset (simple model)
+abbrev Resources := Multiset Resource
+
+-- Disjoint union (separating conjunction at the resource level)
+def Resources.disjointUnion (r1 r2 : Resources) : Option Resources :=
+  if r1.Disjoint r2 then some (r1 ∪ r2) else none
+
+-- Frame rule is trivial at this level
+theorem frame_rule :
+  hasType Γ e τ Γ' →
+  (Γ.resources ∪ R).Disjoint →
+  hasType (Γ.addResources R) e τ (Γ'.addResources R)
+```
+
+Then later, if we need more sophisticated reasoning:
+- Redefine resources as Iris iProp
+- Existing typing rules should mostly still work
+- Gain access to iris-lean tactics
+
+#### What CN Does
+
+CN sidesteps much of this by:
+1. **Not exposing separating conjunction to users** - you just list resources
+2. **Automatically threading resources through** - the type system handles it
+3. **Using ownership as tokens** - not full separation logic assertions
+
+The CN paper notes they deliberately chose a simpler model than full separation logic to make inference predictable.
+
+#### Recommendation
+
+**Start with Option C** (simple resource multiset):
+- Resources are just a collection you have
+- Disjointness is implicit (can't have same resource twice)
+- Frame rule comes for free
+- Sufficient for most C verification
+
+**Defer to iris-lean** if we need:
+- Higher-order resources (storing predicates in memory)
+- Concurrent reasoning
+- Complex ownership patterns (fractional permissions, etc.)
+
+This matches CN's pragmatic approach: enough separation logic to handle memory ownership, without the full complexity of Iris.
 
 ### Recommended Approach
 
