@@ -56,12 +56,29 @@ See `docs/MEMORY_MODEL.md` for design details.
 - [ ] Consider adding CI workflow (`.github/workflows/test.yml`) - deferred (private submodule)
 - [ ] Prepare test harness for interpreter differential testing - Phase 5
 
-### Phase 4: Core Interpreter
-- [ ] Implement pure expression evaluation
-- [ ] Implement effectful expression execution
-- [ ] Implement pattern matching
-- [ ] Implement procedure calls
-- [ ] Handle control flow
+### Phase 4: Core Interpreter (IN PROGRESS - NEEDS REFACTOR)
+
+**CRITICAL**: The interpreter MUST match Cerberus semantics EXACTLY. See `docs/INTERPRETER_REFACTOR.md`.
+
+Current implementation uses big-step semantics which doesn't work correctly for:
+- Recursive function calls
+- The `save`/`run` return mechanism
+
+**Refactor to small-step semantics required:**
+- [ ] Create `State.lean` with explicit stack and continuation data structures
+- [ ] Create `Step.lean` with single-step execution function
+- [ ] Port `collect_labeled_continuations` from `core_aux.lem`
+- [ ] Port `call_proc` from `core_run.lem`
+- [ ] Port each expression case from `core_thread_step2`
+
+**Audit each function for EXACT correspondence to Cerberus:**
+- [ ] Audit data structures against `core_run_aux.lem`
+- [ ] Audit `step` against `core_thread_step2` (core_run.lem:~800-1650)
+- [ ] Audit `collectLabeledContinuations` against `core_aux.lem:1880-1931`
+- [ ] Audit `evalPexpr` against `core_eval.lem`
+- [ ] Audit `matchPattern` against `core_aux.lem:~1700-1800`
+
+See `docs/INTERPRETER_REFACTOR.md` for full audit checklist.
 
 ### Phase 5: Validation Framework
 - [ ] Create Cerberus oracle wrapper

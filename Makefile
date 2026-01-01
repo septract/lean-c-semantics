@@ -1,6 +1,6 @@
 # C-to-Lean Project Makefile
 
-.PHONY: all lean cerberus cerberus-setup clean test test-unit test-memory test-parser-full test-pp-full help
+.PHONY: all lean cerberus cerberus-setup clean test test-unit test-memory test-parser-full test-pp-full test-interp test-interp-minimal test-interp-debug test-interp-ci help
 
 # Cerberus requires OCaml 4.14.1 (crashes on OCaml 5.x)
 OPAM_SWITCH := cerberus-414
@@ -58,6 +58,21 @@ test-parser-full: lean cerberus
 test-pp-full: lean cerberus
 	./scripts/test_pp.sh
 
+# Run interpreter tests on minimal test suite (30 simple C programs)
+test-interp-minimal: lean cerberus
+	./scripts/test_interp.sh tests/minimal
+
+# Run interpreter tests on debug test cases
+test-interp-debug: lean cerberus
+	./scripts/test_interp.sh tests/debug
+
+# Run interpreter tests on Cerberus CI suite
+test-interp-ci: lean cerberus
+	./scripts/test_interp.sh
+
+# Run interpreter tests (all: minimal + debug + CI)
+test-interp: test-interp-minimal test-interp-debug
+
 # Update Cerberus submodule
 update-cerberus:
 	git submodule update --remote cerberus
@@ -88,6 +103,12 @@ help:
 	@echo "  test              Run quick tests (unit + 50 parser + 50 PP files)"
 	@echo "  test-parser-full  Run full parser test (~5500 files, ~12 min)"
 	@echo "  test-pp-full      Run full pretty-printer test (~5500 files)"
+	@echo ""
+	@echo "Interpreter Testing (requires Cerberus):"
+	@echo "  test-interp          Run interpreter on minimal + debug tests"
+	@echo "  test-interp-minimal  Run interpreter on tests/minimal/ (30 simple programs)"
+	@echo "  test-interp-debug    Run interpreter on tests/debug/ (debugging cases)"
+	@echo "  test-interp-ci       Run interpreter on Cerberus CI suite"
 	@echo ""
 	@echo "Maintenance:"
 	@echo "  update-cerberus   Update Cerberus submodule"
