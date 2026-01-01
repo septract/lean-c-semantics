@@ -1,9 +1,14 @@
 /-
   Top-level interpreter entry point
-  Based on cerberus/frontend/model/core_run.lem
+  Corresponds to: cerberus/frontend/model/core_run.lem (run_main setup)
+
+  This file provides the high-level entry point that:
+  1. Initializes thread state (initThreadState)
+  2. Pre-collects labeled continuations (collectLabeledContinuations)
+  3. Runs the step loop (runUntilDone)
 -/
 
-import CToLean.Semantics.Exec
+import CToLean.Semantics.Step
 import CToLean.Memory.Layout
 
 namespace CToLean.Semantics
@@ -43,44 +48,31 @@ def extractReturnInt (v : Value) : Option Int :=
   | .loaded (.specified (.integer iv)) => some iv.val
   | _ => none
 
-/-- Run the main function of a Core file -/
+/-- Run the main function of a Core file.
+    Corresponds to the initialization and execution loop in Cerberus.
+    1. Initialize thread state with main's body (initThreadState)
+    2. Pre-collect labeled continuations (collectLabeledContinuations)
+    3. Run step loop until done (runUntilDone) -/
 def runMain (file : File) : InterpResult :=
-  match file.main with
-  | none =>
+  let typeEnv := TypeEnv.fromFile file
+  -- Initialize thread state
+  match initThreadState file with
+  | .error e =>
     { returnValue := none
       stdout := ""
       stderr := ""
-      error := some (.illformedProgram "no main function") }
-  | some mainSym =>
-    let typeEnv := TypeEnv.fromFile file
+      error := some e }
+  | .ok st =>
+    -- Pre-collect labeled continuations from main body
+    let labeledConts := collectLabeledContinuations st.arena
+    -- Run the interpreter
     let result := runInterpM file typeEnv do
-      -- Find main function
-      let mainDecl := file.funs.find? fun (s, _) => s == mainSym
-      match mainDecl with
-      | some (_, .proc _loc _retTy _params body) =>
-        -- Pre-collect labeled continuations and execute main body
-        let env := EvalEnv.empty.withConts body
-        execExpr env body
-      | some (_, .fun_ _retTy _params body) =>
-        -- Pure main (unusual but possible)
-        evalPexpr EvalEnv.empty body
-      | _ =>
-        InterpM.throwIllformed s!"main is not a procedure: {mainSym.name}"
-
+      runUntilDone st file labeledConts
     match result with
     | .ok (v, state) =>
       { returnValue := extractReturnInt v
         stdout := state.stdout
         stderr := state.stderr
-        error := none }
-    | .error (.returnFromSave _label args) =>
-      -- Return via save/run mechanism - extract return value from args
-      let retVal := match args with
-        | [v] => extractReturnInt v
-        | _ => none
-      { returnValue := retVal
-        stdout := ""
-        stderr := ""
         error := none }
     | .error e =>
       { returnValue := none
