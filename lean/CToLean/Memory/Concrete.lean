@@ -37,7 +37,7 @@ Internal utilities for the concrete memory model.
 -/
 
 /-- Get allocation ID from provenance.
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def toAllocId (prov : Provenance) : Nat :=
   match prov with
@@ -46,14 +46,14 @@ def toAllocId (prov : Provenance) : Nat :=
 
 /-- Check if an allocation is still live (not freed).
     Corresponds to: is_dead check in impl_mem.ml (negated)
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def isAllocLive (st : MemState) (allocId : Nat) : Bool :=
   st.allocations.contains allocId && !st.deadAllocations.contains allocId
 
 /-- Get allocation for a pointer, checking validity.
     Corresponds to: get_allocation in impl_mem.ml
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: Simplified error handling -/
 def getAllocation (ptr : PointerValue) : ConcreteMemM Allocation := do
   let st ← get
@@ -73,13 +73,13 @@ def getAllocation (ptr : PointerValue) : ConcreteMemM Allocation := do
 
 /-- Check if address is within allocation bounds.
     Corresponds to: is_within_bound in impl_mem.ml
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def isInBounds (alloc : Allocation) (addr : Nat) (size : Nat) : Bool :=
   addr >= alloc.base && addr + size <= alloc.base + alloc.size
 
 /-- Get address from pointer value.
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def ptrAddr (ptr : PointerValue) : Option Nat :=
   match ptr.base with
@@ -93,7 +93,7 @@ Corresponds to: fetch_bytes and write_bytes in impl_mem.ml:708-737
 
 /-- Write bytes to memory.
     Corresponds to: write_bytes in impl_mem.ml:725-737
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def writeBytes (addr : Nat) (bytes : List (Option UInt8)) (prov : Provenance) : ConcreteMemM Unit := do
   let st ← get
@@ -104,7 +104,7 @@ def writeBytes (addr : Nat) (bytes : List (Option UInt8)) (prov : Provenance) : 
 
 /-- Read bytes from memory.
     Corresponds to: fetch_bytes in impl_mem.ml:708-722
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None (little-endian byte order matches) -/
 def readBytes (addr : Nat) (size : Nat) : ConcreteMemM (List AbsByte) := do
   let st ← get
@@ -122,7 +122,7 @@ Convert memory values to/from byte sequences using little-endian representation.
 
 /-- Convert integer to little-endian bytes.
     Corresponds to: bytes_of_int (implicit in repr) impl_mem.ml
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def intToBytes (val : Int) (size : Nat) : List (Option UInt8) :=
   List.range size |>.map fun i =>
@@ -131,7 +131,7 @@ def intToBytes (val : Int) (size : Nat) : List (Option UInt8) :=
 
 /-- Convert little-endian bytes to integer.
     Corresponds to: int_of_bytes in impl_mem.ml:739-758
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def bytesToInt (bytes : List AbsByte) (signed : Bool) : Option Int :=
   if bytes.any (·.value.isNone) then
@@ -158,7 +158,7 @@ def bytesToInt (bytes : List AbsByte) (signed : Bool) : Option Int :=
 
 /-- Get the provenance from bytes (for pointer loads).
     Corresponds to: provenance extraction in abst impl_mem.ml
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: Simplified - takes first non-none provenance -/
 def bytesProvenance (bytes : List AbsByte) : Provenance :=
   -- Take provenance from first byte with provenance
@@ -170,7 +170,7 @@ def bytesProvenance (bytes : List AbsByte) : Provenance :=
 
 /-- Serialize memory value to bytes.
     Corresponds to: repr in impl_mem.ml:1139-1219
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations:
     - Float encoding simplified (not IEEE 754 bit pattern)
     - Function pointer encoding simplified -/
@@ -229,7 +229,7 @@ Corresponds to: allocate_object, load, store, kill in impl_mem.ml:1288-1550
 
 /-- Allocate memory and return pointer.
     Corresponds to: allocate_object in impl_mem.ml:1288-1347
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations:
     - Address grows upward from 0x1000 (Cerberus grows downward from 0xFFFFFFFFFFFF)
     - No thread_id parameter (sequential only)
@@ -274,7 +274,7 @@ def allocateImpl (name : String) (size : Nat) (ty : Option Ctype)
 
 /-- Reconstruct memory value from bytes.
     Corresponds to: abst in impl_mem.ml:916-1093
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations:
     - Float reconstruction simplified
     - No PNVI-ae-udi taint handling
@@ -327,7 +327,7 @@ partial def reconstructValue (env : TypeEnv) (ty : Ctype) (bytes : List AbsByte)
 
 /-- Load value from memory.
     Corresponds to: load in impl_mem.ml:1552-1603
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations:
     - No PNVI-ae-udi symbolic provenance resolution
     - No trap representation checking for _Bool (TODO)
@@ -358,7 +358,7 @@ def loadImpl (ty : Ctype) (ptr : PointerValue) : ConcreteMemM (Footprint × MemV
 
 /-- Store value to memory.
     Corresponds to: store in impl_mem.ml:1667-1789
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations:
     - No PNVI-ae-udi symbolic provenance resolution
     - No device memory support
@@ -402,7 +402,7 @@ def storeImpl (ty : Ctype) (isLocking : Bool) (ptr : PointerValue) (val : MemVal
 
 /-- Deallocate memory.
     Corresponds to: kill in impl_mem.ml:1464-1550
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations:
     - No PNVI-ae-udi symbolic provenance resolution
     - No SW_zap_dead_pointers support
@@ -441,7 +441,7 @@ Corresponds to: eq_ptrval, diff_ptrval, eff_array_shift_ptrval, etc. in impl_mem
 
 /-- Pointer equality.
     Corresponds to: eq_ptrval in impl_mem.ml
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: Simplified - just compares addresses for concrete pointers -/
 def eqPtrvalImpl (p1 p2 : PointerValue) : ConcreteMemM Bool := do
   match p1.base, p2.base with
@@ -458,7 +458,7 @@ def eqPtrvalImpl (p1 p2 : PointerValue) : ConcreteMemM Bool := do
 
 /-- Pointer difference.
     Corresponds to: diff_ptrval in impl_mem.ml
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: Returns 0 for different allocations (UB in C) -/
 def diffPtrvalImpl (elemTy : Ctype) (p1 p2 : PointerValue) : ConcreteMemM IntegerValue := do
   let env ← read
@@ -483,7 +483,7 @@ def diffPtrvalImpl (elemTy : Ctype) (p1 p2 : PointerValue) : ConcreteMemM Intege
 
 /-- Effectful array shift with bounds checking.
     Corresponds to: eff_array_shift_ptrval in impl_mem.ml
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def effArrayShiftPtrvalImpl (ptr : PointerValue) (elemTy : Ctype) (n : IntegerValue) : ConcreteMemM PointerValue := do
   let env ← read
@@ -517,7 +517,7 @@ def effArrayShiftPtrvalImpl (ptr : PointerValue) (elemTy : Ctype) (n : IntegerVa
 
 /-- Effectful member shift.
     Corresponds to: eff_member_shift_ptrval in impl_mem.ml
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def effMemberShiftPtrvalImpl (ptr : PointerValue) (tag : Sym) (member : Identifier) : ConcreteMemM PointerValue := do
   let env ← read
@@ -525,7 +525,7 @@ def effMemberShiftPtrvalImpl (ptr : PointerValue) (tag : Sym) (member : Identifi
 
 /-- Integer to pointer conversion.
     Corresponds to: ptrfromint in impl_mem.ml
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: Simplified - no PNVI-ae-udi iota creation -/
 def ptrfromintImpl (_fromTy : IntegerType) (toTy : Ctype) (n : IntegerValue) : ConcreteMemM PointerValue := do
   if n.val == 0 then
@@ -536,7 +536,7 @@ def ptrfromintImpl (_fromTy : IntegerType) (toTy : Ctype) (n : IntegerValue) : C
 
 /-- Pointer to integer conversion.
     Corresponds to: intfromptr in impl_mem.ml
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def intfromPtrImpl (_fromTy : Ctype) (_toTy : IntegerType) (ptr : PointerValue) : ConcreteMemM IntegerValue := do
   match ptr.base with
@@ -546,7 +546,7 @@ def intfromPtrImpl (_fromTy : Ctype) (_toTy : IntegerType) (ptr : PointerValue) 
 
 /-- Check pointer validity for dereference.
     Corresponds to: validForDeref_ptrval in impl_mem.ml
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def validForDerefImpl (ty : Ctype) (ptr : PointerValue) : ConcreteMemM Bool := do
   let env ← read
@@ -569,7 +569,7 @@ def validForDerefImpl (ty : Ctype) (ptr : PointerValue) : ConcreteMemM Bool := d
 
 /-- Check pointer alignment.
     Corresponds to: isWellAligned_ptrval in impl_mem.ml
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def isWellAlignedImpl (ty : Ctype) (ptr : PointerValue) : ConcreteMemM Bool := do
   let env ← read
@@ -587,7 +587,7 @@ Corresponds to: memcpy, memcmp, realloc in impl_mem.ml
 
 /-- Memory copy.
     Corresponds to: memcpy in impl_mem.ml
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: Simplified overlap detection -/
 def memcpyImpl (dst src : PointerValue) (n : IntegerValue) : ConcreteMemM PointerValue := do
   match dst.base, src.base with
@@ -615,7 +615,7 @@ def memcpyImpl (dst src : PointerValue) (n : IntegerValue) : ConcreteMemM Pointe
 
 /-- Memory compare.
     Corresponds to: memcmp in impl_mem.ml
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def memcmpImpl (p1 p2 : PointerValue) (n : IntegerValue) : ConcreteMemM IntegerValue := do
   match p1.base, p2.base with
@@ -645,7 +645,7 @@ def memcmpImpl (p1 p2 : PointerValue) (n : IntegerValue) : ConcreteMemM IntegerV
 
 /-- Realloc.
     Corresponds to: realloc in impl_mem.ml
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: Simplified - no thread_id -/
 def reallocImpl (align : IntegerValue) (ptr : PointerValue) (newSize : IntegerValue) : ConcreteMemM PointerValue := do
   let size := newSize.val.toNat
@@ -684,7 +684,7 @@ def reallocImpl (align : IntegerValue) (ptr : PointerValue) (newSize : IntegerVa
 
 This provides the concrete implementation of the MemoryOps typeclass.
 Corresponds to: Memory module implementation in impl_mem.ml
-Audited: 2025-01-01
+Audited: 2026-01-01
 -/
 
 instance : MemoryOps ConcreteMemM where
@@ -743,13 +743,13 @@ Utilities for executing concrete memory operations.
 -/
 
 /-- Run a concrete memory operation.
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def runConcreteMemM (env : TypeEnv) (m : ConcreteMemM α) (st : MemState := {}) : Except MemError (α × MemState) :=
   (m.run env).run st
 
 /-- Run a concrete memory operation, discarding final state.
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def runConcreteMemM' (env : TypeEnv) (m : ConcreteMemM α) (st : MemState := {}) : Except MemError α :=
   (·.1) <$> runConcreteMemM env m st
