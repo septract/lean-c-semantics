@@ -111,6 +111,10 @@ def ctorTags : List String :=
 def valueTags : List String :=
   ["Vunit", "Vtrue", "Vfalse", "Vctype", "Vobject", "Vloaded", "Vlist", "Vtuple"]
 
+/-- Valid tags for MemValue -/
+def memValueTags : List String :=
+  ["MVunspecified", "MVconcurrent", "MVinteger", "MVfloating", "MVpointer", "MVarray", "MVstruct", "MVunion"]
+
 /-- Valid tags for ObjectValue -/
 def objectValueTags : List String :=
   ["OVinteger", "OVfloating", "OVpointer", "OVarray", "OVstruct", "OVunion"]
@@ -603,39 +607,62 @@ def parsePrefix (j : Json) : Except String SymPrefix := do
   -- For now just store as a string representation
   .ok { val := tag }
 
-/-- Parse a Memop from a string representation -/
-def parseMemop (s : String) : Except String Memop :=
-  -- The memop is pretty-printed as a string like "PtrEq", "IntFromPtr", etc.
-  -- Handle PtrMemberShift specially since it has extra info in brackets
-  if s.startsWith "PtrArrayShift[" then
-    -- This is actually PtrMemberShift with [tag, member] info
-    -- For now, just treat as ptrArrayShift since parsing brackets is complex
-    .ok .ptrArrayShift
-  else if s.startsWith "cheri_" then
-    .ok (.cheriIntrinsic s)
-  else
-    match s with
-    | "PtrEq" => .ok .ptrEq
-    | "PtrNe" => .ok .ptrNe
-    | "PtrLt" => .ok .ptrLt
-    | "PtrGt" => .ok .ptrGt
-    | "PtrLe" => .ok .ptrLe
-    | "PtrGe" => .ok .ptrGe
-    | "Ptrdiff" => .ok .ptrdiff
-    | "IntFromPtr" => .ok .intFromPtr
-    | "PtrFromInt" => .ok .ptrFromInt
-    | "PtrValidForDeref" => .ok .ptrValidForDeref
-    | "PtrWellAligned" => .ok .ptrWellAligned
-    | "PtrArrayShift" => .ok .ptrArrayShift
-    | "Memcpy" => .ok .memcpy
-    | "Memcmp" => .ok .memcmp
-    | "Realloc" => .ok .realloc
-    | "Va_start" => .ok .vaStart
-    | "Va_copy" => .ok .vaCopy
-    | "Va_arg" => .ok .vaArg
-    | "Va_end" => .ok .vaEnd
-    | "Copy_alloc_id" => .ok .copyAllocId
-    | _ => .error s!"unknown memop: {s}"
+/-- Parse a Memop from structured JSON -/
+def parseMemop (j : Json) : Except String Memop := do
+  let tag ← getTag j
+  match tag with
+  | "PtrEq" => .ok .ptrEq
+  | "PtrNe" => .ok .ptrNe
+  | "PtrLt" => .ok .ptrLt
+  | "PtrGt" => .ok .ptrGt
+  | "PtrLe" => .ok .ptrLe
+  | "PtrGe" => .ok .ptrGe
+  | "Ptrdiff" => .ok .ptrdiff
+  | "IntFromPtr" => .ok .intFromPtr
+  | "PtrFromInt" => .ok .ptrFromInt
+  | "PtrValidForDeref" => .ok .ptrValidForDeref
+  | "PtrWellAligned" => .ok .ptrWellAligned
+  | "PtrArrayShift" => .ok .ptrArrayShift
+  | "PtrMemberShift" =>
+    let tagSym ← getField j "struct_tag"
+    let sym ← parseSym tagSym
+    let memberJ ← getField j "member"
+    let member ← parseIdentifier memberJ
+    .ok (.ptrMemberShift sym member)
+  | "Memcpy" => .ok .memcpy
+  | "Memcmp" => .ok .memcmp
+  | "Realloc" => .ok .realloc
+  | "Va_start" => .ok .vaStart
+  | "Va_copy" => .ok .vaCopy
+  | "Va_arg" => .ok .vaArg
+  | "Va_end" => .ok .vaEnd
+  | "Copy_alloc_id" => .ok .copyAllocId
+  | "CHERI_intrinsic" =>
+    let name ← getStr j "name"
+    .ok (.cheriIntrinsic name)
+  | _ => .error s!"unknown memop tag: {tag}"
+
+/-- Parse an ImplConst from a string representation -/
+def parseImplConst (s : String) : Except String ImplConst :=
+  -- Implementation constants are exported as strings like "Characters.bits_in_byte",
+  -- "Sizeof(int)", "Alignof(struct foo)", etc.
+  -- For now, we store all as .other since parsing the full set is complex
+  .ok (.other s)
+
+/-- Parse a LinkingKind from JSON -/
+def parseLinkingKind (j : Json) : Except String LinkingKind := do
+  let tag ← getTag j
+  match tag with
+  | "LK_none" => .ok .none_
+  | "LK_tentative" =>
+    let symJ ← getField j "symbol"
+    let sym ← parseSym symJ
+    .ok (.tentative sym)
+  | "LK_normal" =>
+    let symJ ← getField j "symbol"
+    let sym ← parseSym symJ
+    .ok (.normal sym)
+  | _ => .error s!"unknown linking_kind tag: {tag}"
 
 /-! ## Expression Parsing -/
 
@@ -710,17 +737,18 @@ mutual
         let name ← parseIdentifier nameJ
         let (_, ctypeJ) ← getTaggedFieldMulti m "ctype" ctypeTags
         let ctype ← parseCtype ctypeJ
-        -- Value is a string representation of mem_value - store as unspecified for now
-        -- Full parsing would require interpreting the pp_mem_value output
-        pure { name := name, ty := ctype, value := .unspecified ctype : StructMember }
+        let valJ ← getField m "value"
+        let value ← parseMemValue valJ
+        pure { name := name, ty := ctype, value := value : StructMember }
       .ok (.struct_ sym members)
     | "OVunion" =>
       let tagSym ← getField j "union_tag"  -- Sym is not a tagged type
       let sym ← parseSym tagSym
-      let member ← getField j "member"
-      let id ← parseIdentifier member
-      -- Value is a string representation - store as unspecified for now
-      .ok (.union_ sym id (.unspecified .void))
+      let memberJ ← getField j "member"
+      let id ← parseIdentifier memberJ
+      let valJ ← getField j "value"
+      let value ← parseMemValue valJ
+      .ok (.union_ sym id value)
     | other => .error s!"unknown object value tag '{other}', expected one of {objectValueTags}"
 
   /-- Parse a LoadedValue from JSON -/
@@ -736,6 +764,102 @@ mutual
       let cty ← parseCtype ctyJ
       .ok (.unspecified cty)
     | other => .error s!"unknown loaded value tag '{other}', expected one of {loadedValueTags}"
+
+  /-- Parse a MemValue from JSON -/
+  partial def parseMemValue (j : Json) : Except String MemValue := do
+    let tag ← getTag j
+    match tag with
+    | "MVunspecified" =>
+      let (_, ctyJ) ← getTaggedFieldMulti j "ctype" ctypeTags
+      let cty ← parseCtype ctyJ
+      .ok (.unspecified cty)
+    | "MVconcurrent" =>
+      -- Concurrent read value - shouldn't occur in sequential, but parse anyway
+      let ityJ ← getField j "int_type"
+      let ity ← parseIntegerTypeStruct ityJ
+      -- Just return unspecified for now since we don't support concurrent
+      .ok (.unspecified (.basic (.integer ity)))
+    | "MVinteger" =>
+      let ityJ ← getField j "int_type"
+      let ity ← parseIntegerTypeStruct ityJ
+      let valStr ← getStr j "value"
+      let val := valStr.toInt?.getD 0
+      .ok (.integer ity { val := val })
+    | "MVfloating" =>
+      let ftyStr ← getStr j "float_type"
+      let fty := match ftyStr with
+        | "Float" => FloatingType.realFloating .float
+        | "Double" => FloatingType.realFloating .double
+        | "LongDouble" => FloatingType.realFloating .longDouble
+        | _ => FloatingType.realFloating .double  -- fallback
+      let valField ← getField j "value"
+      let fv := match valField with
+        | .str "unspecified" => FloatingValue.unspecified
+        | .str "NaN" => FloatingValue.nan
+        | .str "Infinity" => FloatingValue.posInf
+        | .str "-Infinity" => FloatingValue.negInf
+        | .str s => match s.toNat? with
+          | some n => FloatingValue.finite n.toFloat
+          | none => FloatingValue.finite 0.0
+        | .num n => FloatingValue.finite n.toFloat
+        | _ => FloatingValue.unspecified
+      .ok (.floating fty fv)
+    | "MVpointer" =>
+      let (_, ctyJ) ← getTaggedFieldMulti j "ctype" ctypeTags
+      let cty ← parseCtype ctyJ
+      let valJ ← getField j "value"
+      -- Parse pointer value (reuse logic from OVpointer)
+      let ptrTag ← getStr valJ "tag"
+      let pv ← match ptrTag with
+        | "PVnull" =>
+          let (_, nullCtyJ) ← getTaggedFieldMulti valJ "ctype" ctypeTags
+          let nullCty ← parseCtype nullCtyJ
+          pure { prov := .none, base := .null nullCty : PointerValue }
+        | "PVfunction" =>
+          let symJ ← getField valJ "sym"
+          match symJ with
+          | .null => pure { prov := .none, base := .function { id := 0, name := none } : PointerValue }
+          | _ =>
+            let sym ← parseSym symJ
+            pure { prov := .none, base := .function sym : PointerValue }
+        | "PVconcrete" =>
+          let allocIdJ ← getField valJ "alloc_id"
+          let addrStr ← getStr valJ "addr"
+          let addr := addrStr.toNat?.getD 0
+          let prov := match allocIdJ with
+            | .str s => match s.toNat? with
+              | some id => Provenance.some id
+              | none => Provenance.none
+            | _ => Provenance.none
+          pure { prov := prov, base := .concrete none addr : PointerValue }
+        | _ => .error s!"unknown pointer tag in MVpointer: {ptrTag}"
+      .ok (.pointer cty pv)
+    | "MVarray" =>
+      let elems ← getArr j "elements"
+      let mvs ← elems.toList.mapM parseMemValue
+      .ok (.array mvs)
+    | "MVstruct" =>
+      let tagSym ← getField j "struct_tag"
+      let sym ← parseSym tagSym
+      let membersArr ← getArr j "members"
+      let members ← membersArr.toList.mapM fun m => do
+        let nameJ ← getField m "name"
+        let name ← parseIdentifier nameJ
+        let (_, ctyJ) ← getTaggedFieldMulti m "ctype" ctypeTags
+        let cty ← parseCtype ctyJ
+        let valJ ← getField m "value"
+        let val ← parseMemValue valJ
+        pure (name, cty, val)
+      .ok (.struct_ sym members)
+    | "MVunion" =>
+      let tagSym ← getField j "union_tag"
+      let sym ← parseSym tagSym
+      let memberJ ← getField j "member"
+      let member ← parseIdentifier memberJ
+      let valJ ← getField j "value"
+      let val ← parseMemValue valJ
+      .ok (.union_ sym member val)
+    | other => .error s!"unknown mem_value tag '{other}', expected one of {memValueTags}"
 
   /-- Parse a Value from JSON -/
   partial def parseValue (j : Json) : Except String Value := do
@@ -1127,8 +1251,8 @@ mutual
       let pe ← parsePexpr e
       .ok (Expr.pure pe)
     | "Ememop" =>
-      let opStr ← getStr exprJ "op"
-      let op ← parseMemop opStr
+      let opJ ← getField exprJ "op"
+      let op ← parseMemop opJ
       let args ← getArr exprJ "args"
       let as ← args.toList.mapM parsePexpr
       .ok (Expr.memop op as)
@@ -1241,6 +1365,48 @@ mutual
     | other => .error s!"unknown expr tag '{other}', expected one of {exprTags}"
     .ok { annots := annots, expr := expr }
 end
+
+/-- Parse an ImplDecl from JSON -/
+def parseImplDecl (j : Json) : Except String ImplDecl := do
+  let tag ← getTag j
+  match tag with
+  | "Def" =>
+    let (_, tyJ) ← getTaggedFieldMulti j "type" baseTypeTags
+    let ty ← parseBaseType tyJ
+    let exprJ ← getField j "expr"
+    let expr ← parsePexpr exprJ
+    .ok (.def_ ty expr)
+  | "IFun" =>
+    let (_, tyJ) ← getTaggedFieldMulti j "return_type" baseTypeTags
+    let ty ← parseBaseType tyJ
+    let paramsJ ← getArr j "params"
+    let params ← paramsJ.toList.mapM fun p => do
+      let sym ← getField p "symbol" >>= parseSym
+      let (_, ptyJ) ← getTaggedFieldMulti p "type" baseTypeTags
+      let pty ← parseBaseType ptyJ
+      pure (sym, pty)
+    let bodyJ ← getField j "body"
+    let body ← parsePexpr bodyJ
+    .ok (.ifun ty params body)
+  | _ => .error s!"unknown impl_decl tag: {tag}"
+
+/-- Parse an impl entry (constant name + declaration) -/
+def parseImplEntry (j : Json) : Except String (ImplConst × ImplDecl) := do
+  let constStr ← getStr j "constant"
+  let const ← parseImplConst constStr
+  let declJ ← getField j "decl"
+  let decl ← parseImplDecl declJ
+  .ok (const, decl)
+
+/-- Parse an extern entry (identifier + symbols + linking kind) -/
+def parseExternEntry (j : Json) : Except String (Identifier × (List Sym × LinkingKind)) := do
+  let idJ ← getField j "identifier"
+  let id ← parseIdentifier idJ
+  let symsJ ← getArr j "symbols"
+  let syms ← symsJ.toList.mapM parseSym
+  let lkJ ← getField j "linking_kind"
+  let lk ← parseLinkingKind lkJ
+  .ok (id, (syms, lk))
 
 /-! ## File Parsing -/
 
@@ -1417,6 +1583,17 @@ def parseFile (j : Json) : Except String File := do
       arr.toList.mapM parseFunDecl
     | none => .ok []
 
+  -- Parse implementation-defined constants (if present)
+  let impl ← match getFieldOpt j "impl" with
+    | some implJ =>
+      let arr ← match implJ with
+        | .arr a => .ok a
+        | _ => .error "impl must be an array"
+      let entries ← arr.toList.mapM parseImplEntry
+      let map := entries.foldl (fun m (c, d) => m.insert c d) ({} : ImplDefs)
+      .ok map
+    | none => .ok {}
+
   -- Parse global declarations
   let globsJ ← getArr j "globs"
   let globs ← globsJ.toList.mapM parseGlobDecl
@@ -1424,6 +1601,17 @@ def parseFile (j : Json) : Except String File := do
   -- Parse function definitions (preserve order from JSON)
   let funsJ ← getArr j "funs"
   let funs ← funsJ.toList.mapM parseFunDecl
+
+  -- Parse external symbol mapping (if present)
+  let extern ← match getFieldOpt j "extern" with
+    | some externJ =>
+      let arr ← match externJ with
+        | .arr a => .ok a
+        | _ => .error "extern must be an array"
+      let entries ← arr.toList.mapM parseExternEntry
+      let map := entries.foldl (fun m (id, v) => m.insert id v) ({} : Std.HashMap Identifier (List Sym × LinkingKind))
+      .ok map
+    | none => .ok {}
 
   -- Parse function info map (for cfunction expression)
   let funinfo ← match getFieldOpt j "funinfo" with
@@ -1440,8 +1628,10 @@ def parseFile (j : Json) : Except String File := do
     main := main
     tagDefs := tagDefs
     stdlib := stdlib
+    impl := impl
     globs := globs
     funs := funs
+    extern := extern
     funinfo := funinfo
   }
 
