@@ -60,6 +60,8 @@ This is not about writing "good Lean code" - it's about creating a verifiable tr
 
 See `docs/INTERPRETER_REFACTOR.md` for the audit checklist and correspondence documentation requirements.
 
+See `docs/MEMORY_AUDIT.md` for the memory model audit plan and Cerberus correspondence mapping.
+
 ### 1. Manual Translation (not Lem/Ott backends)
 We manually translate Cerberus Core semantics to Lean rather than creating automated backends because:
 - Allows idiomatic Lean 4 code
