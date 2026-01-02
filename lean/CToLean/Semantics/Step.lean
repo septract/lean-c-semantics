@@ -192,7 +192,7 @@ Each case matches the corresponding case in Cerberus.
     - No PEconstrained handling (for bounded model checking)
     - No core_extern handling (external symbol remapping)
     - Simplified memory action handling -/
-partial def step (st : ThreadState) (file : File) (labeledConts : LabeledConts)
+partial def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym LabeledConts)
     : InterpM StepResult := do
   let arena := st.arena
   let arenaAnnots := arena.annots
@@ -350,7 +350,10 @@ partial def step (st : ThreadState) (file : File) (labeledConts : LabeledConts)
   -- Erun: jump to labeled continuation
   -- Corresponds to: core_run.lem:1509-1530
   | .run sym pes, .cons (some currentProc) _cont parent =>
-    match labeledConts[sym]? with
+    -- Two-level lookup: first by procedure, then by label
+    -- Corresponds to: Maybe.bind (Map.lookup proc_sym st.labeled) (Map.lookup sym)
+    let procConts : Option LabeledConts := Std.HashMap.get? allLabeledConts currentProc
+    match procConts.bind (fun conts => Std.HashMap.get? conts sym) with
     | none =>
       throw (.illformedProgram s!"Erun couldn't resolve label: '{sym.name}' for procedure '{currentProc.name}'")
     | some labeledCont =>
@@ -586,8 +589,41 @@ partial def step (st : ThreadState) (file : File) (labeledConts : LabeledConts)
       throw (.notImplemented "compare_exchange_weak")
 
   -- Eccall: C function call through pointer
-  | .ccall _funPtr _funTy _args, _ =>
-    throw (.notImplemented "Eccall")
+  -- Corresponds to: core_run.lem:926-999
+  | .ccall funPtr _funTy args, sk =>
+    -- Step 1: Evaluate function pointer expression
+    let funPtrVal ← evalPexpr st.env funPtr
+    -- Step 2: Extract function symbol from pointer value
+    -- Corresponds to: core_run.lem:927-936 (valueFromPexpr and case_ptrval)
+    let funSym ← match funPtrVal with
+      | .loaded (.specified (.pointer pv)) =>
+        match pv.base with
+        | .function sym => pure sym
+        | .concrete _ addr =>
+          -- Look up in funptrmap
+          -- Corresponds to: case_funsym_opt in impl_mem.ml:1816-1827
+          let mem ← InterpM.getMemory
+          match mem.funptrmap.get? addr with
+          | some sym => pure sym
+          | none => throw (.undefinedBehavior .ub_cerb003_invalidFunctionPointer none)
+        | .null _ => throw (.undefinedBehavior .ub_cerb003_invalidFunctionPointer none)
+      | _ => throw (.undefinedBehavior .ub_cerb003_invalidFunctionPointer none)
+    -- Step 3: Evaluate arguments
+    -- Corresponds to: core_run.lem:948-956
+    let argVals ← args.mapM (evalPexpr st.env)
+    -- Step 4: Call procedure
+    -- Corresponds to: core_run.lem:958-971 (call_proc)
+    match callProc file funSym argVals with
+    | .ok (procEnv, body) =>
+      -- Push new stack frame with procedure environment
+      let newStack := Stack.pushEmptyCont (some funSym) sk
+      pure (.continue_ { st with
+        arena := body
+        stack := newStack
+        env := procEnv :: st.env  -- Push new scope
+        currentProc := some funSym
+      })
+    | .error err => throw err
 
   -- Ebound: bounds marker, just unwrap
   -- Corresponds to: core_run.lem:1643-1649
@@ -747,13 +783,13 @@ Run steps until done or error.
 
 /-- Run the interpreter until completion or error.
     Returns the final value or an error. -/
-partial def runUntilDone (st : ThreadState) (file : File) (labeledConts : LabeledConts)
+partial def runUntilDone (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym LabeledConts)
     (fuel : Nat := 1000000) : InterpM Value := do
   if fuel == 0 then
     throw (.illformedProgram "execution fuel exhausted")
-  match ← step st file labeledConts with
+  match ← step st file allLabeledConts with
   | .done v => pure v
-  | .continue_ st' => runUntilDone st' file labeledConts (fuel - 1)
+  | .continue_ st' => runUntilDone st' file allLabeledConts (fuel - 1)
   | .error err => throw err
 
 /-! ## Global Variable Initialization

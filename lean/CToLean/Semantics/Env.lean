@@ -124,4 +124,45 @@ where
       let inner := collectLabeledContinuations body
       inner.insert symLab cont
 
+/-- Collect labeled continuations for all procedures in a file.
+    Corresponds to: collect_labeled_continuations_NEW in core_aux.lem:2379-2393
+    ```lem
+    val collect_labeled_continuations_NEW: forall 'a.
+      file 'a -> map Symbol.sym (map Symbol.sym (list (Symbol.sym * core_base_type) * expr 'a))
+    let collect_labeled_continuations_NEW file =
+      Map_extra.fold (fun fun_sym decl acc ->
+        match decl with
+          | Fun _ _ _ -> acc
+          | Proc _ _ _ _ e ->
+              Map.insert fun_sym (collect_saves e) acc
+          | ProcDecl _ _ _ -> acc
+          | BuiltinDecl _ _ _ -> acc
+        end) (Map.(union) file.stdlib file.funs) Map.empty
+    ```
+    Note: Cerberus uses `collect_saves` (core_aux.lem:2258-2261) which handles Epar.
+    We use `collectLabeledContinuations` based on the older function, which is
+    equivalent for sequential code (we don't support Epar).
+    Audited: 2026-01-02
+    Deviations: None for sequential code -/
+def collectAllLabeledContinuations (file : File) : AllLabeledConts :=
+  let emptyMap : AllLabeledConts := {}
+  -- Process funs first
+  let withFuns := file.funs.foldl (init := emptyMap) fun acc (procSym, decl) =>
+    match decl with
+    | .proc _ _ _ _ body =>
+      let conts := collectLabeledContinuations body
+      acc.insert procSym conts
+    | .fun_ _ _ _ => acc
+    | .procDecl _ _ _ => acc
+    | .builtinDecl _ _ _ => acc
+  -- Also process stdlib
+  file.stdlib.foldl (init := withFuns) fun acc (procSym, decl) =>
+    match decl with
+    | .proc _ _ _ _ body =>
+      let conts := collectLabeledContinuations body
+      acc.insert procSym conts
+    | .fun_ _ _ _ => acc
+    | .procDecl _ _ _ => acc
+    | .builtinDecl _ _ _ => acc
+
 end CToLean.Semantics

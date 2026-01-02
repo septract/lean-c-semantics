@@ -82,6 +82,15 @@ structure LabeledCont where
                 needed for our sequential interpreter -/
 abbrev LabeledConts := HashMap Sym LabeledCont
 
+/-- Map from procedure symbols to their labeled continuations.
+    Corresponds to: labeled field in core_run_state (core_run_aux.lem:242)
+    ```lem
+    labeled: map Symbol.sym (labeled_continuations core_run_annotation);
+    ```
+    Audited: 2026-01-02
+    Deviations: None -/
+abbrev AllLabeledConts := HashMap Sym LabeledConts
+
 /-! ## Stack
 
 Corresponds to: core_run_aux.lem lines 67-76
