@@ -61,8 +61,8 @@ clean:
 # Testing
 # ------------------------------------------------------------------------------
 
-# Run all quick tests (unit tests + parser + pretty-printer with 50 files each)
-test: test-unit test-parser-quick test-pp-quick
+# Run all quick tests 
+test: test-unit test-memory test-parser-quick test-pp-quick test-interp 
 
 # Unit Tests (No Cerberus required)
 test-unit: lean
