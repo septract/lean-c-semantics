@@ -541,7 +541,17 @@ partial def evalPexpr (env : List (HashMap Sym Value)) (pe : APexpr) : InterpM V
       let typeEnv ← InterpM.getTypeEnv
       pure (.object (.integer (alignofIval typeEnv ty)))
     | .other name =>
-      InterpM.throwNotImpl s!"implementation constant: {name}"
+      -- Implementation-defined constants
+      -- Corresponds to: implementation.lem:487-491 for Characters module
+      -- Audited: 2026-01-02
+      -- Deviations: Only commonly used constants implemented
+      match name with
+      | "Characters.bits_in_byte" =>
+        -- C standard: CHAR_BIT is always 8 on POSIX systems
+        -- Corresponds to: Characters.bits_in_byte = 8 in implementation.lem:490-491
+        pure (.object (.integer (integerIval 8)))
+      | _ =>
+        InterpM.throwNotImpl s!"implementation constant: {name}"
 
   | .undef _loc ub =>
     -- Undefined behavior detected at compile time
