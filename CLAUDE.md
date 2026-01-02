@@ -111,77 +111,44 @@ Focus on sequential Core initially:
 
 First-time setup:
 ```bash
-# Create dedicated opam switch with OCaml 4.14.1
-opam switch create cerberus-414 4.14.1
-
-# Install dependencies
-cd cerberus
-OPAMSWITCH=cerberus-414 opam exec -- opam install --deps-only -y ./cerberus-lib.opam ./cerberus.opam
-
-# Install Cerberus using path pins (uses working directory, not git state)
-# CRITICAL: Use `-k path` to ensure uncommitted changes are picked up!
-OPAMSWITCH=cerberus-414 opam exec -- opam pin add cerberus-lib . -k path --yes
-OPAMSWITCH=cerberus-414 opam exec -- opam pin add cerberus . -k path --yes
+make cerberus-setup
 ```
+This creates the `cerberus-414` opam switch, installs dependencies, and builds Cerberus locally.
 
 Verify it works:
 ```bash
-OPAMSWITCH=cerberus-414 opam exec -- cerberus --exec tests/ci/0001-emptymain.c
+./scripts/cerberus --exec cerberus/tests/ci/0001-emptymain.c
 ```
 
 ### Updating Cerberus After Local Changes
 
-If you modify Cerberus source code (in `cerberus/`), reinstall to pick up changes:
+If you modify Cerberus source code (in `cerberus/`), rebuild:
 ```bash
-cd cerberus
-OPAMSWITCH=cerberus-414 opam exec -- opam reinstall cerberus --yes
+make cerberus
 ```
-
-### Troubleshooting: Changes Not Being Picked Up
-
-**CRITICAL**: By default, opam pins to git repos only use **committed** changes. If your changes aren't being picked up after `opam reinstall`:
-
-1. **Check pin kind** - Run `opam pin list` and look for the kind:
-   - `path` = Good, uses working directory
-   - `git` or `rsync` with no `-dirty` suffix = Bad, only uses committed changes
-
-2. **Fix incorrect pins** - Remove and re-add with `-k path`:
-   ```bash
-   cd cerberus
-   OPAMSWITCH=cerberus-414 opam exec -- opam pin remove cerberus cerberus-lib --yes
-   OPAMSWITCH=cerberus-414 opam exec -- opam pin add cerberus-lib . -k path --yes
-   OPAMSWITCH=cerberus-414 opam exec -- opam pin add cerberus . -k path --yes
-   ```
-
-3. **Verify changes are detected** - After re-pinning, the version should show `-dirty` suffix if you have uncommitted changes:
-   ```bash
-   OPAMSWITCH=cerberus-414 opam exec -- opam pin list
-   # Should show: cerberus.cn-pin-XX-gXXXXXXX-dirty
-   ```
-
-See [opam GitHub issue #4010](https://github.com/ocaml/opam/issues/4010) for more details on this behavior.
+This runs `lem` (to update OCaml sources) and `dune build`.
 
 ### Running Cerberus
 
-Always use the opam switch wrapper:
+Use the wrapper script `scripts/cerberus` (which uses `dune exec`):
 ```bash
 # Pretty-print Core to stdout
-OPAMSWITCH=cerberus-414 opam exec -- cerberus --pp=core input.c
+./scripts/cerberus --pp=core input.c
 
 # Pretty-print Core in compact mode (single line, for diffing)
-OPAMSWITCH=cerberus-414 opam exec -- cerberus --pp=core --pp_core_compact input.c
+./scripts/cerberus --pp=core --pp_core_compact input.c
 
 # Export Core as JSON (for Lean parser)
-OPAMSWITCH=cerberus-414 opam exec -- cerberus --json_core_out=output.json input.c
+./scripts/cerberus --json_core_out=output.json input.c
 
 # Execute C program
-OPAMSWITCH=cerberus-414 opam exec -- cerberus --exec input.c
+./scripts/cerberus --exec input.c
 
 # Execute with batch output (for differential testing)
-OPAMSWITCH=cerberus-414 opam exec -- cerberus --exec --batch input.c
+./scripts/cerberus --exec --batch input.c
 
 # Get help
-OPAMSWITCH=cerberus-414 opam exec -- cerberus --help
+./scripts/cerberus --help
 ```
 
 ## Validation

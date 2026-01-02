@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 CERBERUS_DIR="$PROJECT_DIR/cerberus"
 LEAN_PP="$PROJECT_DIR/lean/.lake/build/bin/ctolean_pp"
-CERBERUS="$CERBERUS_DIR/_build/install/default/bin/cerberus"
+CERBERUS="$PROJECT_DIR/scripts/cerberus"
 OUTPUT_DIR="$PROJECT_DIR/tests/problem_tests"
 
 mkdir -p "$OUTPUT_DIR"
