@@ -49,10 +49,6 @@ inductive IntegerType where
   | ptraddr_t                      -- ptraddr_t (CHERI)
   deriving Repr, BEq, Inhabited
 
-/-- Backward compatibility aliases (internal) -/
-abbrev SignedIntKind := IntBaseKind
-abbrev UnsignedIntKind := IntBaseKind
-
 /-! ## Floating Types
 
 Corresponds to: cerberus/frontend/model/ctype.lem lines 11-18
