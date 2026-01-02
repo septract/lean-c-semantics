@@ -87,10 +87,13 @@ where
       -- Map.(union) (collect_labeled_continuations e2) (collect_labeled_continuations e3)
       (collectLabeledContinuations then_).union (collectLabeledContinuations else_)
 
-    | .case_ _ _branches =>
-      -- Map.empty (* TODO THIS IS WRONG!!!!! *)
-      -- Note: Cerberus explicitly marks this as wrong/incomplete
-      {}
+    | .case_ _ branches =>
+      -- Collect from all case branches
+      -- Corresponds to: collect_saves_aux case in core_aux.lem:2196-2199
+      -- Cerberus's old collect_labeled_continuations was wrong here, but collect_saves fixes it
+      -- Audited: 2026-01-02
+      branches.foldl (init := ({}:LabeledConts)) fun acc (_, body) =>
+        acc.union (collectLabeledContinuations body)
 
     | .wseq pat e1 e2 =>
       -- Map.(union) (Map.map (fun (a_tys, e) -> (a_tys, Expr annot (Ewseq _as e e2))) $ collect_labeled_continuations e1)
