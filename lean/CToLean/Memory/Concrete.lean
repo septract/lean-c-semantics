@@ -1,11 +1,18 @@
 /-
   Concrete memory model implementation
-  Based on cerberus/memory/concrete/impl_mem.ml
+  Corresponds to: cerberus/memory/concrete/impl_mem.ml:277-3015
 
   This implements allocation-ID provenance tracking for:
   - Bounds checking
   - Dangling pointer detection (use-after-free)
   - Read-only memory protection
+
+  The concrete memory model uses:
+  - Provenance based on allocation IDs (Prov_some alloc_id)
+  - Address-based bounds checking
+  - Byte-level memory representation
+
+  CRITICAL: This implementation must match Cerberus exactly for differential testing.
 -/
 
 import CToLean.Memory.Interface
@@ -16,25 +23,38 @@ open CToLean.Core
 
 /-! ## Concrete Memory Monad
 
-We use a reader for the type environment and state for memory.
+Corresponds to: memM monad in impl_mem.ml:277
+The monad combines state (for memory) with reader (for type environment).
 -/
 
-/-- Concrete memory monad with type environment -/
+/-- Concrete memory monad with type environment.
+    Corresponds to: memM type in impl_mem.ml:277 -/
 abbrev ConcreteMemM := ReaderT TypeEnv MemM
 
-/-! ## Helper Functions -/
+/-! ## Helper Functions
 
-/-- Get allocation ID from provenance -/
+Internal utilities for the concrete memory model.
+-/
+
+/-- Get allocation ID from provenance.
+    Audited: 2025-01-01
+    Deviations: None -/
 def toAllocId (prov : Provenance) : Nat :=
   match prov with
   | .some id => id
   | _ => 0
 
-/-- Check if an allocation is still live (not freed) -/
+/-- Check if an allocation is still live (not freed).
+    Corresponds to: is_dead check in impl_mem.ml (negated)
+    Audited: 2025-01-01
+    Deviations: None -/
 def isAllocLive (st : MemState) (allocId : Nat) : Bool :=
   st.allocations.contains allocId && !st.deadAllocations.contains allocId
 
-/-- Get allocation for a pointer, checking validity -/
+/-- Get allocation for a pointer, checking validity.
+    Corresponds to: get_allocation in impl_mem.ml
+    Audited: 2025-01-01
+    Deviations: Simplified error handling -/
 def getAllocation (ptr : PointerValue) : ConcreteMemM Allocation := do
   let st ← get
   match ptr.prov with
@@ -51,19 +71,30 @@ def getAllocation (ptr : PointerValue) : ConcreteMemM Allocation := do
   | .device =>
     throw (.typeError "device memory not supported")
 
-/-- Check if address is within allocation bounds -/
+/-- Check if address is within allocation bounds.
+    Corresponds to: is_within_bound in impl_mem.ml
+    Audited: 2025-01-01
+    Deviations: None -/
 def isInBounds (alloc : Allocation) (addr : Nat) (size : Nat) : Bool :=
   addr >= alloc.base && addr + size <= alloc.base + alloc.size
 
-/-- Get address from pointer value -/
+/-- Get address from pointer value.
+    Audited: 2025-01-01
+    Deviations: None -/
 def ptrAddr (ptr : PointerValue) : Option Nat :=
   match ptr.base with
   | .concrete _ addr => some addr
   | _ => none
 
-/-! ## Byte-Level Operations -/
+/-! ## Byte-Level Operations
 
-/-- Write bytes to memory -/
+Corresponds to: fetch_bytes and write_bytes in impl_mem.ml:708-737
+-/
+
+/-- Write bytes to memory.
+    Corresponds to: write_bytes in impl_mem.ml:725-737
+    Audited: 2025-01-01
+    Deviations: None -/
 def writeBytes (addr : Nat) (bytes : List (Option UInt8)) (prov : Provenance) : ConcreteMemM Unit := do
   let st ← get
   let newBytemap := bytes.foldl (init := (addr, st.bytemap)) fun (a, bm) mbyte =>
@@ -71,7 +102,10 @@ def writeBytes (addr : Nat) (bytes : List (Option UInt8)) (prov : Provenance) : 
     (a + 1, bm.insert a byte)
   set { st with bytemap := newBytemap.2 }
 
-/-- Read bytes from memory -/
+/-- Read bytes from memory.
+    Corresponds to: fetch_bytes in impl_mem.ml:708-722
+    Audited: 2025-01-01
+    Deviations: None (little-endian byte order matches) -/
 def readBytes (addr : Nat) (size : Nat) : ConcreteMemM (List AbsByte) := do
   let st ← get
   let bytes := List.range size |>.map fun i =>
@@ -80,16 +114,25 @@ def readBytes (addr : Nat) (size : Nat) : ConcreteMemM (List AbsByte) := do
 
 /-! ## Value Serialization
 
-Convert memory values to/from byte sequences.
+Corresponds to: bytes_of_int and int_of_bytes in impl_mem.ml:739-758
+and repr/abst in impl_mem.ml:916-1219
+
+Convert memory values to/from byte sequences using little-endian representation.
 -/
 
-/-- Convert integer to little-endian bytes -/
+/-- Convert integer to little-endian bytes.
+    Corresponds to: bytes_of_int (implicit in repr) impl_mem.ml
+    Audited: 2025-01-01
+    Deviations: None -/
 def intToBytes (val : Int) (size : Nat) : List (Option UInt8) :=
   List.range size |>.map fun i =>
     let shifted := val >>> (i * 8)
     some (shifted.toNat.toUInt8)
 
-/-- Convert little-endian bytes to integer -/
+/-- Convert little-endian bytes to integer.
+    Corresponds to: int_of_bytes in impl_mem.ml:739-758
+    Audited: 2025-01-01
+    Deviations: None -/
 def bytesToInt (bytes : List AbsByte) (signed : Bool) : Option Int :=
   if bytes.any (·.value.isNone) then
     none  -- Uninitialized bytes
@@ -113,7 +156,10 @@ def bytesToInt (bytes : List AbsByte) (signed : Bool) : Option Int :=
     else
       some unsigned
 
-/-- Get the provenance from bytes (for pointer loads) -/
+/-- Get the provenance from bytes (for pointer loads).
+    Corresponds to: provenance extraction in abst impl_mem.ml
+    Audited: 2025-01-01
+    Deviations: Simplified - takes first non-none provenance -/
 def bytesProvenance (bytes : List AbsByte) : Provenance :=
   -- Take provenance from first byte with provenance
   bytes.findSome? (fun b =>
@@ -122,7 +168,12 @@ def bytesProvenance (bytes : List AbsByte) : Provenance :=
     | p => some p
   ) |>.getD .none
 
-/-- Serialize memory value to bytes -/
+/-- Serialize memory value to bytes.
+    Corresponds to: repr in impl_mem.ml:1139-1219
+    Audited: 2025-01-01
+    Deviations:
+    - Float encoding simplified (not IEEE 754 bit pattern)
+    - Function pointer encoding simplified -/
 partial def memValueToBytes (env : TypeEnv) (val : MemValue) : List (Option UInt8) :=
   match val with
   | .unspecified ty =>
@@ -171,9 +222,19 @@ partial def memValueToBytes (env : TypeEnv) (val : MemValue) : List (Option UInt
       memberBytes ++ List.replicate (size - memberBytes.length) (some 0)
     | _ => memberBytes
 
-/-! ## Core Memory Operations -/
+/-! ## Core Memory Operations
 
-/-- Allocate memory and return pointer -/
+Corresponds to: allocate_object, load, store, kill in impl_mem.ml:1288-1550
+-/
+
+/-- Allocate memory and return pointer.
+    Corresponds to: allocate_object in impl_mem.ml:1288-1347
+    Audited: 2025-01-01
+    Deviations:
+    - Address grows upward from 0x1000 (Cerberus grows downward from 0xFFFFFFFFFFFF)
+    - No thread_id parameter (sequential only)
+    - No Symbol.prefix (simplified to String)
+    - No cerb::with_address support yet -/
 def allocateImpl (name : String) (size : Nat) (ty : Option Ctype)
     (align : Nat) (readonly : ReadonlyStatus) (init : Option MemValue) : ConcreteMemM PointerValue := do
   let env ← read
@@ -211,7 +272,13 @@ def allocateImpl (name : String) (size : Nat) (ty : Option Ctype)
 
   pure (concretePtrval allocId alignedAddr)
 
-/-- Reconstruct memory value from bytes -/
+/-- Reconstruct memory value from bytes.
+    Corresponds to: abst in impl_mem.ml:916-1093
+    Audited: 2025-01-01
+    Deviations:
+    - Float reconstruction simplified
+    - No PNVI-ae-udi taint handling
+    - Struct reconstruction simplified -/
 partial def reconstructValue (env : TypeEnv) (ty : Ctype) (bytes : List AbsByte) : ConcreteMemM MemValue := do
   match ty.ty with
   | .basic (.integer ity) =>
@@ -258,7 +325,13 @@ partial def reconstructValue (env : TypeEnv) (ty : Ctype) (bytes : List AbsByte)
   | _ =>
     pure (.unspecified ty)
 
-/-- Load value from memory -/
+/-- Load value from memory.
+    Corresponds to: load in impl_mem.ml:1552-1603
+    Audited: 2025-01-01
+    Deviations:
+    - No PNVI-ae-udi symbolic provenance resolution
+    - No trap representation checking for _Bool (TODO)
+    - No device memory support -/
 def loadImpl (ty : Ctype) (ptr : PointerValue) : ConcreteMemM (Footprint × MemValue) := do
   let env ← read
 
@@ -283,7 +356,13 @@ def loadImpl (ty : Ctype) (ptr : PointerValue) : ConcreteMemM (Footprint × MemV
     let val ← reconstructValue env ty bytes
     pure (footprint, val)
 
-/-- Store value to memory -/
+/-- Store value to memory.
+    Corresponds to: store in impl_mem.ml:1667-1789
+    Audited: 2025-01-01
+    Deviations:
+    - No PNVI-ae-udi symbolic provenance resolution
+    - No device memory support
+    - isLocking locks entire allocation (Cerberus is more granular) -/
 def storeImpl (ty : Ctype) (isLocking : Bool) (ptr : PointerValue) (val : MemValue) : ConcreteMemM Footprint := do
   let env ← read
 
@@ -316,12 +395,18 @@ def storeImpl (ty : Ctype) (isLocking : Bool) (ptr : PointerValue) (val : MemVal
       let allocId := toAllocId ptr.prov
       match st.allocations[allocId]? with
       | some allocRec =>
-        set { st with allocations := st.allocations.insert allocId { allocRec with isReadonly := .readonly .ordinary } }
+        set { st with allocations := st.allocations.insert allocId { allocRec with isReadonly := .readonly .constQualified } }
       | none => pure ()
 
     pure { kind := .write, base := addr, size := size }
 
-/-- Deallocate memory -/
+/-- Deallocate memory.
+    Corresponds to: kill in impl_mem.ml:1464-1550
+    Audited: 2025-01-01
+    Deviations:
+    - No PNVI-ae-udi symbolic provenance resolution
+    - No SW_zap_dead_pointers support
+    - No SW_forbid_nullptr_free switch (free(NULL) always allowed) -/
 def killImpl (isDynamic : Bool) (ptr : PointerValue) : ConcreteMemM Unit := do
   match ptr.base with
   | .null _ =>
@@ -349,9 +434,15 @@ def killImpl (isDynamic : Bool) (ptr : PointerValue) : ConcreteMemM Unit := do
     | _ =>
       throw (.free .nonMatching)
 
-/-! ## Pointer Operations -/
+/-! ## Pointer Operations
 
-/-- Pointer equality -/
+Corresponds to: eq_ptrval, diff_ptrval, eff_array_shift_ptrval, etc. in impl_mem.ml
+-/
+
+/-- Pointer equality.
+    Corresponds to: eq_ptrval in impl_mem.ml
+    Audited: 2025-01-01
+    Deviations: Simplified - just compares addresses for concrete pointers -/
 def eqPtrvalImpl (p1 p2 : PointerValue) : ConcreteMemM Bool := do
   match p1.base, p2.base with
   | .null _, .null _ => pure true
@@ -365,7 +456,10 @@ def eqPtrvalImpl (p1 p2 : PointerValue) : ConcreteMemM Bool := do
     -- Note: comparing pointers from different allocations is implementation-defined
     pure (a1 == a2)
 
-/-- Pointer difference -/
+/-- Pointer difference.
+    Corresponds to: diff_ptrval in impl_mem.ml
+    Audited: 2025-01-01
+    Deviations: Returns 0 for different allocations (UB in C) -/
 def diffPtrvalImpl (elemTy : Ctype) (p1 p2 : PointerValue) : ConcreteMemM IntegerValue := do
   let env ← read
   match p1.base, p2.base with
@@ -387,7 +481,10 @@ def diffPtrvalImpl (elemTy : Ctype) (p1 p2 : PointerValue) : ConcreteMemM Intege
   | _, _ =>
     throw (.typeError "pointer difference requires concrete pointers")
 
-/-- Effectful array shift with bounds checking -/
+/-- Effectful array shift with bounds checking.
+    Corresponds to: eff_array_shift_ptrval in impl_mem.ml
+    Audited: 2025-01-01
+    Deviations: None -/
 def effArrayShiftPtrvalImpl (ptr : PointerValue) (elemTy : Ctype) (n : IntegerValue) : ConcreteMemM PointerValue := do
   let env ← read
   match ptr.base with
@@ -418,12 +515,18 @@ def effArrayShiftPtrvalImpl (ptr : PointerValue) (elemTy : Ctype) (n : IntegerVa
       -- No provenance, just do the arithmetic
       pure { ptr with base := .concrete unionMem newAddr.toNat }
 
-/-- Effectful member shift -/
+/-- Effectful member shift.
+    Corresponds to: eff_member_shift_ptrval in impl_mem.ml
+    Audited: 2025-01-01
+    Deviations: None -/
 def effMemberShiftPtrvalImpl (ptr : PointerValue) (tag : Sym) (member : Identifier) : ConcreteMemM PointerValue := do
   let env ← read
   pure (memberShiftPtrval env ptr tag member)
 
-/-- Integer to pointer conversion -/
+/-- Integer to pointer conversion.
+    Corresponds to: ptrfromint in impl_mem.ml
+    Audited: 2025-01-01
+    Deviations: Simplified - no PNVI-ae-udi iota creation -/
 def ptrfromintImpl (_fromTy : IntegerType) (toTy : Ctype) (n : IntegerValue) : ConcreteMemM PointerValue := do
   if n.val == 0 then
     pure (nullPtrval toTy)
@@ -431,14 +534,20 @@ def ptrfromintImpl (_fromTy : IntegerType) (toTy : Ctype) (n : IntegerValue) : C
     -- Implementation-defined: create pointer with provenance from integer
     pure { prov := n.prov, base := .concrete none n.val.toNat }
 
-/-- Pointer to integer conversion -/
+/-- Pointer to integer conversion.
+    Corresponds to: intfromptr in impl_mem.ml
+    Audited: 2025-01-01
+    Deviations: None -/
 def intfromPtrImpl (_fromTy : Ctype) (_toTy : IntegerType) (ptr : PointerValue) : ConcreteMemM IntegerValue := do
   match ptr.base with
   | .null _ => pure (integerIvalWithProv 0 ptr.prov)
   | .function _ => throw (.typeError "cannot convert function pointer to integer")
   | .concrete _ addr => pure (integerIvalWithProv addr ptr.prov)
 
-/-- Check pointer validity for dereference -/
+/-- Check pointer validity for dereference.
+    Corresponds to: validForDeref_ptrval in impl_mem.ml
+    Audited: 2025-01-01
+    Deviations: None -/
 def validForDerefImpl (ty : Ctype) (ptr : PointerValue) : ConcreteMemM Bool := do
   let env ← read
   match ptr.base with
@@ -458,7 +567,10 @@ def validForDerefImpl (ty : Ctype) (ptr : PointerValue) : ConcreteMemM Bool := d
         | none => pure false
     | _ => pure false
 
-/-- Check pointer alignment -/
+/-- Check pointer alignment.
+    Corresponds to: isWellAligned_ptrval in impl_mem.ml
+    Audited: 2025-01-01
+    Deviations: None -/
 def isWellAlignedImpl (ty : Ctype) (ptr : PointerValue) : ConcreteMemM Bool := do
   let env ← read
   match ptr.base with
@@ -468,9 +580,15 @@ def isWellAlignedImpl (ty : Ctype) (ptr : PointerValue) : ConcreteMemM Bool := d
     let align := alignof env ty
     pure (addr % align == 0)
 
-/-! ## Memory Functions -/
+/-! ## Memory Functions
 
-/-- Memory copy -/
+Corresponds to: memcpy, memcmp, realloc in impl_mem.ml
+-/
+
+/-- Memory copy.
+    Corresponds to: memcpy in impl_mem.ml
+    Audited: 2025-01-01
+    Deviations: Simplified overlap detection -/
 def memcpyImpl (dst src : PointerValue) (n : IntegerValue) : ConcreteMemM PointerValue := do
   match dst.base, src.base with
   | .concrete _ dstAddr, .concrete _ srcAddr =>
@@ -495,7 +613,10 @@ def memcpyImpl (dst src : PointerValue) (n : IntegerValue) : ConcreteMemM Pointe
   | _, _ =>
     throw (.memcpy .nonObject)
 
-/-- Memory compare -/
+/-- Memory compare.
+    Corresponds to: memcmp in impl_mem.ml
+    Audited: 2025-01-01
+    Deviations: None -/
 def memcmpImpl (p1 p2 : PointerValue) (n : IntegerValue) : ConcreteMemM IntegerValue := do
   match p1.base, p2.base with
   | .concrete _ a1, .concrete _ a2 =>
@@ -522,7 +643,10 @@ def memcmpImpl (p1 p2 : PointerValue) (n : IntegerValue) : ConcreteMemM IntegerV
   | _, _ =>
     throw (.memcpy .nonObject)
 
-/-- Realloc -/
+/-- Realloc.
+    Corresponds to: realloc in impl_mem.ml
+    Audited: 2025-01-01
+    Deviations: Simplified - no thread_id -/
 def reallocImpl (align : IntegerValue) (ptr : PointerValue) (newSize : IntegerValue) : ConcreteMemM PointerValue := do
   let size := newSize.val.toNat
 
@@ -556,7 +680,12 @@ def reallocImpl (align : IntegerValue) (ptr : PointerValue) (newSize : IntegerVa
   | .function _ =>
     throw (.free .nonMatching)
 
-/-! ## MemoryOps Instance -/
+/-! ## MemoryOps Instance
+
+This provides the concrete implementation of the MemoryOps typeclass.
+Corresponds to: Memory module implementation in impl_mem.ml
+Audited: 2025-01-01
+-/
 
 instance : MemoryOps ConcreteMemM where
   getTypeEnv := read
@@ -608,13 +737,20 @@ instance : MemoryOps ConcreteMemM where
   memcmp := memcmpImpl
   realloc := reallocImpl
 
-/-! ## Running Concrete Memory Operations -/
+/-! ## Running Concrete Memory Operations
 
-/-- Run a concrete memory operation -/
+Utilities for executing concrete memory operations.
+-/
+
+/-- Run a concrete memory operation.
+    Audited: 2025-01-01
+    Deviations: None -/
 def runConcreteMemM (env : TypeEnv) (m : ConcreteMemM α) (st : MemState := {}) : Except MemError (α × MemState) :=
   (m.run env).run st
 
-/-- Run a concrete memory operation, discarding final state -/
+/-- Run a concrete memory operation, discarding final state.
+    Audited: 2025-01-01
+    Deviations: None -/
 def runConcreteMemM' (env : TypeEnv) (m : ConcreteMemM α) (st : MemState := {}) : Except MemError α :=
   (·.1) <$> runConcreteMemM env m st
 

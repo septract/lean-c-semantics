@@ -102,6 +102,81 @@ def mkTuplePexpr (pes : List APexpr) : APexpr :=
 def mkValueExpr (annots : Annots) (v : Value) : AExpr :=
   { annots, expr := .pure { annots := [], ty := none, expr := .val v } }
 
+/-! ## Value Conversion Helpers
+
+Corresponds to: memValueFromValue and valueFromMemValue in core_aux.lem:114-200
+These convert between Core Values and Memory MemValues for load/store operations.
+-/
+
+/-- Strip atomic qualifier from a Ctype_.
+    Corresponds to: unatomic_ in ctype.lem -/
+def unatomic_ : Ctype_ → Ctype_
+  | .atomic ty => unatomic_ ty
+  | ty => ty
+
+/-- Convert a Core Value to a MemValue for storing to memory.
+    Corresponds to: memValueFromValue in core_aux.lem:137-200
+    Audited: 2026-01-01
+    Deviations: Simplified - doesn't handle all cases -/
+partial def memValueFromValue (ty : Ctype) (v : Value) : Option MemValue :=
+  let ty' := unatomic_ ty.ty
+  match ty', v with
+  | _, .unit => none
+  | _, .true_ => none
+  | _, .false_ => none
+  | _, .list _ _ => none
+  | _, .tuple _ => none
+  | _, .ctype _ => none
+  | _, .loaded (.unspecified ty'') => some (.unspecified ty'')
+  | .basic (.integer ity), .object (.integer iv) => some (.integer ity iv)
+  | .basic (.integer ity), .loaded (.specified (.integer iv)) => some (.integer ity iv)
+  | .byte, .object (.integer iv) => some (.integer (.unsigned .ichar) iv)
+  | .byte, .loaded (.specified (.integer iv)) => some (.integer (.unsigned .ichar) iv)
+  | .basic (.floating fty), .object (.floating fv) => some (.floating fty fv)
+  | .basic (.floating fty), .loaded (.specified (.floating fv)) => some (.floating fty fv)
+  | .pointer _ refTy, .object (.pointer pv) =>
+    some (.pointer { annots := [], ty := refTy } pv)
+  | .pointer _ refTy, .loaded (.specified (.pointer pv)) =>
+    some (.pointer { annots := [], ty := refTy } pv)
+  | .array elemTy _, .loaded (.specified (.array lvs)) =>
+    let elemCty : Ctype := { annots := [], ty := elemTy }
+    let mvalsOpt := lvs.mapM fun lv =>
+      memValueFromValue elemCty (.loaded lv)
+    mvalsOpt.map MemValue.array
+  | .struct_ tag, .loaded (.specified (.struct_ tag' members)) =>
+    if tag == tag' then
+      -- Convert StructMember list to (Identifier × Ctype × MemValue) list
+      let memberList := members.map fun m => (m.name, m.ty, m.value)
+      some (.struct_ tag memberList)
+    else none
+  | .union_ tag, .loaded (.specified (.union_ tag' ident mv)) =>
+    if tag == tag' then some (.union_ tag ident mv) else none
+  | _, _ => none
+
+/-- Convert a MemValue to a Core Value after loading from memory.
+    Corresponds to: valueFromMemValue in core_aux.lem:114-135
+    Audited: 2026-01-01
+    Deviations: Returns just the value (not the object type) -/
+def valueFromMemValue (mv : MemValue) : Value :=
+  match mv with
+  | .unspecified ty => .loaded (.unspecified ty)
+  | .integer _ity iv => .loaded (.specified (.integer iv))
+  | .floating _fty fv => .loaded (.specified (.floating fv))
+  | .pointer _ty pv => .loaded (.specified (.pointer pv))
+  | .array elems =>
+    let lvs := elems.map fun mv' =>
+      match valueFromMemValue mv' with
+      | .loaded lv => lv
+      | .object ov => .specified ov
+      | _ => .unspecified .void
+    .loaded (.specified (.array lvs))
+  | .struct_ tag members =>
+    -- Convert (Identifier × Ctype × MemValue) list to StructMember list
+    let structMembers := members.map fun (name, ty, value) =>
+      { name, ty, value : StructMember }
+    .loaded (.specified (.struct_ tag structMembers))
+  | .union_ tag ident mv' => .loaded (.specified (.union_ tag ident mv'))
+
 /-! ## Single Step Execution
 
 Corresponds to: core_thread_step2 in core_run.lem:~750-1655
@@ -323,9 +398,138 @@ partial def step (st : ThreadState) (file : File) (labeledConts : LabeledConts)
       throw (.notImplemented s!"impl proc: {repr ic}")
 
   -- Eaction: execute memory action
-  -- For now, throw not implemented - will be expanded
-  | .action _paction, _ =>
-    throw (.notImplemented "Eaction (memory operations)")
+  -- Corresponds to: core_action_step in core_run.lem:275-650
+  | .action paction, _ =>
+    let act := paction.action.action
+    match act with
+    -- Create: allocate memory for a typed object
+    -- Corresponds to: core_run.lem:297-338 (Create case)
+    | .create alignPe sizePe prefix_ =>
+      let alignVal ← evalPexpr st.env alignPe
+      let sizeVal ← evalPexpr st.env sizePe
+      match alignVal, sizeVal with
+      | .object (.integer alignIv), .ctype ty =>
+        let typeEnv ← InterpM.getTypeEnv
+        let size := sizeof typeEnv ty
+        let prefixName := prefix_.val
+        let ptr ← InterpM.liftMem (allocateImpl prefixName size (some ty) alignIv.val.toNat .writable none)
+        let resultVal := Value.object (.pointer ptr)
+        pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
+      | _, _ =>
+        throw (.typeError "create: expected integer alignment and ctype size")
+
+    -- CreateReadonly: allocate read-only memory with initial value
+    -- Corresponds to: core_run.lem:340-408 (CreateReadOnly case)
+    | .createReadonly alignPe sizePe initPe prefix_ =>
+      let alignVal ← evalPexpr st.env alignPe
+      let sizeVal ← evalPexpr st.env sizePe
+      let initVal ← evalPexpr st.env initPe
+      match alignVal, sizeVal with
+      | .object (.integer alignIv), .ctype ty =>
+        let typeEnv ← InterpM.getTypeEnv
+        let size := sizeof typeEnv ty
+        let prefixName := prefix_.val
+        -- Convert Core value to MemValue
+        match memValueFromValue ty initVal with
+        | some mval =>
+          let ptr ← InterpM.liftMem (allocateImpl prefixName size (some ty) alignIv.val.toNat (.readonly .constQualified) (some mval))
+          let resultVal := Value.object (.pointer ptr)
+          pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
+        | none =>
+          throw (.typeError s!"createReadonly: value doesn't match type")
+      | _, _ =>
+        throw (.typeError "createReadonly: expected integer alignment and ctype size")
+
+    -- Alloc: allocate raw memory region (malloc-style)
+    -- Corresponds to: core_run.lem:409-449 (Alloc case)
+    | .alloc alignPe sizePe prefix_ =>
+      let alignVal ← evalPexpr st.env alignPe
+      let sizeVal ← evalPexpr st.env sizePe
+      match alignVal, sizeVal with
+      | .object (.integer alignIv), .object (.integer sizeIv) =>
+        let prefixName := prefix_.val
+        let ptr ← InterpM.liftMem (allocateImpl prefixName sizeIv.val.toNat none alignIv.val.toNat .writable none)
+        let resultVal := Value.object (.pointer ptr)
+        pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
+      | _, _ =>
+        throw (.typeError "alloc: expected integer alignment and size")
+
+    -- Kill: deallocate memory
+    -- Corresponds to: core_run.lem:451-477 (Kill case)
+    | .kill kind ptrPe =>
+      let ptrVal ← evalPexpr st.env ptrPe
+      match ptrVal with
+      | .object (.pointer ptr) =>
+        let isDynamic := match kind with
+          | .dynamic => true
+          | .static _ => false
+        InterpM.liftMem (killImpl isDynamic ptr)
+        let resultVal := Value.unit
+        pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
+      | .loaded (.specified (.pointer ptr)) =>
+        let isDynamic := match kind with
+          | .dynamic => true
+          | .static _ => false
+        InterpM.liftMem (killImpl isDynamic ptr)
+        let resultVal := Value.unit
+        pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
+      | _ =>
+        throw (.typeError "kill: expected pointer value")
+
+    -- Store: store value to memory
+    -- Corresponds to: core_run.lem:505-569 (Store case)
+    | .store isLocking tyPe ptrPe valPe _order =>
+      let tyVal ← evalPexpr st.env tyPe
+      let ptrVal ← evalPexpr st.env ptrPe
+      let cval ← evalPexpr st.env valPe
+      match tyVal, ptrVal with
+      | .ctype ty, .object (.pointer ptr) =>
+        match memValueFromValue ty cval with
+        | some mval =>
+          let _ ← InterpM.liftMem (storeImpl ty isLocking ptr mval)
+          let resultVal := Value.unit
+          pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
+        | none =>
+          throw (.typeError s!"store: value doesn't match type")
+      | .ctype ty, .loaded (.specified (.pointer ptr)) =>
+        match memValueFromValue ty cval with
+        | some mval =>
+          let _ ← InterpM.liftMem (storeImpl ty isLocking ptr mval)
+          let resultVal := Value.unit
+          pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
+        | none =>
+          throw (.typeError s!"store: value doesn't match type")
+      | _, _ =>
+        throw (.typeError "store: expected ctype and pointer")
+
+    -- Load: load value from memory
+    -- Corresponds to: core_run.lem:579-612 (Load case)
+    | .load tyPe ptrPe _order =>
+      let tyVal ← evalPexpr st.env tyPe
+      let ptrVal ← evalPexpr st.env ptrPe
+      match tyVal, ptrVal with
+      | .ctype ty, .object (.pointer ptr) =>
+        let (_, mval) ← InterpM.liftMem (loadImpl ty ptr)
+        let resultVal := valueFromMemValue mval
+        pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
+      | .ctype ty, .loaded (.specified (.pointer ptr)) =>
+        let (_, mval) ← InterpM.liftMem (loadImpl ty ptr)
+        let resultVal := valueFromMemValue mval
+        pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
+      | _, _ =>
+        throw (.typeError "load: expected ctype and pointer")
+
+    -- Fence, RMW, CompareExchange - not implemented yet
+    | .fence _ =>
+      throw (.notImplemented "fence")
+    | .rmw _ _ _ _ _ _ =>
+      throw (.notImplemented "rmw")
+    | .compareExchangeStrong _ _ _ _ _ _ =>
+      throw (.notImplemented "compare_exchange_strong")
+    | .compareExchangeWeak _ _ _ _ _ _ =>
+      throw (.notImplemented "compare_exchange_weak")
+    | .seqRmw _ _ _ _ _ =>
+      throw (.notImplemented "seq_rmw")
 
   -- Eccall: C function call through pointer
   | .ccall _funPtr _funTy _args, _ =>
