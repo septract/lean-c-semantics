@@ -636,8 +636,102 @@ partial def step (st : ThreadState) (file : File) (labeledConts : LabeledConts)
     throw (.illformedProgram "reached empty stack with Eunseq")
 
   -- Memop case
-  | .memop _ _, _ =>
-    throw (.notImplemented "memop")
+  -- Corresponds to: memop_exec in driver.lem:720-870
+  -- Pattern matches on memop kind and evaluates accordingly
+  | .memop op args, _ =>
+    -- First evaluate all argument pexprs to values
+    let argVals ← args.mapM (evalPexpr st.env)
+    -- Pattern match on memop kind with argument values
+    let result ← match op, argVals with
+    -- Pointer comparisons
+    -- Corresponds to: driver.lem:779-802
+    | .ptrEq, [.object (.pointer p1), .object (.pointer p2)] =>
+      let b ← InterpM.liftMem (MemoryOps.eqPtrval p1 p2)
+      pure (if b then Value.true_ else Value.false_)
+    | .ptrNe, [.object (.pointer p1), .object (.pointer p2)] =>
+      let b ← InterpM.liftMem (MemoryOps.nePtrval p1 p2)
+      pure (if b then Value.true_ else Value.false_)
+    | .ptrLt, [.object (.pointer p1), .object (.pointer p2)] =>
+      let b ← InterpM.liftMem (MemoryOps.ltPtrval p1 p2)
+      pure (if b then Value.true_ else Value.false_)
+    | .ptrGt, [.object (.pointer p1), .object (.pointer p2)] =>
+      let b ← InterpM.liftMem (MemoryOps.gtPtrval p1 p2)
+      pure (if b then Value.true_ else Value.false_)
+    | .ptrLe, [.object (.pointer p1), .object (.pointer p2)] =>
+      let b ← InterpM.liftMem (MemoryOps.lePtrval p1 p2)
+      pure (if b then Value.true_ else Value.false_)
+    | .ptrGe, [.object (.pointer p1), .object (.pointer p2)] =>
+      let b ← InterpM.liftMem (MemoryOps.gePtrval p1 p2)
+      pure (if b then Value.true_ else Value.false_)
+
+    -- Pointer difference
+    -- Corresponds to: driver.lem:756-759
+    | .ptrdiff, [.ctype ty, .object (.pointer p1), .object (.pointer p2)] =>
+      let ival ← InterpM.liftMem (MemoryOps.diffPtrval ty p1 p2)
+      pure (.object (.integer ival))
+
+    -- Pointer/integer conversions
+    -- Corresponds to: driver.lem:762-773
+    | .intFromPtr, [.ctype _refTy, .ctype (.basic (.integer ity)), .object (.pointer p)] =>
+      let ival ← InterpM.liftMem (MemoryOps.intfromptr _refTy ity p)
+      pure (.object (.integer ival))
+    | .ptrFromInt, [.ctype (.basic (.integer ity)), .ctype refTy, .object (.integer ival)] =>
+      let pval ← InterpM.liftMem (MemoryOps.ptrfromint ity refTy ival)
+      pure (.object (.pointer pval))
+
+    -- Pointer validity checks
+    -- Corresponds to: driver.lem:775-777
+    | .ptrValidForDeref, [.ctype refTy, .object (.pointer p)] =>
+      let b ← InterpM.liftMem (MemoryOps.validForDeref refTy p)
+      pure (if b then Value.true_ else Value.false_)
+    | .ptrWellAligned, [.ctype refTy, .object (.pointer p)] =>
+      let b ← InterpM.liftMem (MemoryOps.isWellAligned refTy p)
+      pure (if b then Value.true_ else Value.false_)
+
+    -- Array shift (pointer arithmetic)
+    -- Corresponds to: driver.lem:823-830
+    | .ptrArrayShift, [.object (.pointer p), .ctype ty, .object (.integer n)] =>
+      let pval ← InterpM.liftMem (MemoryOps.effArrayShiftPtrval p ty n)
+      pure (.object (.pointer pval))
+
+    -- Member shift (struct field access)
+    -- Corresponds to: driver.lem:832-839
+    | .ptrMemberShift tagSym memberId, [.object (.pointer p)] =>
+      let pval ← InterpM.liftMem (MemoryOps.effMemberShiftPtrval p tagSym memberId)
+      pure (.object (.pointer pval))
+
+    -- Memory operations
+    -- Corresponds to: driver.lem:804-812
+    | .memcpy, [.object (.pointer dst), .object (.pointer src), .object (.integer size)] =>
+      let pval ← InterpM.liftMem (MemoryOps.memcpy dst src size)
+      pure (.object (.pointer pval))
+    | .memcmp, [.object (.pointer p1), .object (.pointer p2), .object (.integer size)] =>
+      let ival ← InterpM.liftMem (MemoryOps.memcmp p1 p2 size)
+      pure (.object (.integer ival))
+    | .realloc, [.object (.integer align), .object (.pointer oldPtr), .object (.integer size)] =>
+      let pval ← InterpM.liftMem (MemoryOps.realloc align oldPtr size)
+      pure (.object (.pointer pval))
+
+    -- Copy allocation ID
+    -- Corresponds to: driver.lem:863-870
+    | .copyAllocId, [.object (.pointer src), .object (.pointer dst)] =>
+      -- Copy provenance from src to dst
+      let pval := { dst with prov := src.prov }
+      pure (.object (.pointer pval))
+
+    -- Varargs - not yet implemented
+    | .vaStart, _ => throw (.notImplemented "va_start")
+    | .vaCopy, _ => throw (.notImplemented "va_copy")
+    | .vaArg, _ => throw (.notImplemented "va_arg")
+    | .vaEnd, _ => throw (.notImplemented "va_end")
+
+    -- CHERI intrinsics - not yet implemented
+    | .cheriIntrinsic name, _ => throw (.notImplemented s!"CHERI intrinsic: {name}")
+
+    | _, _ => throw (.typeError "memop called with unexpected arguments")
+
+    -- Return the result as a pure value
+    pure (.continue_ { st with arena := mkValueExpr arenaAnnots result })
 
   -- Concurrency cases
   | .par _, _ =>
