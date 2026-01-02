@@ -120,14 +120,18 @@ and repr/abst in impl_mem.ml:916-1219
 Convert memory values to/from byte sequences using little-endian representation.
 -/
 
-/-- Convert integer to little-endian bytes.
+/-- Convert integer to little-endian bytes (two's complement).
     Corresponds to: bytes_of_int (implicit in repr) impl_mem.ml
     Audited: 2026-01-01
     Deviations: None -/
 def intToBytes (val : Int) (size : Nat) : List (Option UInt8) :=
+  -- Convert negative numbers to two's complement representation
+  let totalBits := size * 8
+  let modulusVal := 1 <<< totalBits
+  let unsigned := if val < 0 then modulusVal + val else val
   List.range size |>.map fun i =>
-    let shifted := val >>> (i * 8)
-    some (shifted.toNat.toUInt8)
+    let shifted := unsigned >>> (i * 8)
+    some (shifted.toNat % 256).toUInt8
 
 /-- Convert little-endian bytes to integer.
     Corresponds to: int_of_bytes in impl_mem.ml:739-758

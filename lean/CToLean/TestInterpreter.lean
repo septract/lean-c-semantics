@@ -21,6 +21,8 @@ def runFile (jsonPath : String) : IO Unit := do
     | none => IO.println "No return value"
     if result.stdout != "" then
       IO.println s!"stdout: {result.stdout}"
+    if result.stderr != "" then
+      IO.println s!"stderr: {result.stderr}"
     match result.error with
     | some e => IO.println s!"Error: {e}"
     | none => pure ()
