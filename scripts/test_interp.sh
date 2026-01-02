@@ -14,7 +14,7 @@ LEAN_DIR="$PROJECT_DIR/lean"
 
 # Cerberus requires OCaml 4.14.1
 OPAM_SWITCH="cerberus-414"
-CERBERUS="OPAMSWITCH=$OPAM_SWITCH opam exec -- cerberus"
+CERBERUS="$PROJECT_DIR/scripts/cerberus"
 
 # Configuration
 VERBOSE=false

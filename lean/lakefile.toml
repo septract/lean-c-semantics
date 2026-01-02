@@ -1,6 +1,6 @@
 name = "CToLean"
 version = "0.1.0"
-defaultTargets = ["CToLean", "ctolean_pp", "ctolean_test", "ctolean_testbatch", "ctolean_interp"]
+defaultTargets = ["CToLean", "ctolean_pp", "ctolean_test", "ctolean_testbatch", "ctolean_interp", "ctolean_memtest"]
 
 [[lean_lib]]
 name = "CToLean"

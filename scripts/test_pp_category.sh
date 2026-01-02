@@ -9,7 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 PROBLEM_DIR="$PROJECT_DIR/tests/problem_tests"
 LEAN_PP="$PROJECT_DIR/lean/.lake/build/bin/ctolean_pp"
-CERBERUS="$PROJECT_DIR/cerberus/_build/install/default/bin/cerberus"
+CERBERUS="$PROJECT_DIR/scripts/cerberus"
 
 CATEGORY="${1:-all}"
 VERBOSE="${2:---verbose}"
