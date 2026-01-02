@@ -16,6 +16,94 @@ open CToLean.Core
 open CToLean.Memory
 open Std (HashMap)
 
+/-! ## Bitwise Operations for Integers
+
+Implements infinite two's complement bitwise operations matching Zarith/GMP semantics.
+Corresponds to: Nat_big_num.bitwise_and/or/xor in impl_mem.ml:2503-2511
+
+Zarith uses infinite two's complement: negative numbers are treated as having
+infinitely many 1 bits to the left. This affects how bitwise operations work
+on negative operands.
+-/
+
+mutual
+  /-- Bitwise AND using infinite two's complement (Zarith semantics).
+      Corresponds to: Nat_big_num.bitwise_and
+      Audited: 2026-01-02
+      Deviations: None -/
+  partial def intBitwiseAnd (a b : Int) : Int :=
+    if a == 0 || b == 0 then 0
+    else if a > 0 && b > 0 then
+      -- Both positive: standard natural AND
+      (a.toNat &&& b.toNat : Nat)
+    else if a < 0 && b < 0 then
+      -- Both negative: ~(~a | ~b) = -(intBitwiseOr (-a-1) (-b-1) + 1)
+      -(intBitwiseOr (-a - 1) (-b - 1) + 1)
+    else if a < 0 then
+      -- a < 0, b >= 0: bits of b that are also in ~a's complement
+      -- Since ~a = -a-1 is positive, we want bits where both b and NOT(~a) are set
+      -- NOT(~a) for finite representation: use mask to limit bit width
+      let notA := (-a - 1).toNat
+      -- For C semantics, we compute b AND NOT(notA) by clearing bits in b that are in notA
+      -- Result is non-negative since b >= 0
+      (b.toNat &&& (b.toNat ^^^ (b.toNat &&& notA)) : Nat)
+    else
+      -- a >= 0, b < 0: symmetric
+      let notB := (-b - 1).toNat
+      (a.toNat &&& (a.toNat ^^^ (a.toNat &&& notB)) : Nat)
+
+  /-- Bitwise OR using infinite two's complement (Zarith semantics).
+      Corresponds to: Nat_big_num.bitwise_or
+      Audited: 2026-01-02
+      Deviations: None -/
+  partial def intBitwiseOr (a b : Int) : Int :=
+    if a == 0 then b
+    else if b == 0 then a
+    else if a > 0 && b > 0 then
+      (a.toNat ||| b.toNat : Nat)
+    else if a < 0 && b < 0 then
+      -(intBitwiseAnd (-a - 1) (-b - 1) + 1)
+    else if a < 0 then
+      -- a < 0, b >= 0: result is negative
+      -(Int.ofNat ((-a - 1).toNat &&& ((-a - 1).toNat ^^^ ((-a - 1).toNat &&& b.toNat))) + 1)
+    else
+      -- a >= 0, b < 0: symmetric
+      -(Int.ofNat ((-b - 1).toNat &&& ((-b - 1).toNat ^^^ ((-b - 1).toNat &&& a.toNat))) + 1)
+end
+
+/-- Bitwise XOR using infinite two's complement (Zarith semantics).
+    Corresponds to: Nat_big_num.bitwise_xor
+    Audited: 2026-01-02
+    Deviations: None -/
+def intBitwiseXor (a b : Int) : Int :=
+  if a == 0 then b
+  else if b == 0 then a
+  else if a > 0 && b > 0 then
+    -- Both positive: standard natural XOR
+    (a.toNat ^^^ b.toNat : Nat)
+  else if a < 0 && b < 0 then
+    -- Both negative: ~a XOR ~b = a XOR b (complements cancel in XOR)
+    ((-a - 1).toNat ^^^ (-b - 1).toNat : Nat)
+  else if a < 0 then
+    -- a < 0, b >= 0: result is negative
+    -- In infinite two's complement: ~a XOR b = ~(~a XOR ~b) where ~b has infinite 1s
+    -- = ~((−a−1) XOR ~b_finite) - but ~b_finite is complex
+    -- Simpler: result = -((-a-1) XOR b + 1)
+    -((((-a - 1).toNat ^^^ b.toNat) : Nat) + 1 : Int)
+  else
+    -- a >= 0, b < 0: symmetric
+    -((((a.toNat ^^^ (-b - 1).toNat) : Nat) + 1) : Int)
+
+/-- Combine provenance from two integer values.
+    Corresponds to: combine_prov in impl_mem.ml
+    Audited: 2026-01-02
+    Deviations: Simplified - takes first non-none provenance -/
+def combineProv (p1 p2 : Provenance) : Provenance :=
+  match p1, p2 with
+  | .some id, _ => .some id
+  | _, .some id => .some id
+  | _, _ => .none
+
 /-! ## Environment Lookup
 
 Corresponds to: Core_aux.lookup_env in core_aux.lem:2480-2490
@@ -257,48 +345,61 @@ def evalCtor (c : Ctor) (args : List Value) : InterpM Value := do
       pure (.object (.integer iv))
     | _ => InterpM.throwTypeError "IValignof requires ctype"
 
+  -- Bitwise operations
+  -- Corresponds to: bitwise_complement_ival, bitwise_and_ival, etc. in impl_mem.ml:2497-2511
+  -- These take a ctype as first argument (ignored in concrete model) and operate on integers
+  -- using infinite two's complement semantics (matching Zarith/GMP)
+
   | .ivCOMPL =>
     match args with
-    | [v] =>
+    | [_ty, v] =>
       match valueToInt v with
       | some iv =>
-        -- Bitwise complement (platform-dependent, assume 64-bit)
-        -- Use XOR with all 1s for complement
-        let mask : Nat := (1 <<< 64) - 1
-        let result := iv.val.toNat ^^^ mask
-        pure (.object (.integer { val := result, prov := .none }))
+        -- Bitwise complement: ~n = -n - 1 (matches Cerberus impl_mem.ml:2497-2501)
+        -- Corresponds to: Nat_big_num.(sub (negate n) (of_int 1))
+        let result := -iv.val - 1
+        pure (.object (.integer { val := result, prov := iv.prov }))
       | none => InterpM.throwTypeError "IVCOMPL requires integer"
-    | _ => InterpM.throwTypeError "IVCOMPL requires one argument"
+    | _ => InterpM.throwTypeError "IVCOMPL requires ctype and integer"
 
   | .ivAND =>
     match args with
-    | [v1, v2] =>
+    | [_ty, v1, v2] =>
       match valueToInt v1, valueToInt v2 with
       | some i1, some i2 =>
-        let result := i1.val.toNat &&& i2.val.toNat
-        pure (.object (.integer { val := result, prov := .none }))
+        -- Bitwise AND using Zarith semantics (infinite two's complement)
+        -- Corresponds to: Nat_big_num.bitwise_and in impl_mem.ml:2503-2505
+        let result := intBitwiseAnd i1.val i2.val
+        let prov := combineProv i1.prov i2.prov
+        pure (.object (.integer { val := result, prov := prov }))
       | _, _ => InterpM.throwTypeError "IVAND requires integers"
-    | _ => InterpM.throwTypeError "IVAND requires two arguments"
+    | _ => InterpM.throwTypeError "IVAND requires ctype and two integers"
 
   | .ivOR =>
     match args with
-    | [v1, v2] =>
+    | [_ty, v1, v2] =>
       match valueToInt v1, valueToInt v2 with
       | some i1, some i2 =>
-        let result := i1.val.toNat ||| i2.val.toNat
-        pure (.object (.integer { val := result, prov := .none }))
+        -- Bitwise OR using Zarith semantics (infinite two's complement)
+        -- Corresponds to: Nat_big_num.bitwise_or in impl_mem.ml:2506-2508
+        let result := intBitwiseOr i1.val i2.val
+        let prov := combineProv i1.prov i2.prov
+        pure (.object (.integer { val := result, prov := prov }))
       | _, _ => InterpM.throwTypeError "IVOR requires integers"
-    | _ => InterpM.throwTypeError "IVOR requires two arguments"
+    | _ => InterpM.throwTypeError "IVOR requires ctype and two integers"
 
   | .ivXOR =>
     match args with
-    | [v1, v2] =>
+    | [_ty, v1, v2] =>
       match valueToInt v1, valueToInt v2 with
       | some i1, some i2 =>
-        let result := i1.val.toNat ^^^ i2.val.toNat
-        pure (.object (.integer { val := result, prov := .none }))
+        -- Bitwise XOR using Zarith semantics (infinite two's complement)
+        -- Corresponds to: Nat_big_num.bitwise_xor in impl_mem.ml:2509-2511
+        let result := intBitwiseXor i1.val i2.val
+        let prov := combineProv i1.prov i2.prov
+        pure (.object (.integer { val := result, prov := prov }))
       | _, _ => InterpM.throwTypeError "IVXOR requires integers"
-    | _ => InterpM.throwTypeError "IVXOR requires two arguments"
+    | _ => InterpM.throwTypeError "IVXOR requires ctype and two integers"
 
   | .fvfromint =>
     match args with
@@ -622,8 +723,63 @@ partial def evalPexpr (env : List (HashMap Sym Value)) (pe : APexpr) : InterpM V
 
   | .isScalar _e => InterpM.throwNotImpl "is_scalar"
   | .isInteger _e => InterpM.throwNotImpl "is_integer"
-  | .isSigned _e => InterpM.throwNotImpl "is_signed"
-  | .isUnsigned _e => InterpM.throwNotImpl "is_unsigned"
+
+  -- is_signed: check if a ctype is a signed integer type
+  -- Corresponds to: PEis_signed in core_eval.lem:1088-1095
+  --   AilTypesAux.is_signed_integer_type in ailTypesAux.lem:1121-1128
+  --   Common.is_signed_ity in ocaml_implementation.ml:79-94
+  -- Audited: 2026-01-02
+  -- Deviations: char is assumed signed (char_is_signed:true in DefaultImpl)
+  | .isSigned e =>
+    let v ← evalPexpr env (mkAPexpr e)
+    match v with
+    | .ctype ty =>
+      -- Check if it's a signed integer type
+      match ty.ty with
+      | .basic (.integer ity) =>
+        let isSigned := match ity with
+          | .char => true  -- DefaultImpl uses char_is_signed:true
+          | .bool => false
+          | .signed _ => true
+          | .unsigned _ => false
+          | .enum _ => true  -- Enums default to signed int
+          | .size_t => false  -- size_t is unsigned
+          | .wchar_t => true  -- wchar_t is signed on most platforms
+          | .wint_t => true   -- wint_t is signed on most platforms
+          | .ptrdiff_t => true -- ptrdiff_t is signed
+          | .ptraddr_t => false -- ptraddr_t is unsigned (CHERI)
+        pure (if isSigned then .true_ else .false_)
+      | _ => pure .false_  -- Non-integer types are not signed
+    | _ => InterpM.throwIllformed "is_signed: operand must be a ctype"
+
+  -- is_unsigned: check if a ctype is an unsigned integer type
+  -- Corresponds to: PEis_unsigned in core_eval.lem:1078-1087
+  --   AilTypesAux.is_unsigned_integer_type in ailTypesAux.lem:1159-1166
+  --   is_unsigned_ity = not (is_signed_ity) in ailTypesAux.lem:29-31
+  -- Audited: 2026-01-02
+  -- Deviations: char is assumed signed (char_is_signed:true in DefaultImpl)
+  | .isUnsigned e =>
+    let v ← evalPexpr env (mkAPexpr e)
+    match v with
+    | .ctype ty =>
+      -- Check if it's an unsigned integer type
+      match ty.ty with
+      | .basic (.integer ity) =>
+        -- is_unsigned_ity = not (is_signed_ity)
+        let isUnsigned := match ity with
+          | .char => false  -- DefaultImpl uses char_is_signed:true
+          | .bool => true   -- _Bool is unsigned
+          | .signed _ => false
+          | .unsigned _ => true
+          | .enum _ => false -- Enums default to signed int
+          | .size_t => true  -- size_t is unsigned
+          | .wchar_t => false -- wchar_t is signed on most platforms
+          | .wint_t => false  -- wint_t is signed on most platforms
+          | .ptrdiff_t => false -- ptrdiff_t is signed
+          | .ptraddr_t => true  -- ptraddr_t is unsigned (CHERI)
+        pure (if isUnsigned then .true_ else .false_)
+      | _ => pure .false_  -- Non-integer types are not unsigned
+    | _ => InterpM.throwIllformed "is_unsigned: operand must be a ctype"
 
   | .areCompatible e1 e2 =>
     -- Check if two C types are compatible (C11 6.2.7)
