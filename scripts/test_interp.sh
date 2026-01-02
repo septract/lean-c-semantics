@@ -94,6 +94,7 @@ LEAN_FAIL=0
 LEAN_TIMEOUT_COUNT=0
 MATCH=0
 MISMATCH=0
+UB_MATCH=0  # Both detected UB
 
 echo ""
 echo "Running interpreter comparison..."
@@ -111,9 +112,13 @@ for c_file in $TEST_FILES; do
         printf "\r[%d/%d] %s...                    " "$file_num" "$total_to_test" "$filename"
     fi
 
-    # Run Cerberus to get exit code
+    # Run Cerberus to get exit code and check for UB
     cerberus_exit=0
-    eval $CERBERUS --exec "$c_file" >/dev/null 2>&1 || cerberus_exit=$?
+    cerberus_output=$(eval $CERBERUS --exec "$c_file" 2>&1) || cerberus_exit=$?
+    cerberus_has_ub=false
+    if echo "$cerberus_output" | grep -q "undefined behaviour"; then
+        cerberus_has_ub=true
+    fi
 
     if [[ $cerberus_exit -eq 139 ]] || [[ $cerberus_exit -eq 134 ]] || [[ $cerberus_exit -eq 137 ]]; then
         # Cerberus crashed (SIGSEGV, SIGABRT, etc.) - skip
@@ -152,12 +157,26 @@ for c_file in $TEST_FILES; do
 
     # Extract Lean return value
     lean_ret=""
+    lean_has_ub=false
     if echo "$lean_output" | grep -q "Return value:"; then
         lean_ret=$(echo "$lean_output" | grep "Return value:" | sed 's/Return value: //')
     elif echo "$lean_output" | grep -q "Error:"; then
+        error_msg=$(echo "$lean_output" | grep "Error:" | head -1)
+        # Check if it's a UB error
+        if echo "$error_msg" | grep -q "undefined behavior"; then
+            lean_has_ub=true
+        fi
+        # If both Cerberus and Lean detected UB, count as success
+        if $lean_has_ub && $cerberus_has_ub; then
+            ((LEAN_OK++))
+            ((UB_MATCH++))
+            if $VERBOSE; then
+                echo "UB   $filename: both detected undefined behavior"
+            fi
+            continue
+        fi
         lean_ret="ERROR"
         ((LEAN_FAIL++))
-        error_msg=$(echo "$lean_output" | grep "Error:" | head -1)
         if ! $VERBOSE; then
             echo ""
         fi
@@ -202,11 +221,14 @@ echo "  Timeout:    $LEAN_TIMEOUT_COUNT"
 echo ""
 echo "Comparison (of both successes):"
 echo "  Match:      $MATCH"
+echo "  UB Match:   $UB_MATCH (both detected undefined behavior)"
 echo "  Mismatch:   $MISMATCH"
 echo ""
 
-if [[ $((MATCH + MISMATCH)) -gt 0 ]]; then
-    MATCH_RATE=$((MATCH * 100 / (MATCH + MISMATCH)))
+TOTAL_MATCH=$((MATCH + UB_MATCH))
+TOTAL_COMPARE=$((TOTAL_MATCH + MISMATCH))
+if [[ $TOTAL_COMPARE -gt 0 ]]; then
+    MATCH_RATE=$((TOTAL_MATCH * 100 / TOTAL_COMPARE))
     echo "Match rate:   ${MATCH_RATE}%"
 fi
 
