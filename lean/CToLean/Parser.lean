@@ -668,31 +668,35 @@ mutual
       | .num n => .ok (.floating (.finite n.toFloat))
       | _ => .error "OVfloating value must be string or number"
     | "OVpointer" =>
-      let valStr ← getStr j "value"
-      -- Parse pointer value string: NULL(ctype), Cfunction(sym), or (prov, 0xaddr)
-      if valStr.startsWith "NULL(" && valStr.endsWith ")" then
-        let ctypeStr := (valStr.drop 5).dropRight 1  -- Remove "NULL(" and ")"
-        match parseCtypeStr ctypeStr with
-        | .ok cty => .ok (.pointer { prov := .none, base := .null cty })
-        | .error _ => .ok (.pointer { prov := .none, base := .null .void })
-      else if valStr.startsWith "Cfunction(" then
-        -- Function pointer - parse symbol name
-        let symName := (valStr.drop 10).dropRight 1  -- Remove "Cfunction(" and ")"
-        .ok (.pointer { prov := .none, base := .function { id := 0, name := some symName } })
-      else
-        -- Concrete pointer: (prov, 0xaddr) - parse address
-        -- For now, extract hex address if present
-        let parts := valStr.splitOn "0x"
-        let addr := match parts with
-          | _ :: hexStr :: _ =>
-            let hexPart := hexStr.takeWhile (·.isAlphanum)
-            hexPart.foldl (fun acc c =>
-              let digit := if c.isDigit then c.toNat - '0'.toNat
-                          else if c.toLower >= 'a' && c.toLower <= 'f' then c.toLower.toNat - 'a'.toNat + 10
-                          else 0
-              acc * 16 + digit) 0
-          | _ => 0
-        .ok (.pointer { prov := .none, base := .concrete none addr })
+      -- New structured format: value is an object with tag PVnull/PVfunction/PVconcrete
+      let valObj ← getField j "value"
+      let ptrTag ← getStr valObj "tag"
+      match ptrTag with
+      | "PVnull" =>
+        -- Null pointer with ctype
+        let (_, ctypeJ) ← getTaggedFieldMulti valObj "ctype" ctypeTags
+        let cty ← parseCtype ctypeJ
+        .ok (.pointer { prov := .none, base := .null cty })
+      | "PVfunction" =>
+        -- Function pointer with symbol (may be null)
+        let symJ ← getField valObj "sym"
+        match symJ with
+        | .null => .ok (.pointer { prov := .none, base := .function { id := 0, name := none } })
+        | _ =>
+          let sym ← parseSym symJ
+          .ok (.pointer { prov := .none, base := .function sym })
+      | "PVconcrete" =>
+        -- Concrete pointer with optional alloc_id and address
+        let allocIdJ ← getField valObj "alloc_id"
+        let addrStr ← getStr valObj "addr"
+        let addr := addrStr.toNat?.getD 0
+        let prov := match allocIdJ with
+          | .str s => match s.toNat? with
+            | some id => Provenance.some id
+            | none => Provenance.none
+          | _ => Provenance.none
+        .ok (.pointer { prov := prov, base := .concrete none addr })
+      | _ => .error s!"unknown pointer tag: {ptrTag}"
     | "OVarray" =>
       let elems ← getArr j "elements"
       let lvs ← elems.toList.mapM parseLoadedValue

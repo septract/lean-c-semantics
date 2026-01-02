@@ -99,12 +99,11 @@ See `docs/INTERPRETER_REFACTOR.md` for full audit checklist.
 - Full C standard library
 
 ## MUST FIX (Blocking Issues)
-- [ ] **Export pointer values as structured JSON instead of strings**
-  - Currently `OVpointer` values (including function pointers) are exported as `"Cfunction(f)"` strings
-  - This loses symbol IDs, causing lookup failures when the same function has different IDs in different contexts
-  - Workaround: `cfunction` looks up funinfo by name only (see `File.lookupFunInfoByName`)
-  - Proper fix: Modify `json_core.ml` to export `PVfunction sym` with full symbol data
-  - Risk: Current workaround assumes function names are unique; will break with static functions in different TUs
+- [x] **Export pointer values as structured JSON instead of strings** (DONE - 2026-01-02)
+  - Fixed in `json_core.ml` using `case_ptrval` interface for modular serialization
+  - New format exports `PVnull`, `PVfunction`, `PVconcrete` with full structured data
+  - Symbol IDs now preserved, enabling correct function pointer round-tripping through memory
+  - See `docs/JSON_PTR_FIX.md` for implementation details
 
 ## Low Priority
 - [ ] Fix Cerberus `--pp_core_out` flag to work without requiring `--pp=core`
