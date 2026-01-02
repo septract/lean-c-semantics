@@ -9,6 +9,7 @@
 -/
 
 import CToLean.Semantics.Step
+import CToLean.Semantics.Env
 import CToLean.Memory.Layout
 
 namespace CToLean.Semantics
@@ -69,10 +70,11 @@ def runMain (file : File) : InterpResult :=
     match initThreadState file globalEnv with
     | .error e => throw e
     | .ok st =>
-      -- Pre-collect labeled continuations from main body
-      let labeledConts := collectLabeledContinuations st.arena
+      -- Pre-collect labeled continuations for all procedures
+      -- Corresponds to: collect_labeled_continuations_NEW in core_aux.lem:2379-2395
+      let allLabeledConts := collectAllLabeledContinuations file
       -- Run step loop until done
-      runUntilDone st file labeledConts
+      runUntilDone st file allLabeledConts
   match result with
   | .ok (v, state) =>
     { returnValue := extractReturnInt v

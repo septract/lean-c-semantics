@@ -411,12 +411,17 @@ def evalCtor (c : Ctor) (args : List Value) : InterpM Value := do
     | _ => InterpM.throwTypeError "fvfromint requires one argument"
 
   | .ivfromfloat =>
+    -- Ivfromfloat: ctype -> floating -> integer
+    -- Corresponds to: core.ott:282
     match args with
-    | [.object (.floating fv)] =>
+    | [.ctype _ty, .object (.floating fv)] =>
       match fv with
-      | .finite f => pure (.object (.integer { val := f.toUInt64.toNat, prov := .none }))
+      | .finite f =>
+        -- Truncate float to integer (towards zero)
+        let intVal : Int := f.toUInt64.toNat  -- TODO: proper float truncation
+        pure (.object (.integer { val := intVal, prov := .none }))
       | _ => InterpM.throwTypeError "ivfromfloat: non-finite float"
-    | _ => InterpM.throwTypeError "ivfromfloat requires float"
+    | _ => InterpM.throwTypeError "ivfromfloat requires (ctype, float)"
 
 /-! ## Integer Conversion and Overflow Checking
 
@@ -498,6 +503,37 @@ def catchExceptionalOp (ity : IntegerType) (iop : Iop) (v1 v2 : Value) : InterpM
     else
       pure (.object (.integer { val := result, prov := .none }))
   | _, _ => InterpM.throwTypeError "catchExceptionalCondition requires integer values"
+
+/-! ## Implementation-Defined Functions
+
+Corresponds to: implementation.lem and runtime/libcore/impls/*.impl files
+
+Implementation-defined functions are called via `<Impl.function_name>` syntax in Core.
+Each implementation file (e.g., gcc_4.9.0_x86_64-apple-darwin10.8.0.impl) provides
+concrete definitions for these functions.
+
+We implement GCC-like behavior for most cases.
+-/
+
+/-- Evaluate an implementation-defined function call.
+    Corresponds to: runtime/libcore/impls/*.impl files
+    Audited: 2026-01-02
+    Deviations: We implement GCC-like behavior only -/
+def evalImplCall (name : String) (args : List Value) : InterpM Value := do
+  match name, args with
+  -- Integer.conv_nonrepresentable_signed_integer: signed overflow on conversion
+  -- Corresponds to: gcc_4.9.0_x86_64-apple-darwin10.8.0.impl:17-19
+  -- GCC behavior: "For conversion to a type of width N, the value is reduced
+  -- modulo 2^N to be within range of the type; no signal is raised."
+  | "Integer.conv_nonrepresentable_signed_integer", [.ctype (.basic (.integer ity)), v] =>
+    convertInt ity v
+
+  -- conv_int: standard integer conversion (also impl in some contexts)
+  | "conv_int", [.ctype (.basic (.integer ity)), v] =>
+    convertInt ity v
+
+  | _, _ =>
+    InterpM.throwNotImpl s!"impl call: {name}"
 
 /-! ## Pure Expression Evaluation
 
@@ -642,31 +678,38 @@ partial def evalPexpr (env : List (HashMap Sym Value)) (pe : APexpr) : InterpM V
       | none =>
         InterpM.throwNotImpl s!"pure function call {s.name}: not found in stdlib (stdlib has {file.stdlib.length} entries)"
     | .impl ic =>
-      -- Implementation constant functions
+      -- Implementation constant functions - dispatch to evalImplCall
       match ic with
-      | .other "conv_int" =>
-        match argVals with
-        | [.ctype (.basic (.integer ity)), v] => convertInt ity v
-        | _ => InterpM.throwTypeError "conv_int requires ctype and integer"
-      | _ =>
-        InterpM.throwNotImpl s!"impl call: {repr ic}"
+      | .other name => evalImplCall name argVals
+      | _ => InterpM.throwNotImpl s!"impl call: {repr ic}"
 
   | .struct_ tag members =>
     let memberVals ← members.mapM fun (name, e) => do
       let v ← evalPexpr env (mkAPexpr e)
       pure (name, v)
     -- Convert to struct value
+    -- Note: member values can be either raw object values or loaded values
     let structMembers := memberVals.map fun (name, v) =>
-      match v with
+      let mv : MemValue := match v with
       | .object ov =>
-        -- Convert object value to MemValue for struct
-        let mv : MemValue := match ov with
-          | .integer iv => .integer (.signed .int_) iv  -- Assume int
-          | .floating fv => .floating (.realFloating .double) fv
-          | .pointer pv => .pointer .void pv
-          | _ => .unspecified .void
-        { name, ty := .void, value := mv : StructMember }
-      | _ => { name, ty := .void, value := .unspecified .void : StructMember }
+        -- Raw object value
+        match ov with
+        | .integer iv => .integer (.signed .int_) iv  -- Assume int
+        | .floating fv => .floating (.realFloating .double) fv
+        | .pointer pv => .pointer .void pv
+        | _ => .unspecified .void
+      | .loaded (.specified ov) =>
+        -- Loaded specified value - extract the inner object value
+        match ov with
+        | .integer iv => .integer (.signed .int_) iv
+        | .floating fv => .floating (.realFloating .double) fv
+        | .pointer pv => .pointer .void pv
+        | _ => .unspecified .void
+      | .loaded (.unspecified ty) =>
+        -- Loaded unspecified value
+        .unspecified ty
+      | _ => .unspecified .void
+      { name, ty := .void, value := mv : StructMember }
     pure (.object (.struct_ tag structMembers))
 
   | .union_ tag member e =>
