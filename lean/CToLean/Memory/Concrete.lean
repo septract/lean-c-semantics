@@ -195,7 +195,7 @@ partial def memValueToBytes (env : TypeEnv) (val : MemValue) : List (Option UInt
   | .pointer _ pv =>
     match pv.base with
     | .null _ => intToBytes 0 targetPtrSize
-    | .function _ => intToBytes 0 targetPtrSize  -- Function pointers need special handling
+    | .function sym => intToBytes sym.id targetPtrSize  -- Use symbol ID as address
     | .concrete _ addr => intToBytes addr targetPtrSize
   | .array elems =>
     elems.flatMap (memValueToBytes env)
@@ -225,6 +225,28 @@ partial def memValueToBytes (env : TypeEnv) (val : MemValue) : List (Option UInt
       let size := unionSize env fields
       memberBytes ++ List.replicate (size - memberBytes.length) (some 0)
     | _ => memberBytes
+
+/-- Collect all function pointer symbols from a MemValue.
+    Used to register function pointers in funptrmap before serialization.
+    Corresponds to: repr in impl_mem.ml which updates funptrmap as it serializes -/
+partial def collectFunPtrs (val : MemValue) : List Sym :=
+  match val with
+  | .pointer _ pv =>
+    match pv.base with
+    | .function sym => [sym]
+    | _ => []
+  | .array elems => elems.flatMap collectFunPtrs
+  | .struct_ _ members => members.flatMap fun (_, _, mval) => collectFunPtrs mval
+  | .union_ _ _ mval => collectFunPtrs mval
+  | _ => []
+
+/-- Register function pointers in funptrmap.
+    Corresponds to: IntMap.add in repr for function pointers (impl_mem.ml:1171) -/
+def registerFunPtrs (syms : List Sym) : MemM Unit := do
+  let st ← get
+  let newMap := syms.foldl (init := st.funptrmap) fun m sym =>
+    m.insert sym.id sym
+  set { st with funptrmap := newMap }
 
 /-! ## Core Memory Operations
 
@@ -312,8 +334,18 @@ partial def reconstructValue (env : TypeEnv) (ty : Ctype) (bytes : List AbsByte)
     | some 0 =>
       pure (.pointer (Ctype.pointer quals pointeeCty) (nullPtrval pointeeCty))
     | some addr =>
-      let prov := bytesProvenance bytes
-      pure (.pointer (Ctype.pointer quals pointeeCty) { prov := prov, base := .concrete none addr.toNat })
+      -- Check if this address is a function pointer
+      -- Corresponds to: IntMap.find_opt in abst for function pointers (impl_mem.ml:1010-1014)
+      let st ← get
+      match st.funptrmap[addr.toNat]? with
+      | some sym =>
+        -- This is a function pointer - reconstruct with function base
+        let prov := bytesProvenance bytes
+        pure (.pointer (Ctype.pointer quals pointeeCty) { prov := prov, base := .function sym })
+      | none =>
+        -- Regular concrete pointer
+        let prov := bytesProvenance bytes
+        pure (.pointer (Ctype.pointer quals pointeeCty) { prov := prov, base := .concrete none addr.toNat })
     | none =>
       pure (.unspecified ty)
 
@@ -385,6 +417,11 @@ def storeImpl (ty : Ctype) (isLocking : Bool) (ptr : PointerValue) (val : MemVal
     -- Check bounds
     if !isInBounds alloc addr size then
       throw (.access .outOfBoundPtr (some addr))
+
+    -- Register any function pointers in funptrmap before serialization
+    -- Corresponds to: repr updating funptrmap in impl_mem.ml:1171
+    let funPtrs := collectFunPtrs val
+    registerFunPtrs funPtrs
 
     -- Serialize and write
     let bytes := memValueToBytes env val
