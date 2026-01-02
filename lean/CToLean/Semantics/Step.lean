@@ -608,19 +608,98 @@ partial def runUntilDone (st : ThreadState) (file : File) (labeledConts : Labele
   | .continue_ st' => runUntilDone st' file labeledConts (fuel - 1)
   | .error err => throw err
 
+/-! ## Global Variable Initialization
+
+Corresponds to: driver_globals in driver.lem:1541-1618
+
+Global variables are initialized before main() runs:
+1. Extract GlobalDef entries from file.globs (skip GlobalDecl)
+2. For each global (sym, bTy, expr):
+   - Run the interpreter with expr as arena
+   - Get the resulting value (typically a pointer)
+   - Bind sym to this value in the environment
+3. Pass the resulting environment to main
+-/
+
+/-- Run a single expression to completion and return the value.
+    Corresponds to: driver2 loop in driver.lem
+    Audited: 2026-01-01
+    Deviations: Simplified - no concurrency support -/
+partial def runExprToValue (expr : AExpr) (env : List (HashMap Sym Value))
+    (file : File) (fuel : Nat := 100000) : InterpM Value := do
+  -- Use a minimal stack with empty continuation (like Cerberus)
+  -- Corresponds to: Stack_cons Nothing [] Stack_empty in driver.lem
+  let st : ThreadState := {
+    arena := expr
+    stack := .cons none [] .empty
+    env := env
+    currentProc := none
+  }
+  runUntilDone st file {} fuel
+
+/-- Initialize a single global variable.
+    Corresponds to: the mapM_ body in driver.lem:1564-1616
+    Audited: 2026-01-01
+    Deviations: None -/
+def initOneGlobal (file : File) (sym : Sym) (bTy : BaseType) (expr : AExpr)
+    (env : List (HashMap Sym Value)) : InterpM (List (HashMap Sym Value)) := do
+  -- Evaluate the initializer expression
+  let cval ← runExprToValue expr env file
+  -- Bind the symbol in the environment
+  -- Corresponds to: update_env (Pattern [] (CaseBase (Just glob_sym, glob_bTy))) cval env
+  let pat : APattern := { annots := [], pat := .base (some sym) bTy }
+  match matchPattern pat cval with
+  | some bindings => pure (bindAllInEnv bindings env)
+  | none =>
+    -- For simple base pattern, just bind directly
+    pure (bindInEnv sym cval env)
+
+/-- Initialize all global variables.
+    Corresponds to: driver_globals in driver.lem:1541-1618
+    Audited: 2026-01-01
+    Deviations:
+    - No spawn_thread (sequential only)
+    - No exec_loc tracking -/
+def initGlobals (file : File) : InterpM (List (HashMap Sym Value)) := do
+  -- Start with empty environment (one scope)
+  let emptyMap : HashMap Sym Value := {}
+  let mut env : List (HashMap Sym Value) := [emptyMap]
+
+  -- Extract GlobalDef entries (skip GlobalDecl)
+  -- Corresponds to: driver.lem:1558-1562
+  let globDefs := file.globs.filterMap fun (sym, decl) =>
+    match decl with
+    | .def_ bTy _cTy expr => some (sym, bTy, expr)
+    | .decl _ _ => none
+
+  -- Initialize each global in order
+  -- Corresponds to: mapM_ in driver.lem:1564-1617
+  for (sym, bTy, expr) in globDefs do
+    env ← initOneGlobal file sym bTy expr env
+
+  pure env
+
 /-- Initialize thread state for running main.
-    Corresponds to the initial state setup in Cerberus. -/
-def initThreadState (file : File) : Except InterpError ThreadState := do
+    Corresponds to the initial state setup in Cerberus driver.lem.
+    Audited: 2026-01-01
+    Deviations: Simplified - globals initialized inline -/
+def initThreadState (file : File) (globalEnv : List (HashMap Sym Value))
+    : Except InterpError ThreadState := do
   -- Find main function
   match file.main with
   | none => throw (.illformedProgram "no main function defined")
   | some mainSym =>
     match callProc file mainSym [] with
     | .ok (procEnv, body) =>
+      -- Merge global env with procedure env
+      -- Global env is the base, procedure env is pushed on top
+      let combinedEnv := match globalEnv with
+        | [] => [procEnv]
+        | baseEnv :: rest => procEnv :: baseEnv :: rest
       pure {
         arena := body
         stack := .cons (some mainSym) [] .empty
-        env := [procEnv]
+        env := combinedEnv
         currentProc := some mainSym
       }
     | .error err => throw err
