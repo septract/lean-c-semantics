@@ -28,21 +28,21 @@ val concrete_ptrval: Nat_big_num.num -> Nat_big_num.num -> pointer_value
 
 /-- Create null pointer of given type.
     Corresponds to: null_ptrval in memory_model.ml:70
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def nullPtrval (ty : Ctype) : PointerValue :=
   { prov := .none, base := .null ty }
 
 /-- Create function pointer.
     Corresponds to: fun_ptrval in memory_model.ml:71
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def funPtrval (sym : Sym) : PointerValue :=
   { prov := .none, base := .function sym }
 
 /-- Create concrete pointer with allocation ID and address.
     Corresponds to: concrete_ptrval in memory_model.ml:74
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: Takes allocId separately (Cerberus encodes in first num) -/
 def concretePtrval (allocId : Nat) (addr : Nat) : PointerValue :=
   { prov := .some allocId, base := .concrete none addr }
@@ -61,14 +61,14 @@ val alignof_ival: Ctype.ctype -> integer_value
 
 /-- Create integer value from literal.
     Corresponds to: integer_ival in memory_model.ml:134
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: Takes Int instead of Nat_big_num (equivalent) -/
 def integerIval (n : Int) : IntegerValue :=
   { val := n, prov := .none }
 
 /-- Create integer value with provenance.
     Not in Cerberus interface - used internally for pointer-to-int casts.
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: Extension for provenance tracking -/
 def integerIvalWithProv (n : Int) (prov : Provenance) : IntegerValue :=
   { val := n, prov := prov }
@@ -84,7 +84,7 @@ val min_ival: Ctype.integerType -> integer_value
 
 /-- Maximum value for an integer type.
     Corresponds to: max_ival in memory_model.ml:135
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None (LP64 assumptions match Cerberus) -/
 def maxIval (_env : TypeEnv) (ity : IntegerType) : IntegerValue :=
   let size := integerTypeSize ity
@@ -105,7 +105,7 @@ def maxIval (_env : TypeEnv) (ity : IntegerType) : IntegerValue :=
 
 /-- Minimum value for an integer type.
     Corresponds to: min_ival in memory_model.ml:136
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None (LP64 assumptions match Cerberus) -/
 def minIval (_env : TypeEnv) (ity : IntegerType) : IntegerValue :=
   let size := integerTypeSize ity
@@ -126,14 +126,14 @@ def minIval (_env : TypeEnv) (ity : IntegerType) : IntegerValue :=
 
 /-- sizeof(ty) as integer value.
     Corresponds to: sizeof_ival in memory_model.ml:140
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def sizeofIval (env : TypeEnv) (ty : Ctype) : IntegerValue :=
   integerIval (sizeof env ty)
 
 /-- alignof(ty) as integer value.
     Corresponds to: alignof_ival in memory_model.ml:141
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def alignofIval (env : TypeEnv) (ty : Ctype) : IntegerValue :=
   integerIval (alignof env ty)
@@ -154,49 +154,49 @@ val union_mval: Symbol.sym -> Symbol.identifier -> mem_value -> mem_value
 
 /-- Create unspecified (uninitialized) memory value.
     Corresponds to: unspecified_mval in memory_model.ml:183
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def unspecifiedMval (ty : Ctype) : MemValue :=
   .unspecified ty
 
 /-- Create integer memory value.
     Corresponds to: integer_value_mval in memory_model.ml:184
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def integerValueMval (ity : IntegerType) (v : IntegerValue) : MemValue :=
   .integer ity v
 
 /-- Create floating memory value.
     Corresponds to: floating_value_mval in memory_model.ml:185
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def floatingValueMval (fty : FloatingType) (v : FloatingValue) : MemValue :=
   .floating fty v
 
 /-- Create pointer memory value.
     Corresponds to: pointer_mval in memory_model.ml:186
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def pointerMval (ty : Ctype) (v : PointerValue) : MemValue :=
   .pointer ty v
 
 /-- Create array memory value.
     Corresponds to: array_mval in memory_model.ml:187
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def arrayMval (elems : List MemValue) : MemValue :=
   .array elems
 
 /-- Create struct memory value.
     Corresponds to: struct_mval in memory_model.ml:188
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def structMval (tag : Sym) (members : List (Identifier × Ctype × MemValue)) : MemValue :=
   .struct_ tag members
 
 /-- Create union memory value.
     Corresponds to: union_mval in memory_model.ml:189
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def unionMval (tag : Sym) (member : Identifier) (val : MemValue) : MemValue :=
   .union_ tag member val
@@ -215,7 +215,7 @@ The Memory module signature in Cerberus defines:
 - Casting: ptrfromint, intfromptr
 - Memory operations: memcpy, memcmp, realloc
 
-Audited: 2025-01-01
+Audited: 2026-01-01
 Deviations:
 - No thread_id parameter (sequential only)
 - No location parameter (tracked elsewhere)
@@ -343,7 +343,7 @@ are in the MemoryOps typeclass and perform bounds checking.
 /-- Pure pointer arithmetic (no bounds check).
     Corresponds to: array_shift_ptrval in memory_model.ml:109
     Computes: ptr + (n * sizeof(elemTy))
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def arrayShiftPtrval (env : TypeEnv) (ptr : PointerValue) (elemTy : Ctype) (n : IntegerValue) : PointerValue :=
   match ptr.base with
@@ -356,7 +356,7 @@ def arrayShiftPtrval (env : TypeEnv) (ptr : PointerValue) (elemTy : Ctype) (n : 
 
 /-- Pure struct member shift.
     Corresponds to: member_shift_ptrval in memory_model.ml:110
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def memberShiftPtrval (env : TypeEnv) (ptr : PointerValue) (tag : Sym) (member : Identifier) : PointerValue :=
   match ptr.base with

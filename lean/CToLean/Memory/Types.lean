@@ -33,7 +33,7 @@ type readonly_status =
 
 /-- Kind of read-only memory.
     Corresponds to: readonly_kind in mem_common.lem:124-127
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 inductive ReadonlyKind where
   | stringLiteral       -- ReadonlyStringLiteral
@@ -43,7 +43,7 @@ inductive ReadonlyKind where
 
 /-- Read-only status for allocations.
     Corresponds to: readonly_status in impl_mem.ml:400-402
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 inductive ReadonlyStatus where
   | writable                      -- IsWritable
@@ -60,7 +60,7 @@ taint: [ `Unexposed | `Exposed ]; (* NOTE: PNVI-ae, PNVI-ae-udi *)
 
 /-- Taint status for PNVI-ae exposure tracking.
     Corresponds to: taint field in impl_mem.ml:409
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 inductive Taint where
   | unexposed  -- `Unexposed - allocation not exposed to integer world
@@ -84,7 +84,7 @@ type allocation = {
 
 /-- Metadata for a single memory allocation.
     Corresponds to: allocation in impl_mem.ml:404-412
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: prefix field simplified to String (Cerberus uses Symbol.prefix) -/
 structure Allocation where
   /-- Base address of this allocation.
@@ -122,7 +122,7 @@ module AbsByte = struct
 
 /-- Abstract byte in memory.
     Corresponds to: AbsByte.t in impl_mem.ml:415-420
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: copy_offset uses Nat instead of int (always non-negative) -/
 structure AbsByte where
   /-- Provenance of this byte (which allocation it came from).
@@ -166,7 +166,7 @@ type mem_state = {
 
 /-- Global memory state.
     Corresponds to: mem_state in impl_mem.ml:482-501
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations:
     - next_iota, iota_map: Deferred (PNVI-ae-udi only)
     - varargs, next_varargs_id: Deferred (variadic functions)
@@ -214,7 +214,7 @@ And footprint in impl_mem.ml:523-524
 
 /-- Access kind for footprint tracking.
     Corresponds to: access_kind in mem_common.lem:17-19
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 inductive AccessKind where
   | read   -- LoadAccess
@@ -223,7 +223,7 @@ inductive AccessKind where
 
 /-- Memory access footprint.
     Corresponds to: footprint in impl_mem.ml:523-524
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 structure Footprint where
   /-- Read or write -/
@@ -241,7 +241,7 @@ Corresponds to: error types in mem_common.lem:21-76 and mem_error in mem_common.
 
 /-- Access-related memory errors.
     Corresponds to: access_error in mem_common.lem:21-27
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 inductive AccessError where
   | nullPtr        -- NullPtr: dereferencing null pointer
@@ -254,7 +254,7 @@ inductive AccessError where
 
 /-- Free/deallocation errors.
     Corresponds to: free_error in mem_common.lem:46-49
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 inductive FreeError where
   | nonMatching    -- Free_non_matching: address doesn't match any allocation
@@ -264,7 +264,7 @@ inductive FreeError where
 
 /-- Memory copy errors.
     Corresponds to: memcpy_error in mem_common.lem:61-65
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 inductive MemcpyError where
   | overlap    -- Memcpy_overlap: overlapping regions
@@ -275,7 +275,7 @@ inductive MemcpyError where
 
 /-- Combined memory error type.
     Corresponds to: mem_error in mem_common.lem:129-162
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations:
     - MerrInternal, MerrOther: Combined into typeError
     - MerrPtrComparison, MerrArrayShift, etc.: Using specific error variants

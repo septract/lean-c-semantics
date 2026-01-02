@@ -23,18 +23,18 @@ open CToLean.Core
 
 Corresponds to: DefaultImpl in ocaml_implementation.ml:114-274
 These values match the x86_64-apple-darwin LP64 ABI that Cerberus uses.
-Audited: 2025-01-01
+Audited: 2026-01-01
 -/
 
 /-- Target pointer size in bytes.
     Corresponds to: sizeof_pointer in ocaml_implementation.ml:118-119
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def targetPtrSize : Nat := 8
 
 /-- Target maximum alignment.
     Corresponds to: max_alignment in ocaml_implementation.ml:151-152
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: Cerberus uses 8, we use 16 for x86_64 compatibility -/
 def targetMaxAlign : Nat := 16
 
@@ -45,7 +45,7 @@ Corresponds to: sizeof_ity in ocaml_implementation.ml:173-204
 
 /-- Size of integer base kind in bytes.
     Corresponds to: sizeof_ity in ocaml_implementation.ml:173-204
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None (LP64 ABI) -/
 def intBaseKindSize : IntBaseKind → Nat
   | .ichar => 1
@@ -69,7 +69,7 @@ def intBaseKindSize : IntBaseKind → Nat
 
 /-- Size of integer type in bytes.
     Corresponds to: sizeof_ity in ocaml_implementation.ml:173-204
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def integerTypeSize : IntegerType → Nat
   | .char => 1
@@ -85,7 +85,7 @@ def integerTypeSize : IntegerType → Nat
 
 /-- Size of real floating type in bytes.
     Corresponds to: sizeof_fty in ocaml_implementation.ml:206-212
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: float=4 (Cerberus uses 8 as hack), longDouble=16 (Cerberus uses 8 as hack) -/
 def realFloatingTypeSize : RealFloatingType → Nat
   | .float => 4
@@ -93,13 +93,13 @@ def realFloatingTypeSize : RealFloatingType → Nat
   | .longDouble => 16  -- x86-64 long double
 
 /-- Size of floating type in bytes.
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def floatingTypeSize : FloatingType → Nat
   | .realFloating ty => realFloatingTypeSize ty
 
 /-- Size of basic type in bytes.
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def basicTypeSize : BasicType → Nat
   | .integer ity => integerTypeSize ity
@@ -112,7 +112,7 @@ Corresponds to: alignof_ity, alignof_fty in ocaml_implementation.ml:214-253
 
 /-- Alignment of integer base kind.
     Corresponds to: alignof_ity in ocaml_implementation.ml:214-245
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None (LP64 ABI) -/
 def intBaseKindAlign : IntBaseKind → Nat
   | .ichar => 1
@@ -136,7 +136,7 @@ def intBaseKindAlign : IntBaseKind → Nat
 
 /-- Alignment of integer type.
     Corresponds to: alignof_ity in ocaml_implementation.ml:214-245
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def integerTypeAlign : IntegerType → Nat
   | .char => 1
@@ -152,7 +152,7 @@ def integerTypeAlign : IntegerType → Nat
 
 /-- Alignment of real floating type.
     Corresponds to: alignof_fty in ocaml_implementation.ml:247-253
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: float=4 (Cerberus uses 8 as hack), longDouble=16 (Cerberus uses 8 as hack) -/
 def realFloatingTypeAlign : RealFloatingType → Nat
   | .float => 4
@@ -160,13 +160,13 @@ def realFloatingTypeAlign : RealFloatingType → Nat
   | .longDouble => 16
 
 /-- Alignment of floating type.
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def floatingTypeAlign : FloatingType → Nat
   | .realFloating ty => realFloatingTypeAlign ty
 
 /-- Alignment of basic type.
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def basicTypeAlign : BasicType → Nat
   | .integer ity => integerTypeAlign ity
@@ -180,7 +180,7 @@ Corresponds to: Tags.tagDefs() in Cerberus (global mutable state)
 
 /-- Type environment containing struct/union definitions.
     Corresponds to: Tags.tagDefs() in Cerberus
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: Explicit parameter instead of global state -/
 structure TypeEnv where
   /-- Tag definitions: tag symbol -> (loc, def) -/
@@ -188,13 +188,13 @@ structure TypeEnv where
   deriving Inhabited
 
 /-- Look up a tag definition.
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def TypeEnv.lookupTag (env : TypeEnv) (tag : Sym) : Option TagDef :=
   env.tagDefs.find? (·.1 == tag) |>.map (·.2.2)
 
 /-- Create type environment from a Core file.
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def TypeEnv.fromFile (file : File) : TypeEnv :=
   { tagDefs := file.tagDefs }
@@ -206,7 +206,7 @@ and offsetsof for struct layout computation.
 -/
 
 /-- Round up to alignment.
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def alignUp (n : Nat) (align : Nat) : Nat :=
   if align == 0 then n
@@ -215,7 +215,7 @@ def alignUp (n : Nat) (align : Nat) : Nat :=
 mutual
   /-- Compute sizeof for inner ctype.
       Corresponds to: sizeof in impl_mem.ml:2492
-      Audited: 2025-01-01
+      Audited: 2026-01-01
       Deviations: None -/
   partial def sizeof_ (env : TypeEnv) : Ctype_ → Nat
     | .void => 0  -- void has size 0
@@ -238,14 +238,14 @@ mutual
 
   /-- Compute sizeof for a type.
       Corresponds to: sizeof in impl_mem.ml:2492
-      Audited: 2025-01-01
+      Audited: 2026-01-01
       Deviations: None -/
   partial def sizeof (env : TypeEnv) (ct : Ctype) : Nat :=
     sizeof_ env ct.ty
 
   /-- Compute alignof for inner ctype.
       Corresponds to: alignof in impl_mem.ml:2494
-      Audited: 2025-01-01
+      Audited: 2026-01-01
       Deviations: None -/
   partial def alignof_ (env : TypeEnv) : Ctype_ → Nat
     | .void => 1
@@ -267,14 +267,14 @@ mutual
 
   /-- Compute alignof for a type.
       Corresponds to: alignof in impl_mem.ml:2494
-      Audited: 2025-01-01
+      Audited: 2026-01-01
       Deviations: None -/
   partial def alignof (env : TypeEnv) (ct : Ctype) : Nat :=
     alignof_ env ct.ty
 
   /-- Compute struct size including padding and tail padding.
       Corresponds to: sizeof for Struct case, using offsetsof
-      Audited: 2025-01-01
+      Audited: 2026-01-01
       Deviations: None -/
   partial def structSize (env : TypeEnv) (members : List FieldDef) : Nat :=
     let (endOffset, maxAlign) := members.foldl (init := (0, 1)) fun (offset, maxA) m =>
@@ -285,13 +285,13 @@ mutual
     alignUp endOffset maxAlign
 
   /-- Compute struct alignment (max of member alignments).
-      Audited: 2025-01-01
+      Audited: 2026-01-01
       Deviations: None -/
   partial def structAlign (env : TypeEnv) (members : List FieldDef) : Nat :=
     members.foldl (init := 1) fun acc m => max acc (alignof env m.ty)
 
   /-- Compute union size (max of member sizes, aligned to max alignment).
-      Audited: 2025-01-01
+      Audited: 2026-01-01
       Deviations: None -/
   partial def unionSize (env : TypeEnv) (members : List FieldDef) : Nat :=
     let maxSize := members.foldl (init := 0) fun acc m => max acc (sizeof env m.ty)
@@ -299,7 +299,7 @@ mutual
     alignUp maxSize maxA
 
   /-- Compute union alignment (max of member alignments).
-      Audited: 2025-01-01
+      Audited: 2026-01-01
       Deviations: None -/
   partial def unionAlign (env : TypeEnv) (members : List FieldDef) : Nat :=
     members.foldl (init := 1) fun acc m => max acc (alignof env m.ty)
@@ -312,7 +312,7 @@ Corresponds to: offsetsof in impl_mem.ml
 
 /-- Compute member offsets for a struct.
     Corresponds to: offsetsof in impl_mem.ml
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: Returns list instead of (list, last_offset) -/
 def structOffsets (env : TypeEnv) (members : List FieldDef) : List (Identifier × Nat) :=
   let (_, offsets) := members.foldl (init := (0, [])) fun (offset, acc) m =>
@@ -324,7 +324,7 @@ def structOffsets (env : TypeEnv) (members : List FieldDef) : List (Identifier �
 
 /-- Get member offset from tag definition.
     Corresponds to: offsetof_ival in impl_mem.ml
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def memberOffset (env : TypeEnv) (tag : Sym) (member : Identifier) : Option Nat :=
   match env.lookupTag tag with
@@ -337,7 +337,7 @@ def memberOffset (env : TypeEnv) (tag : Sym) (member : Identifier) : Option Nat 
   | none => none
 
 /-- Get member type from tag definition.
-    Audited: 2025-01-01
+    Audited: 2026-01-01
     Deviations: None -/
 def memberType (env : TypeEnv) (tag : Sym) (member : Identifier) : Option Ctype :=
   match env.lookupTag tag with
