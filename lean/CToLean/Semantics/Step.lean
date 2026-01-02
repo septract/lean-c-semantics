@@ -519,6 +519,62 @@ partial def step (st : ThreadState) (file : File) (labeledConts : LabeledConts)
       | _, _ =>
         throw (.typeError "load: expected ctype and pointer")
 
+    -- SeqRMW: sequential read-modify-write (increment/decrement)
+    -- Corresponds to: core_reduction.lem:1214-1276 and driver.lem:704-714
+    -- Audited: 2026-01-01
+    -- Deviations: Simplified - no exclusion tracking for negative polarity
+    --
+    -- Algorithm (matching SeqRMWRequest2 in driver.lem:704-714):
+    -- 1. Evaluate pe1 (type) and pe2 (pointer)
+    -- 2. Load current value from memory: mval ← Mem.load ty ptrval
+    -- 3. Bind sym to loaded value (valueFromMemValue mval) in environment
+    -- 4. Evaluate pe3 (update expression) with sym bound
+    -- 5. Convert result to mval': memValueFromValue ty cval3
+    -- 6. Store new value: Mem.store ty false ptrval mval'
+    -- 7. Return old value (if not with_forward) or new value (if with_forward)
+    | .seqRmw withForward tyPe ptrPe sym valPe =>
+      let tyVal ← evalPexpr st.env tyPe
+      let ptrVal ← evalPexpr st.env ptrPe
+      match tyVal, ptrVal with
+      | .ctype ty, .object (.pointer ptr) =>
+        -- Step 2: Load current value
+        let (_, mval) ← InterpM.liftMem (loadImpl ty ptr)
+        -- Step 3: Bind sym to loaded value in environment
+        -- Corresponds to: Map.insert sym (snd (Caux.valueFromMemValue mval)) x :: xs
+        let loadedVal := valueFromMemValue mval
+        let newEnv := bindInEnv sym loadedVal st.env
+        -- Step 4: Evaluate update expression with sym bound
+        let cval3 ← evalPexpr newEnv valPe
+        -- Step 5: Convert to MemValue
+        -- Corresponds to: memValueFromValue (Ctype.Ctype [] (Ctype.unatomic_ ty)) cval3
+        let ty' : Ctype := { annots := [], ty := unatomic_ ty.ty }
+        match memValueFromValue ty' cval3 with
+        | some mval' =>
+          -- Step 6: Store new value
+          let _ ← InterpM.liftMem (storeImpl ty false ptr mval')
+          -- Step 7: Return appropriate value
+          -- Corresponds to: Caux.valueFromMemValue (if with_forward then mval' else mval)
+          let resultVal := if withForward then valueFromMemValue mval' else loadedVal
+          pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
+        | none =>
+          throw (.typeError "seq_rmw: update expression doesn't match lvalue type")
+      | .ctype ty, .loaded (.specified (.pointer ptr)) =>
+        -- Same as above but pointer is loaded value
+        let (_, mval) ← InterpM.liftMem (loadImpl ty ptr)
+        let loadedVal := valueFromMemValue mval
+        let newEnv := bindInEnv sym loadedVal st.env
+        let cval3 ← evalPexpr newEnv valPe
+        let ty' : Ctype := { annots := [], ty := unatomic_ ty.ty }
+        match memValueFromValue ty' cval3 with
+        | some mval' =>
+          let _ ← InterpM.liftMem (storeImpl ty false ptr mval')
+          let resultVal := if withForward then valueFromMemValue mval' else loadedVal
+          pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
+        | none =>
+          throw (.typeError "seq_rmw: update expression doesn't match lvalue type")
+      | _, _ =>
+        throw (.typeError "seq_rmw: expected ctype and pointer")
+
     -- Fence, RMW, CompareExchange - not implemented yet
     | .fence _ =>
       throw (.notImplemented "fence")
@@ -528,8 +584,6 @@ partial def step (st : ThreadState) (file : File) (labeledConts : LabeledConts)
       throw (.notImplemented "compare_exchange_strong")
     | .compareExchangeWeak _ _ _ _ _ _ =>
       throw (.notImplemented "compare_exchange_weak")
-    | .seqRmw _ _ _ _ _ =>
-      throw (.notImplemented "seq_rmw")
 
   -- Eccall: C function call through pointer
   | .ccall _funPtr _funTy _args, _ =>
