@@ -49,36 +49,41 @@ def extractReturnInt (v : Value) : Option Int :=
   | _ => none
 
 /-- Run the main function of a Core file.
-    Corresponds to the initialization and execution loop in Cerberus.
-    1. Initialize thread state with main's body (initThreadState)
-    2. Pre-collect labeled continuations (collectLabeledContinuations)
-    3. Run step loop until done (runUntilDone) -/
+    Corresponds to: driver_globals + driver_main in driver.lem
+    Audited: 2026-01-01
+    Deviations: Combined global init and main execution
+
+    Steps (matching Cerberus driver.lem):
+    1. Initialize global variables (initGlobals) - driver.lem:1541-1618
+    2. Initialize thread state with main's body (initThreadState)
+    3. Pre-collect labeled continuations (collectLabeledContinuations)
+    4. Run step loop until done (runUntilDone) -/
 def runMain (file : File) : InterpResult :=
   let typeEnv := TypeEnv.fromFile file
-  -- Initialize thread state
-  match initThreadState file with
+  -- Run initialization and execution in InterpM monad
+  let result := runInterpM file typeEnv do
+    -- Initialize global variables first
+    -- Corresponds to: driver_globals in driver.lem:1541-1618
+    let globalEnv ← initGlobals file
+    -- Initialize thread state with globals
+    match initThreadState file globalEnv with
+    | .error e => throw e
+    | .ok st =>
+      -- Pre-collect labeled continuations from main body
+      let labeledConts := collectLabeledContinuations st.arena
+      -- Run step loop until done
+      runUntilDone st file labeledConts
+  match result with
+  | .ok (v, state) =>
+    { returnValue := extractReturnInt v
+      stdout := state.stdout
+      stderr := state.stderr
+      error := none }
   | .error e =>
     { returnValue := none
       stdout := ""
       stderr := ""
       error := some e }
-  | .ok st =>
-    -- Pre-collect labeled continuations from main body
-    let labeledConts := collectLabeledContinuations st.arena
-    -- Run the interpreter
-    let result := runInterpM file typeEnv do
-      runUntilDone st file labeledConts
-    match result with
-    | .ok (v, state) =>
-      { returnValue := extractReturnInt v
-        stdout := state.stdout
-        stderr := state.stderr
-        error := none }
-    | .error e =>
-      { returnValue := none
-        stdout := ""
-        stderr := ""
-        error := some e }
 
 /-! ## Differential Testing Support -/
 
