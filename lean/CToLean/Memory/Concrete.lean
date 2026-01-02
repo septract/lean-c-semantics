@@ -95,12 +95,17 @@ Corresponds to: fetch_bytes and write_bytes in impl_mem.ml:708-737
     Corresponds to: write_bytes in impl_mem.ml:725-737
     Audited: 2026-01-01
     Deviations: None -/
-def writeBytes (addr : Nat) (bytes : List (Option UInt8)) (prov : Provenance) : ConcreteMemM Unit := do
+def writeBytes (addr : Nat) (bytes : List AbsByte) : ConcreteMemM Unit := do
   let st ← get
-  let newBytemap := bytes.foldl (init := (addr, st.bytemap)) fun (a, bm) mbyte =>
-    let byte : AbsByte := { prov := prov, copyOffset := none, value := mbyte }
+  let newBytemap := bytes.foldl (init := (addr, st.bytemap)) fun (a, bm) byte =>
     (a + 1, bm.insert a byte)
   set { st with bytemap := newBytemap.2 }
+
+/-- Write raw bytes with uniform provenance to memory.
+    Helper for allocation initialization. -/
+def writeBytesWithProv (addr : Nat) (bytes : List (Option UInt8)) (prov : Provenance) : ConcreteMemM Unit := do
+  let absBytes := bytes.map fun mbyte => { prov := prov, copyOffset := none, value := mbyte : AbsByte }
+  writeBytes addr absBytes
 
 /-- Read bytes from memory.
     Corresponds to: fetch_bytes in impl_mem.ml:708-722
@@ -172,31 +177,48 @@ def bytesProvenance (bytes : List AbsByte) : Provenance :=
     | p => some p
   ) |>.getD .none
 
-/-- Serialize memory value to bytes.
+/-- Helper to create AbsByte with no provenance -/
+def mkAbsByte (v : Option UInt8) : AbsByte :=
+  { prov := .none, copyOffset := none, value := v }
+
+/-- Helper to create AbsByte with provenance -/
+def mkAbsByteWithProv (prov : Provenance) (i : Nat) (v : Option UInt8) : AbsByte :=
+  { prov := prov, copyOffset := some i, value := v }
+
+/-- Convert raw bytes to AbsBytes with no provenance -/
+def rawToAbsBytes (bytes : List (Option UInt8)) : List AbsByte :=
+  bytes.map mkAbsByte
+
+/-- Serialize memory value to abstract bytes.
     Corresponds to: repr in impl_mem.ml:1139-1219
-    Audited: 2026-01-01
+    Audited: 2026-01-02
     Deviations:
     - Float encoding simplified (not IEEE 754 bit pattern)
     - Function pointer encoding simplified -/
-partial def memValueToBytes (env : TypeEnv) (val : MemValue) : List (Option UInt8) :=
+partial def memValueToBytes (env : TypeEnv) (val : MemValue) : List AbsByte :=
   match val with
   | .unspecified ty =>
-    List.replicate (sizeof env ty) none
+    List.replicate (sizeof env ty) (mkAbsByte none)
   | .integer ity iv =>
-    intToBytes iv.val (integerTypeSize ity)
+    -- Integer bytes carry the integer's provenance (for pointer-derived integers)
+    let rawBytes := intToBytes iv.val (integerTypeSize ity)
+    rawBytes.mapIdx fun i v => { prov := iv.prov, copyOffset := some i, value := v }
   | .floating fty fv =>
     -- Simplified: just use size, actual float encoding would be more complex
     let size := floatingTypeSize fty
     match fv with
     | .finite f =>
       -- This is a simplification - proper IEEE 754 encoding needed
-      intToBytes f.toUInt64.toNat size
-    | _ => List.replicate size none
+      rawToAbsBytes (intToBytes f.toUInt64.toNat size)
+    | _ => List.replicate size (mkAbsByte none)
   | .pointer _ pv =>
-    match pv.base with
-    | .null _ => intToBytes 0 targetPtrSize
-    | .function sym => intToBytes sym.id targetPtrSize  -- Use symbol ID as address
-    | .concrete _ addr => intToBytes addr targetPtrSize
+    -- Pointer bytes carry the pointer's provenance
+    -- Corresponds to: impl_mem.ml:1187 - AbsByte.v prov ~copy_offset:(Some i)
+    let (rawBytes, prov) := match pv.base with
+      | .null _ => (intToBytes 0 targetPtrSize, Provenance.none)
+      | .function sym => (intToBytes sym.id targetPtrSize, pv.prov)
+      | .concrete _ addr => (intToBytes addr targetPtrSize, pv.prov)
+    rawBytes.mapIdx fun i v => mkAbsByteWithProv prov i v
   | .array elems =>
     elems.flatMap (memValueToBytes env)
   | .struct_ tag members =>
@@ -205,7 +227,7 @@ partial def memValueToBytes (env : TypeEnv) (val : MemValue) : List (Option UInt
     | some (.struct_ fields _) =>
       let offsets := structOffsets env fields
       let size := structSize env fields
-      let bytes := List.replicate size (some 0 : Option UInt8)
+      let bytes := List.replicate size (mkAbsByte (some 0))
       members.foldl (init := bytes) fun acc (name, _, mval) =>
         match offsets.find? (·.1 == name) with
         | some (_, offset) =>
@@ -223,7 +245,7 @@ partial def memValueToBytes (env : TypeEnv) (val : MemValue) : List (Option UInt
     match env.lookupTag tag with
     | some (.union_ fields) =>
       let size := unionSize env fields
-      memberBytes ++ List.replicate (size - memberBytes.length) (some 0)
+      memberBytes ++ List.replicate (size - memberBytes.length) (mkAbsByte (some 0))
     | _ => memberBytes
 
 /-- Collect all function pointer symbols from a MemValue.
@@ -291,10 +313,10 @@ def allocateImpl (name : String) (size : Nat) (ty : Option Ctype)
   match init with
   | some val =>
     let bytes := memValueToBytes env val
-    writeBytes alignedAddr bytes (.some allocId)
+    writeBytes alignedAddr bytes
   | none =>
-    -- Zero-initialize
-    writeBytes alignedAddr (List.replicate size (some 0)) (.some allocId)
+    -- Zero-initialize with allocation's provenance
+    writeBytesWithProv alignedAddr (List.replicate size (some 0)) (.some allocId)
 
   pure (concretePtrval allocId alignedAddr)
 
@@ -424,11 +446,9 @@ def storeImpl (ty : Ctype) (isLocking : Bool) (ptr : PointerValue) (val : MemVal
     registerFunPtrs funPtrs
 
     -- Serialize and write
+    -- Note: memValueToBytes now returns List AbsByte with proper provenance
     let bytes := memValueToBytes env val
-    let prov := match ptr.prov with
-      | .some id => .some id
-      | _ => .none
-    writeBytes addr bytes prov
+    writeBytes addr bytes
 
     -- Lock if requested
     if isLocking then
@@ -643,12 +663,8 @@ def memcpyImpl (dst src : PointerValue) (n : IntegerValue) : ConcreteMemM Pointe
     -- Read source bytes
     let bytes ← readBytes srcAddr size
 
-    -- Write to destination
-    let byteVals := bytes.map (·.value)
-    let prov := match dst.prov with
-      | .some id => .some id
-      | _ => .none
-    writeBytes dstAddr byteVals prov
+    -- Write to destination (preserves provenance from source bytes)
+    writeBytes dstAddr bytes
 
     pure dst
   | _, _ =>
@@ -704,13 +720,12 @@ def reallocImpl (align : IntegerValue) (ptr : PointerValue) (newSize : IntegerVa
     -- Allocate new region
     let newPtr ← allocateImpl "realloc" size alloc.ty align.val.toNat .writable none
 
-    -- Copy old data
+    -- Copy old data (preserves provenance from source bytes)
     let copySize := min oldSize size
     let bytes ← readBytes oldAddr copySize
     match newPtr.base with
     | .concrete _ newAddr =>
-      let byteVals := bytes.map (·.value)
-      writeBytes newAddr byteVals newPtr.prov
+      writeBytes newAddr bytes
     | _ => pure ()
 
     -- Free old allocation
