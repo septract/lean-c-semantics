@@ -44,6 +44,36 @@ def toAllocId (prov : Provenance) : Nat :=
   | .some id => id
   | _ => 0
 
+/-- Check if a Ctype is atomic.
+    Corresponds to: AilTypesAux.is_atomic in Cerberus -/
+def isAtomicType (ty : Ctype) : Bool :=
+  match ty.ty with
+  | .atomic _ => true
+  | _ => false
+
+/-- Check if this is an atomic member access (UB042).
+    Corresponds to: is_atomic_member_access in impl_mem.ml:689-705
+    Audited: 2026-01-02
+    Deviations: None
+
+    Returns true if we're accessing a member of an atomic struct/union.
+    Accessing the whole atomic object at base address with matching size is allowed. -/
+def isAtomicMemberAccess (alloc : Allocation) (addr : Nat) (accessSize : Nat) (accessTy : Ctype) : Bool :=
+  match alloc.ty with
+  | some allocTy =>
+    if isAtomicType allocTy then
+      -- If accessing at base with same size and type, it's the whole object - allowed
+      if addr == alloc.base && accessSize == alloc.size && allocTy == accessTy then
+        false
+      else
+        -- Otherwise it's a member access - UB
+        true
+    else
+      false
+  | none =>
+    -- Dynamic allocation (malloc) - not atomic
+    false
+
 /-- Check if an allocation is still live (not freed).
     Corresponds to: is_dead check in impl_mem.ml (negated)
     Audited: 2026-01-01
@@ -406,6 +436,11 @@ def loadImpl (ty : Ctype) (ptr : PointerValue) : ConcreteMemM (Footprint × MemV
     if !isInBounds alloc addr size then
       throw (.access .outOfBoundPtr (some addr))
 
+    -- Check for atomic member access (UB042)
+    -- Corresponds to: is_atomic_member_access check in impl_mem.ml:1633, 1658
+    if isAtomicMemberAccess alloc addr size ty then
+      throw (.access .atomicMemberof (some addr))
+
     -- Read bytes and reconstruct value
     let bytes ← readBytes addr size
     let footprint : Footprint := { kind := .read, base := addr, size := size }
@@ -439,6 +474,11 @@ def storeImpl (ty : Ctype) (isLocking : Bool) (ptr : PointerValue) (val : MemVal
     -- Check bounds
     if !isInBounds alloc addr size then
       throw (.access .outOfBoundPtr (some addr))
+
+    -- Check for atomic member access (UB042)
+    -- Corresponds to: is_atomic_member_access check in impl_mem.ml:1741, 1772
+    if isAtomicMemberAccess alloc addr size ty then
+      throw (.access .atomicMemberof (some addr))
 
     -- Register any function pointers in funptrmap before serialization
     -- Corresponds to: repr updating funptrmap in impl_mem.ml:1171
