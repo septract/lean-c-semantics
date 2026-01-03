@@ -73,7 +73,7 @@ def memErrorToUBCode : MemError → String
   | .access .deadPtr _ => "UB010_pointer_to_dead_object"
   | .access .outOfBoundPtr _ => "UB_CERB002a_out_of_bound_load"
   | .access .noProvPtr _ => "UB043_indirection_invalid_value"
-  | .access .atomicMemberof _ => "UB042_access_atomic_struct_union_member"
+  | .access .atomicMemberof _ => "UB042_access_atomic_structUnion_member"
   | .free .nonMatching => "UB_CERB002c_out_of_bound_free"
   | .free .deadAllocation => "UB_CERB002c_out_of_bound_free"  -- double free
   | .free .outOfBound => "UB_CERB002c_out_of_bound_free"
