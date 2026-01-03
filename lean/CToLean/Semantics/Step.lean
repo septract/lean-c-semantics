@@ -611,7 +611,33 @@ partial def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym
     -- Step 3: Evaluate arguments
     -- Corresponds to: core_run.lem:948-956
     let argVals ← args.mapM (evalPexpr st.env)
-    -- Step 4: Call procedure
+    -- Step 4: Check for builtin functions before calling procedure
+    -- Corresponds to: core_run.lem:1046-1127 (Impl BuiltinFunction cases)
+    if funSym.name == some "exit" then
+      -- exit(n) terminates immediately with the given value
+      -- Corresponds to: core_run.lem:1122-1126
+      -- For ccall, argVals are pointers to the actual arguments, so we need to load
+      match argVals with
+      | [.loaded (.specified (.pointer pv))] =>
+        -- Load the exit code from the pointer
+        let (_, mval) ← InterpM.liftMem (loadImpl (.basic (.integer (.signed .int_))) pv)
+        let resultVal := valueFromMemValue mval
+        pure (.done resultVal)
+      | [.object (.pointer pv)] =>
+        -- Pointer as object value - load the exit code
+        let (_, mval) ← InterpM.liftMem (loadImpl (.basic (.integer (.signed .int_))) pv)
+        let resultVal := valueFromMemValue mval
+        pure (.done resultVal)
+      | [exitVal] =>
+        -- Direct value (e.g., from Eproc)
+        pure (.done exitVal)
+      | _ => throw (.illformedProgram "exit: wrong number of arguments")
+    else if funSym.name == some "abort" then
+      -- abort() terminates with signal exit code 127
+      -- Cerberus treats this as defined behavior (prints SIGABRT to stderr)
+      pure (.done (.loaded (.specified (.integer { val := 127, prov := .none }))))
+    else
+    -- Step 5: Call procedure
     -- Corresponds to: core_run.lem:958-971 (call_proc)
     match callProc file funSym argVals with
     | .ok (procEnv, body) =>
