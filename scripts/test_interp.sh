@@ -94,7 +94,8 @@ LEAN_FAIL=0
 LEAN_TIMEOUT_COUNT=0
 MATCH=0
 MISMATCH=0
-UB_MATCH=0  # Both detected UB
+UB_MATCH=0      # Both detected UB with same code
+UB_CODE_DIFF=0  # Both detected UB but different codes (not a failure)
 
 echo ""
 echo "Running interpreter comparison..."
@@ -112,19 +113,41 @@ for c_file in $TEST_FILES; do
         printf "\r[%d/%d] %s...                    " "$file_num" "$total_to_test" "$filename"
     fi
 
-    # Run Cerberus to get exit code and check for UB
-    cerberus_exit=0
-    cerberus_output=$(eval $CERBERUS --exec "$c_file" 2>&1) || cerberus_exit=$?
+    # Run Cerberus in batch mode to get return value (not shell exit code)
+    cerberus_shell_exit=0
+    cerberus_output=$(eval $CERBERUS --exec --batch "$c_file" 2>&1) || cerberus_shell_exit=$?
     cerberus_has_ub=false
+    cerberus_ret=""
+
     if echo "$cerberus_output" | grep -q "undefined behaviour"; then
         cerberus_has_ub=true
     fi
 
-    if [[ $cerberus_exit -eq 139 ]] || [[ $cerberus_exit -eq 134 ]] || [[ $cerberus_exit -eq 137 ]]; then
+    if [[ $cerberus_shell_exit -eq 139 ]] || [[ $cerberus_shell_exit -eq 134 ]] || [[ $cerberus_shell_exit -eq 137 ]]; then
         # Cerberus crashed (SIGSEGV, SIGABRT, etc.) - skip
         ((CERBERUS_FAIL++))
         if $VERBOSE; then
-            echo "SKIP $filename (Cerberus crashed with $cerberus_exit)"
+            echo "SKIP $filename (Cerberus crashed with $cerberus_shell_exit)"
+        fi
+        continue
+    fi
+
+    # Extract return value from batch output: Defined {value: "Specified(N)", ...}
+    # or detect UB: Undefined {ub: "CODE", ...}
+    cerberus_ub_code=""
+    if echo "$cerberus_output" | grep -q '^Undefined {'; then
+        cerberus_has_ub=true
+        cerberus_ub_code=$(echo "$cerberus_output" | grep -o 'ub: "[^"]*"' | sed 's/ub: "\([^"]*\)"/\1/')
+        cerberus_ret="UB"
+    elif echo "$cerberus_output" | grep -q 'value: "Specified'; then
+        cerberus_ret=$(echo "$cerberus_output" | grep -o 'value: "Specified([^)]*)"' | sed 's/value: "Specified(\([^)]*\))"/\1/')
+    elif echo "$cerberus_output" | grep -q 'value: "Unspecified'; then
+        cerberus_ret="UNSPECIFIED"
+    else
+        # Could not extract return value - skip
+        ((CERBERUS_FAIL++))
+        if $VERBOSE; then
+            echo "SKIP $filename (could not extract Cerberus return value)"
         fi
         continue
     fi
@@ -139,9 +162,9 @@ for c_file in $TEST_FILES; do
         continue
     fi
 
-    # Run Lean interpreter with timeout
+    # Run Lean interpreter in batch mode with timeout
     lean_exit=0
-    lean_output=$(timeout ${LEAN_TIMEOUT}s "$LEAN_INTERP" "$json_file" 2>&1) || lean_exit=$?
+    lean_output=$(timeout ${LEAN_TIMEOUT}s "$LEAN_INTERP" --batch "$json_file" 2>&1) || lean_exit=$?
 
     # Check for timeout (exit code 124)
     if [[ $lean_exit -eq 124 ]]; then
@@ -155,26 +178,19 @@ for c_file in $TEST_FILES; do
         continue
     fi
 
-    # Extract Lean return value
+    # Extract Lean result from batch output
+    # Format: Defined {value: "N"} or Undefined {ub: "CODE"} or Error {msg: "..."}
     lean_ret=""
     lean_has_ub=false
-    if echo "$lean_output" | grep -q "Return value:"; then
-        lean_ret=$(echo "$lean_output" | grep "Return value:" | sed 's/Return value: //')
-    elif echo "$lean_output" | grep -q "Error:"; then
-        error_msg=$(echo "$lean_output" | grep "Error:" | head -1)
-        # Check if it's a UB error
-        if echo "$error_msg" | grep -q "undefined behavior"; then
-            lean_has_ub=true
-        fi
-        # If both Cerberus and Lean detected UB, count as success
-        if $lean_has_ub && $cerberus_has_ub; then
-            ((LEAN_OK++))
-            ((UB_MATCH++))
-            if $VERBOSE; then
-                echo "UB   $filename: both detected undefined behavior"
-            fi
-            continue
-        fi
+    lean_ub_code=""
+    if echo "$lean_output" | grep -q '^Undefined {'; then
+        lean_has_ub=true
+        lean_ub_code=$(echo "$lean_output" | grep -o 'ub: "[^"]*"' | sed 's/ub: "\([^"]*\)"/\1/')
+        lean_ret="UB"
+    elif echo "$lean_output" | grep -q '^Defined {'; then
+        lean_ret=$(echo "$lean_output" | grep -o 'value: "[^"]*"' | sed 's/value: "\([^"]*\)"/\1/')
+    elif echo "$lean_output" | grep -q '^Error {'; then
+        error_msg=$(echo "$lean_output" | grep -o 'msg: "[^"]*"' | sed 's/msg: "\([^"]*\)"/\1/')
         lean_ret="ERROR"
         ((LEAN_FAIL++))
         if ! $VERBOSE; then
@@ -182,11 +198,53 @@ for c_file in $TEST_FILES; do
         fi
         echo "FAIL $filename: $error_msg"
         continue
+    else
+        # Unexpected output format
+        ((LEAN_FAIL++))
+        if ! $VERBOSE; then
+            echo ""
+        fi
+        echo "FAIL $filename: unexpected output: $lean_output"
+        continue
     fi
+
+    # If both detected UB, compare UB codes
+    if $lean_has_ub && $cerberus_has_ub; then
+        ((LEAN_OK++))
+        if [[ "$lean_ub_code" == "$cerberus_ub_code" ]]; then
+            ((UB_MATCH++))
+            if $VERBOSE; then
+                echo "UB   $filename: $lean_ub_code"
+            fi
+        else
+            # Both detected UB but with different codes - note but count as success
+            ((UB_CODE_DIFF++))
+            if $VERBOSE; then
+                echo "UB~  $filename: Lean=$lean_ub_code Cerberus=$cerberus_ub_code"
+            fi
+        fi
+        continue
+    fi
+
+    # One detected UB but not the other - mismatch
+    if $lean_has_ub || $cerberus_has_ub; then
+        ((LEAN_OK++))
+        ((MISMATCH++))
+        if ! $VERBOSE; then
+            echo ""
+        fi
+        if $lean_has_ub; then
+            echo "DIFF $filename: Lean=UB($lean_ub_code) Cerberus=$cerberus_ret"
+        else
+            echo "DIFF $filename: Lean=$lean_ret Cerberus=UB($cerberus_ub_code)"
+        fi
+        continue
+    fi
+
     ((LEAN_OK++))
 
     # Compare results
-    if [[ "$lean_ret" == "$cerberus_exit" ]]; then
+    if [[ "$lean_ret" == "$cerberus_ret" ]]; then
         ((MATCH++))
         if $VERBOSE; then
             echo "OK   $filename: $lean_ret"
@@ -196,7 +254,7 @@ for c_file in $TEST_FILES; do
         if ! $VERBOSE; then
             echo ""
         fi
-        echo "DIFF $filename: Lean=$lean_ret Cerberus=$cerberus_exit"
+        echo "DIFF $filename: Lean=$lean_ret Cerberus=$cerberus_ret"
     fi
 done
 
@@ -221,11 +279,14 @@ echo "  Timeout:    $LEAN_TIMEOUT_COUNT"
 echo ""
 echo "Comparison (of both successes):"
 echo "  Match:      $MATCH"
-echo "  UB Match:   $UB_MATCH (both detected undefined behavior)"
+echo "  UB Match:   $UB_MATCH (both detected same UB)"
+if [[ $UB_CODE_DIFF -gt 0 ]]; then
+    echo "  UB Diff:    $UB_CODE_DIFF (both detected UB, different codes)"
+fi
 echo "  Mismatch:   $MISMATCH"
 echo ""
 
-TOTAL_MATCH=$((MATCH + UB_MATCH))
+TOTAL_MATCH=$((MATCH + UB_MATCH + UB_CODE_DIFF))
 TOTAL_COMPARE=$((TOTAL_MATCH + MISMATCH))
 if [[ $TOTAL_COMPARE -gt 0 ]]; then
     MATCH_RATE=$((TOTAL_MATCH * 100 / TOTAL_COMPARE))

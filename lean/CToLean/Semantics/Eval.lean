@@ -203,8 +203,12 @@ def evalIntOp (op : Binop) (v1 v2 : IntegerValue) : InterpM Value := do
   | .rem_f =>
     if n2 == 0 then InterpM.throwUB .ub045b_moduloByZero
     else
-      -- Floored remainder
-      let result := n1 - n2 * ((n1 / n2).toNat)
+      -- Floored remainder: r = n1 - n2 * floor(n1/n2)
+      -- Lean's Int.emod gives remainder with sign of dividend (truncated)
+      -- We need floored: result has same sign as divisor
+      -- Formula: fmod = tmod + (if tmod != 0 && sign(tmod) != sign(n2) then n2 else 0)
+      let tmod := n1 % n2  -- truncated remainder
+      let result := if tmod != 0 && (tmod < 0) != (n2 < 0) then tmod + n2 else tmod
       pure (.object (.integer { val := result, prov := .none }))
   | .exp => pure (.object (.integer { val := n1 ^ n2.toNat, prov := .none }))
   | .eq => pure (if n1 == n2 then .true_ else .false_)

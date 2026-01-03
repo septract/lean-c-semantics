@@ -1,10 +1,10 @@
 # TODO - C-to-Lean Project
 
-## Current Status: Interpreter Working (100% on minimal tests)
+## Current Status: Interpreter Working (100% on minimal tests, 90% on CI)
 
 **Test Results (2026-01-02):**
 - Minimal test suite: 72/72 (100% match with Cerberus)
-- Cerberus CI suite: 96% match rate on successful tests
+- Cerberus CI suite: 90% match rate on successful tests
 - See `docs/INTERPRETER_STATUS.md` for detailed breakdown
 
 ## Completed Phases
@@ -48,10 +48,13 @@
 ### Remaining Interpreter Issues (from CI tests)
 See `docs/INTERPRETER_STATUS.md` for details.
 
-**High Priority (3 mismatches):**
-- [ ] 0056-unary_plus: Lean=-2147483648 Cerberus=0
-- [ ] 0298-atomic_memberofptr: false positive UB detection
-- [ ] 0335-non_decimal_unsigned_long_int_constants: Lean=15 Cerberus=10
+**Fixed (2026-01-02):**
+- [x] 0056-unary_plus: Fixed by correcting test script to compare return values
+- [x] 0335-non_decimal_unsigned_long_int_constants: Fixed floored remainder (`rem_f`) bug
+
+**Semantic Mismatches (9 tests):**
+- [ ] 0297-atomic_memberof: Need to detect atomic struct/union member access UB
+- [ ] 0300-0306 unseq_race tests: Out of scope (we sequentialize execution)
 
 **Medium Priority (5 pattern match failures):**
 - [ ] 0324-atomics
