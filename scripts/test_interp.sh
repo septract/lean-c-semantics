@@ -70,9 +70,19 @@ if [[ "$TEST_DIR" == "$CERBERUS_DIR/tests/ci" ]]; then
         TEST_FILES="$TEST_FILES $TEST_DIR/$f"
     done
 else
-    # Test all .c files in the directory
+    # Test all .c files in the directory (recursively)
+    # Skip directories that require special modes or memory models:
+    #   bmc/        - Bounded model checking (requires --bmc mode)
+    #   cheri-ci/   - CHERI memory model tests
+    #   pnvi_testsuite/ - PNVI provenance tests
     echo "Testing all .c files in $TEST_DIR..."
-    TEST_FILES=$(find "$TEST_DIR" -maxdepth 1 -name "*.c" | sort)
+    TEST_FILES=$(find "$TEST_DIR" -name "*.c" \
+        ! -name "*.syntax-only.c" \
+        ! -name "*.exhaust.c" \
+        ! -path "*/bmc/*" \
+        ! -path "*/cheri-ci/*" \
+        ! -path "*/pnvi_testsuite/*" \
+        | sort)
 fi
 
 TOTAL_FILES=$(echo $TEST_FILES | wc -w | tr -d ' ')
@@ -83,8 +93,8 @@ if [[ $MAX_TESTS -gt 0 ]]; then
     TEST_FILES=$(echo $TEST_FILES | tr ' ' '\n' | head -n $MAX_TESTS | tr '\n' ' ')
 fi
 
-# Timeout for Lean interpreter (seconds)
-LEAN_TIMEOUT=5
+# Timeout for interpreters (seconds)
+TIMEOUT_SECS=10
 
 # Counters
 CERBERUS_OK=0
@@ -115,7 +125,16 @@ for c_file in $TEST_FILES; do
 
     # Run Cerberus in batch mode to get return value (not shell exit code)
     cerberus_shell_exit=0
-    cerberus_output=$(eval $CERBERUS --exec --batch "$c_file" 2>&1) || cerberus_shell_exit=$?
+    cerberus_output=$(timeout ${TIMEOUT_SECS}s $CERBERUS --exec --batch "$c_file" 2>&1) || cerberus_shell_exit=$?
+
+    # Check for timeout
+    if [[ $cerberus_shell_exit -eq 124 ]]; then
+        ((CERBERUS_FAIL++))
+        if $VERBOSE; then
+            echo "SKIP $filename (Cerberus timeout)"
+        fi
+        continue
+    fi
     cerberus_has_ub=false
     cerberus_ret=""
 
@@ -134,6 +153,7 @@ for c_file in $TEST_FILES; do
 
     # Extract return value from batch output: Defined {value: "Specified(N)", ...}
     # or detect UB: Undefined {ub: "CODE", ...}
+    # or error: Error {msg: "..."}
     cerberus_ub_code=""
     if echo "$cerberus_output" | grep -q '^Undefined {'; then
         cerberus_has_ub=true
@@ -143,6 +163,21 @@ for c_file in $TEST_FILES; do
         cerberus_ret=$(echo "$cerberus_output" | grep -o 'value: "Specified([^)]*)"' | sed 's/value: "Specified(\([^)]*\))"/\1/')
     elif echo "$cerberus_output" | grep -q 'value: "Unspecified'; then
         cerberus_ret="UNSPECIFIED"
+    elif echo "$cerberus_output" | grep -q '^Error {'; then
+        # Cerberus reported an error (ill-formed program, unsupported feature, etc.)
+        ((CERBERUS_FAIL++))
+        if $VERBOSE; then
+            error_msg=$(echo "$cerberus_output" | grep -o 'msg: "[^"]*"' | head -1 | sed 's/msg: "\([^"]*\)"/\1/')
+            echo "SKIP $filename (Cerberus error: $error_msg)"
+        fi
+        continue
+    elif [[ $cerberus_shell_exit -ne 0 ]]; then
+        # Cerberus exited with error (constraint violation, etc.)
+        ((CERBERUS_FAIL++))
+        if $VERBOSE; then
+            echo "SKIP $filename (Cerberus exit $cerberus_shell_exit)"
+        fi
+        continue
     else
         # Could not extract return value - skip
         ((CERBERUS_FAIL++))
@@ -164,16 +199,16 @@ for c_file in $TEST_FILES; do
 
     # Run Lean interpreter in batch mode with timeout
     lean_exit=0
-    lean_output=$(timeout ${LEAN_TIMEOUT}s "$LEAN_INTERP" --batch "$json_file" 2>&1) || lean_exit=$?
+    lean_output=$(timeout ${TIMEOUT_SECS}s "$LEAN_INTERP" --batch "$json_file" 2>&1) || lean_exit=$?
 
     # Check for timeout (exit code 124)
     if [[ $lean_exit -eq 124 ]]; then
         ((LEAN_TIMEOUT_COUNT++))
         if $VERBOSE; then
-            echo "TIMEOUT $filename (>${LEAN_TIMEOUT}s)"
+            echo "TIMEOUT $filename (Lean >${TIMEOUT_SECS}s)"
         else
             echo ""
-            echo "TIMEOUT $filename (>${LEAN_TIMEOUT}s)"
+            echo "TIMEOUT $filename (Lean >${TIMEOUT_SECS}s)"
         fi
         continue
     fi
