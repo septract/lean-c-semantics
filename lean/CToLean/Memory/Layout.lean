@@ -229,11 +229,13 @@ mutual
     | .struct_ tag =>
       match env.lookupTag tag with
       | some (.struct_ members _) => structSize env members
-      | _ => 0
+      | some (.union_ _) => panic! s!"sizeof: expected struct but found union for tag {tag.name}"
+      | none => panic! s!"sizeof: undefined struct tag {tag.name}"
     | .union_ tag =>
       match env.lookupTag tag with
       | some (.union_ members) => unionSize env members
-      | _ => 0
+      | some (.struct_ _ _) => panic! s!"sizeof: expected union but found struct for tag {tag.name}"
+      | none => panic! s!"sizeof: undefined union tag {tag.name}"
     | .byte => 1
 
   /-- Compute sizeof for a type.
@@ -258,11 +260,13 @@ mutual
     | .struct_ tag =>
       match env.lookupTag tag with
       | some (.struct_ members _) => structAlign env members
-      | _ => 1
+      | some (.union_ _) => panic! s!"alignof: expected struct but found union for tag {tag.name}"
+      | none => panic! s!"alignof: undefined struct tag {tag.name}"
     | .union_ tag =>
       match env.lookupTag tag with
       | some (.union_ members) => unionAlign env members
-      | _ => 1
+      | some (.struct_ _ _) => panic! s!"alignof: expected union but found struct for tag {tag.name}"
+      | none => panic! s!"alignof: undefined union tag {tag.name}"
     | .byte => 1
 
   /-- Compute alignof for a type.
@@ -326,25 +330,31 @@ def structOffsets (env : TypeEnv) (members : List FieldDef) : List (Identifier �
     Corresponds to: offsetof_ival in impl_mem.ml
     Audited: 2026-01-01
     Deviations: None -/
-def memberOffset (env : TypeEnv) (tag : Sym) (member : Identifier) : Option Nat :=
+def memberOffset (env : TypeEnv) (tag : Sym) (member : Identifier) : Nat :=
   match env.lookupTag tag with
   | some (.struct_ members _) =>
     let offsets := structOffsets env members
-    offsets.find? (·.1 == member) |>.map (·.2)
+    match offsets.find? (·.1 == member) with
+    | some (_, offset) => offset
+    | none => panic! s!"memberOffset: member {member.name} not found in struct {tag.name}"
   | some (.union_ _) =>
     -- All union members start at offset 0
-    some 0
-  | none => none
+    0
+  | none => panic! s!"memberOffset: undefined tag {tag.name}"
 
 /-- Get member type from tag definition.
     Audited: 2026-01-01
     Deviations: None -/
-def memberType (env : TypeEnv) (tag : Sym) (member : Identifier) : Option Ctype :=
+def memberType (env : TypeEnv) (tag : Sym) (member : Identifier) : Ctype :=
   match env.lookupTag tag with
   | some (.struct_ members _) =>
-    members.find? (·.name == member) |>.map (·.ty)
+    match members.find? (·.name == member) with
+    | some field => field.ty
+    | none => panic! s!"memberType: member {member.name} not found in struct {tag.name}"
   | some (.union_ members) =>
-    members.find? (·.name == member) |>.map (·.ty)
-  | none => none
+    match members.find? (·.name == member) with
+    | some field => field.ty
+    | none => panic! s!"memberType: member {member.name} not found in union {tag.name}"
+  | none => panic! s!"memberType: undefined tag {tag.name}"
 
 end CToLean.Memory

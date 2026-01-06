@@ -363,13 +363,11 @@ def memberShiftPtrval (env : TypeEnv) (ptr : PointerValue) (tag : Sym) (member :
   | .null ty => { ptr with base := .null ty }
   | .function sym => { ptr with base := .function sym }
   | .concrete _ addr =>
-    match memberOffset env tag member with
-    | some offset =>
-      -- For union members, track which member we're accessing
-      let unionMem := match env.lookupTag tag with
-        | some (.union_ _) => some member
-        | _ => none
-      { ptr with base := .concrete unionMem (addr + offset) }
-    | none => ptr  -- Member not found, return unchanged
+    let offset := memberOffset env tag member
+    -- For union members, track which member we're accessing
+    let unionMem := match env.lookupTag tag with
+      | some (.union_ _) => some member
+      | _ => none
+    { ptr with base := .concrete unionMem (addr + offset) }
 
 end CToLean.Memory

@@ -219,6 +219,31 @@ Target: 90%+ agreement on sequential tests.
 
 ## Development Notes
 
+### ABSOLUTE RULE: NEVER Silently Swallow Errors
+
+**NEVER EVER catch an error and silently substitute a default value. NEVER. UNDER ANY CIRCUMSTANCES. This applies to the ENTIRE project - parser, interpreter, memory model, everything.**
+
+This is absolutely forbidden:
+```lean
+-- FORBIDDEN - NEVER DO THIS
+| .error _ => .ok Loc.unknown
+| .error _ => .ok defaultValue
+| .error _ => pure []
+match parse x with | .error _ => someDefault | .ok v => v
+```
+
+The ONLY acceptable use of error catching is for local control flow where you have an alternative strategy that still propagates errors:
+```lean
+-- OK: trying alternative strategies, error still propagates
+match parseFormatA x with
+| .ok v => .ok v
+| .error _ => parseFormatB x  -- still returns Except, error propagates
+```
+
+If something fails, the error MUST propagate. Period. No exceptions. No "reasonable defaults." No "it's just a location, it doesn't matter." No "this field is optional so we'll just use empty." NOTHING.
+
+Silent error swallowing hides bugs. We discovered the parser was completely broken for structured locations but all tests passed because errors silently became `Loc.unknown`. This is unacceptable.
+
 ### CRITICAL: Never Undo Changes Without Permission
 **NEVER revert, undo, or `git checkout` any changes without explicit user confirmation.** Even if you think a change caused a problem, ASK FIRST before reverting. The user may have made intentional changes you're not aware of.
 
