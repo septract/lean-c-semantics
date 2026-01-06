@@ -182,30 +182,62 @@ def parseIdentifier (j : Json) : Except String Identifier := do
   -- Identifier in JSON is just a string; we create a dummy location
   .ok { loc := Loc.unknown, name := s }
 
-/-- Parse a Loc from JSON -/
+/-- Parse a position (file, line, column) from JSON -/
+def parsePos (j : Json) : Except String (String × Nat × Nat) := do
+  let file ← getStr j "file"
+  let line ← getNat j "line"
+  let col ← getNat j "column"
+  .ok (file, line, col)
+
+/-- Parse a Loc from JSON.
+    Handles both old string format and new structured format from Cerberus.
+    New format has tag: "Region", "Point", "Other", or null for unknown. -/
 def parseLoc (j : Json) : Except String Loc := do
-  -- Locations can be strings like "file:line:col-line:col" or structured
+  -- null means unknown location
+  if j.isNull then
+    return Loc.unknown
+  -- Try string format first (old Cerberus format)
   match j.getStr? with
   | .ok s =>
     -- Simple string format - just store file name for now
     .ok { file := s, startLine := 0, startCol := 0, endLine := 0, endCol := 0 }
   | .error _ =>
-    -- Try structured format
-    let file ← getStr j "file"
-    let startLine ← getNat j "start_line"
-    let startCol ← getNat j "start_col"
-    let endLine ← getNat j "end_line"
-    let endCol ← getNat j "end_col"
-    .ok { file, startLine, startCol, endLine, endCol }
+    -- Try new structured format with tag
+    let tag ← getTag j
+    match tag with
+    | "Region" =>
+      let beginJ ← getField j "begin"
+      let (file, startLine, startCol) ← parsePos beginJ
+      let endJ ← getField j "end"
+      let (_, endLine, endCol) ← parsePos endJ
+      .ok { file, startLine, startCol, endLine, endCol }
+    | "Point" =>
+      let posJ ← getField j "pos"
+      let (file, line, col) ← parsePos posJ
+      .ok { file, startLine := line, startCol := col, endLine := line, endCol := col }
+    | "Other" =>
+      -- "Other" locations have a description but no position info
+      .ok Loc.unknown
+    | "Regions" =>
+      -- Multiple regions - take the first one for now
+      let regionsJ ← getArr j "regions"
+      match regionsJ.toList with
+      | [] => .ok Loc.unknown
+      | first :: _ =>
+        let beginJ ← getField first "begin"
+        let (file, startLine, startCol) ← parsePos beginJ
+        let endJ ← getField first "end"
+        let (_, endLine, endCol) ← parsePos endJ
+        .ok { file, startLine, startCol, endLine, endCol }
+    | other => .error s!"unknown location tag '{other}', expected Region, Point, Other, or Regions"
 
 /-- Parse annotations from JSON -/
-def parseAnnots (j : Json) : Annots :=
+def parseAnnots (j : Json) : Except String Annots := do
   match getFieldOpt j "loc" with
   | some locJson =>
-    match parseLoc locJson with
-    | .ok loc => [.loc loc]
-    | .error _ => []
-  | none => []
+    let loc ← parseLoc locJson
+    .ok [.loc loc]
+  | none => .ok []
 
 /-! ## Type Parsing -/
 
@@ -409,7 +441,7 @@ partial def parseCtype (j : Json) : Except String Ctype := do
   -- Parse inner type
   let ty ← parseCtype_ j
   -- Parse annotations (currently just location, same as parseAnnots)
-  let annots := parseAnnots j
+  let annots ← parseAnnots j
   .ok { annots := annots, ty := ty }
 
 /-- Parse a ctype from a string representation (for embedded ctypes in pp_pointer_value output) -/
@@ -895,7 +927,7 @@ mutual
   /-- Parse a Pattern from JSON -/
   partial def parsePattern (j : Json) : Except String APattern := do
     let tag ← getTag j
-    let annots := parseAnnots j
+    let annots ← parseAnnots j
     match tag with
     | "CaseBase" =>
       let symOpt ← match getFieldOpt j "symbol" with
@@ -916,7 +948,7 @@ mutual
 
   /-- Parse a Pexpr (pure expression) from JSON -/
   partial def parsePexpr (j : Json) : Except String APexpr := do
-    let annots := parseAnnots j
+    let annots ← parseAnnots j
     let exprJ ← getField j "expr"
     let tag ← getTag exprJ
     let expr ← match tag with
@@ -933,9 +965,7 @@ mutual
       .ok (Pexpr.val val)
     | "PEundef" =>
       let locJ ← getField exprJ "loc"
-      let loc ← match parseLoc locJ with
-        | .ok l => .ok l
-        | .error _ => .ok Loc.unknown
+      let loc ← parseLoc locJ
       let ubStr ← getStr exprJ "ub"
       .ok (Pexpr.undef loc (.other ubStr))
     | "PEerror" =>
@@ -1112,12 +1142,8 @@ mutual
 
   /-- Parse an Action from JSON -/
   partial def parseAction (j : Json) : Except String AAction := do
-    let loc := match getFieldOpt j "loc" with
-      | some locJson =>
-        match parseLoc locJson with
-        | .ok l => l
-        | .error _ => Loc.unknown
-      | none => Loc.unknown
+    let locJ ← getField j "loc"
+    let loc ← parseLoc locJ
     let actJ ← getField j "action"
     let tag ← getTag actJ
     let action ← match tag with
@@ -1242,7 +1268,7 @@ mutual
 
   /-- Parse an Expr (effectful expression) from JSON -/
   partial def parseExpr (j : Json) : Except String AExpr := do
-    let annots := parseAnnots j
+    let annots ← parseAnnots j
     let exprJ ← getField j "expr"
     let tag ← getTag exprJ
     let expr ← match tag with
@@ -1415,9 +1441,7 @@ def parseTagDef (j : Json) : Except String (Sym × Loc × TagDef) := do
   let sym ← getField j "symbol"  -- Sym is not a tagged type
   let s ← parseSym sym
   let locJ ← getField j "loc"
-  let loc := match parseLoc locJ with
-    | .ok l => l
-    | .error _ => Loc.unknown
+  let loc ← parseLoc locJ
   let (tag, defJ) ← getTaggedFieldMulti j "definition" tagDefTags
   let def_ ← match tag with
   | "StructDef" =>
@@ -1491,9 +1515,7 @@ def parseFunDecl (j : Json) : Except String (Sym × FunDecl) := do
     .ok (s, .fun_ rt ps b)
   | "Proc" =>
     let locJ ← getField declJ "loc"
-    let loc := match parseLoc locJ with
-      | .ok l => l
-      | .error _ => Loc.unknown
+    let loc ← parseLoc locJ
     -- Parse optional marker_env field
     let markerEnv : Option Nat := match declJ.getObjValAs? Json "marker_env" with
       | .ok (.num n) => some n.mantissa.toNat
@@ -1512,9 +1534,7 @@ def parseFunDecl (j : Json) : Except String (Sym × FunDecl) := do
     .ok (s, .proc loc markerEnv rt ps b)
   | "ProcDecl" =>
     let locJ ← getField declJ "loc"
-    let loc := match parseLoc locJ with
-      | .ok l => l
-      | .error _ => Loc.unknown
+    let loc ← parseLoc locJ
     let (_, retTy) ← getTaggedFieldMulti declJ "return_type" baseTypeTags
     let rt ← parseBaseType retTy
     let paramTys ← getArr declJ "param_types"
@@ -1522,9 +1542,7 @@ def parseFunDecl (j : Json) : Except String (Sym × FunDecl) := do
     .ok (s, .procDecl loc rt pts)
   | "BuiltinDecl" =>
     let locJ ← getField declJ "loc"
-    let loc := match parseLoc locJ with
-      | .ok l => l
-      | .error _ => Loc.unknown
+    let loc ← parseLoc locJ
     let (_, retTy) ← getTaggedFieldMulti declJ "return_type" baseTypeTags
     let rt ← parseBaseType retTy
     let paramTys ← getArr declJ "param_types"
@@ -1537,9 +1555,7 @@ def parseFunInfoEntry (j : Json) : Except String (Sym × FunInfo) := do
   let symJ ← getField j "symbol"
   let sym ← parseSym symJ
   let locJ ← getField j "loc"
-  let loc := match parseLoc locJ with
-    | .ok l => l
-    | .error _ => Loc.unknown
+  let loc ← parseLoc locJ
   let (_, retTyJ) ← getTaggedFieldMulti j "return_type" ctypeTags
   let returnType ← parseCtype retTyJ
   let paramsJ ← getArr j "params"

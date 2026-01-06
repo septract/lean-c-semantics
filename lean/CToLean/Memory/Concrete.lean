@@ -42,7 +42,9 @@ Internal utilities for the concrete memory model.
 def toAllocId (prov : Provenance) : Nat :=
   match prov with
   | .some id => id
-  | _ => 0
+  | .none => panic! "toAllocId: provenance is none"
+  | .symbolic iota => panic! s!"toAllocId: provenance is symbolic (iota={iota})"
+  | .device => panic! "toAllocId: provenance is device"
 
 /-- Check if a Ctype is atomic.
     Corresponds to: AilTypesAux.is_atomic in Cerberus -/
@@ -108,14 +110,6 @@ def getAllocation (ptr : PointerValue) : ConcreteMemM Allocation := do
 def isInBounds (alloc : Allocation) (addr : Nat) (size : Nat) : Bool :=
   addr >= alloc.base && addr + size <= alloc.base + alloc.size
 
-/-- Get address from pointer value.
-    Audited: 2026-01-01
-    Deviations: None -/
-def ptrAddr (ptr : PointerValue) : Option Nat :=
-  match ptr.base with
-  | .concrete _ addr => some addr
-  | _ => none
-
 /-! ## Byte-Level Operations
 
 Corresponds to: fetch_bytes and write_bytes in impl_mem.ml:708-737
@@ -144,7 +138,9 @@ def writeBytesWithProv (addr : Nat) (bytes : List (Option UInt8)) (prov : Proven
 def readBytes (addr : Nat) (size : Nat) : ConcreteMemM (List AbsByte) := do
   let st ← get
   let bytes := List.range size |>.map fun i =>
-    st.bytemap[addr + i]?.getD { prov := .none, copyOffset := none, value := none }
+    match st.bytemap[addr + i]? with
+    | some b => b
+    | none => panic! s!"readBytes: address {addr + i} not in bytemap (reading {size} bytes from {addr})"
   pure bytes
 
 /-! ## Value Serialization
@@ -182,7 +178,7 @@ def bytesToInt (bytes : List AbsByte) (signed : Bool) : Option Int :=
       | b :: rest =>
         let contribution := match b.value with
           | some v => (v.toNat : Int) <<< (i * 8)
-          | none => 0
+          | none => panic! "bytesToInt: unexpected none value (should have been caught earlier)"
         go rest (i + 1) (acc + contribution)
     let unsigned := go bytes 0 0
     if signed && bytes.length > 0 then
@@ -240,7 +236,10 @@ partial def memValueToBytes (env : TypeEnv) (val : MemValue) : List AbsByte :=
     | .finite f =>
       -- This is a simplification - proper IEEE 754 encoding needed
       rawToAbsBytes (intToBytes f.toUInt64.toNat size)
-    | _ => List.replicate size (mkAbsByte none)
+    | .nan => panic! "memValueToBytes: NaN float encoding not implemented"
+    | .posInf => panic! "memValueToBytes: +Inf float encoding not implemented"
+    | .negInf => panic! "memValueToBytes: -Inf float encoding not implemented"
+    | .unspecified => panic! "memValueToBytes: unspecified float value"
   | .pointer _ pv =>
     -- Pointer bytes carry the pointer's provenance
     -- Corresponds to: impl_mem.ml:1187 - AbsByte.v prov ~copy_offset:(Some i)
@@ -267,8 +266,9 @@ partial def memValueToBytes (env : TypeEnv) (val : MemValue) : List AbsByte :=
             if i >= offset && i < offset + memberBytes.length then
               memberBytes[i - offset]!
             else b
-        | none => acc
-    | _ => []
+        | none => panic! s!"memValueToBytes: member {name.name} not found in struct {tag.name}"
+    | some (.union_ _) => panic! s!"memValueToBytes: expected struct but found union for tag {tag.name}"
+    | none => panic! s!"memValueToBytes: undefined struct tag {tag.name}"
   | .union_ tag _ mval =>
     -- Union uses size of largest member
     let memberBytes := memValueToBytes env mval
@@ -276,7 +276,8 @@ partial def memValueToBytes (env : TypeEnv) (val : MemValue) : List AbsByte :=
     | some (.union_ fields) =>
       let size := unionSize env fields
       memberBytes ++ List.replicate (size - memberBytes.length) (mkAbsByte (some 0))
-    | _ => memberBytes
+    | some (.struct_ _ _) => panic! s!"memValueToBytes: expected union but found struct for tag {tag.name}"
+    | none => panic! s!"memValueToBytes: undefined union tag {tag.name}"
 
 /-- Collect all function pointer symbols from a MemValue.
     Used to register function pointers in funptrmap before serialization.
@@ -410,8 +411,22 @@ partial def reconstructValue (env : TypeEnv) (ty : Ctype) (bytes : List AbsByte)
       reconstructValue env elemCty elemBytes
     pure (.array elems)
 
-  | _ =>
-    pure (.unspecified ty)
+  | .array _ none =>
+    panic! "reconstructValue: flexible array member (incomplete array type)"
+  | .void =>
+    panic! "reconstructValue: void type"
+  | .function .. =>
+    panic! "reconstructValue: function type"
+  | .functionNoParams .. =>
+    panic! "reconstructValue: function type (no params)"
+  | .struct_ tag =>
+    panic! s!"reconstructValue: struct reconstruction not implemented for {tag.name}"
+  | .union_ tag =>
+    panic! s!"reconstructValue: union reconstruction not implemented for {tag.name}"
+  | .atomic _ =>
+    panic! "reconstructValue: atomic type reconstruction not implemented"
+  | .byte =>
+    panic! "reconstructValue: byte type"
 
 /-- Load value from memory.
     Corresponds to: load in impl_mem.ml:1552-1603
@@ -497,7 +512,7 @@ def storeImpl (ty : Ctype) (isLocking : Bool) (ptr : PointerValue) (val : MemVal
       match st.allocations[allocId]? with
       | some allocRec =>
         set { st with allocations := st.allocations.insert allocId { allocRec with isReadonly := .readonly .constQualified } }
-      | none => pure ()
+      | none => panic! s!"storeImpl: allocation {allocId} not found when trying to lock"
 
     pure { kind := .write, base := addr, size := size }
 
@@ -612,9 +627,13 @@ def effArrayShiftPtrvalImpl (ptr : PointerValue) (elemTy : Ctype) (n : IntegerVa
         pure { ptr with base := .concrete unionMem newAddrNat }
       | none =>
         throw (.access .noProvPtr (some addr))
-    | _ =>
-      -- No provenance, just do the arithmetic
+    | .none =>
+      -- No provenance, just do the arithmetic (no bounds checking possible)
       pure { ptr with base := .concrete unionMem newAddr.toNat }
+    | .symbolic iota =>
+      panic! s!"effArrayShiftPtrvalImpl: symbolic provenance not implemented (iota={iota})"
+    | .device =>
+      panic! "effArrayShiftPtrvalImpl: device provenance not implemented"
 
 /-- Effectful member shift.
     Corresponds to: eff_member_shift_ptrval in impl_mem.ml
@@ -766,7 +785,8 @@ def reallocImpl (align : IntegerValue) (ptr : PointerValue) (newSize : IntegerVa
     match newPtr.base with
     | .concrete _ newAddr =>
       writeBytes newAddr bytes
-    | _ => pure ()
+    | .null _ => panic! "reallocImpl: allocateImpl returned null pointer"
+    | .function _ => panic! "reallocImpl: allocateImpl returned function pointer"
 
     -- Free old allocation
     killImpl true ptr

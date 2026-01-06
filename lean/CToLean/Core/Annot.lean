@@ -290,13 +290,6 @@ def Annots.getLoc (annots : Annots) : Option Loc :=
     | .loc l => some l
     | _ => none
 
-/-- Get location from annotations, defaulting to unknown
-    Corresponds to: get_loc_ in annot.lem:147-152
-    Audited: 2025-12-31
-    Deviations: None -/
-def Annots.getLoc_ (annots : Annots) : Loc :=
-  annots.getLoc.getD Loc.unknown
-
 /-- Get UID from annotations if present
     Corresponds to: get_uid in annot.lem:267-300
     Audited: 2025-12-31
