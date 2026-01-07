@@ -73,7 +73,7 @@ Our memory addresses differ from Cerberus by ~4608 bytes for the first allocatio
 - **Impact:** UB detection works correctly; only raw address values differ
 
 ### Other Semantic Differences (1 test)
-- **treiber**: Uses unimplemented impl function
+- **treiber**: Uses `builtin_printf` (see Future Work below)
 
 ## Completed Phases
 
@@ -135,10 +135,18 @@ See `docs/INTERPRETER_STATUS.md` for details.
 **High Priority (struct support):**
 - [ ] Implement struct reconstruction in `Memory/Concrete.lean:reconstructValue`
 
-**Low Priority:**
-- [ ] Implement `builtin_printf` for test compatibility (13 tests)
-
 ## Future Work
+
+### Driver Layer & I/O Builtins (Major Feature)
+To support `builtin_printf` and other I/O functions, we need:
+- [ ] Add driver layer (like Cerberus's `driver.lem`)
+- [ ] Implement `Formatted.printf` with format string parsing (see `formatted.lem`)
+- [ ] Add filesystem state for stdout/stderr
+- [ ] Handle `Step_fs` step type for I/O operations
+- [ ] Support `builtin_vprintf`, `builtin_vsnprintf`, etc.
+
+**Affected tests:** treiber + 13 other tests that use printf
+**Cerberus files:** `driver.lem`, `formatted.lem`, `core_run.lem:1062-1098`
 
 ### Phase 6: UB-Freeness Theorems
 - [ ] Define `UBFree` predicate
