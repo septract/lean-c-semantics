@@ -11,18 +11,20 @@
 import CToLean.Semantics.Step
 import CToLean.Semantics.Env
 import CToLean.Memory.Layout
+import CToLean.PrettyPrint
 
 namespace CToLean.Semantics
 
 open CToLean.Core
 open CToLean.Memory
+open CToLean.PrettyPrint
 
 /-! ## Interpreter Result -/
 
 /-- Result of running a program -/
 structure InterpResult where
   /-- Return value (None if crashed/UB) -/
-  returnValue : Option Int
+  returnValue : Option Value
   /-- Captured stdout -/
   stdout : String
   /-- Captured stderr -/
@@ -37,7 +39,7 @@ instance : ToString InterpResult where
     | some e => s!"Error: {e}"
     | none =>
       match r.returnValue with
-      | some v => s!"Return: {v}"
+      | some v => s!"Return: {ppValue v}"
       | none => "No return value"
 
 /-! ## Running Main -/
@@ -47,6 +49,12 @@ def extractReturnInt (v : Value) : Option Int :=
   match v with
   | .object (.integer iv) => some iv.val
   | .loaded (.specified (.integer iv)) => some iv.val
+  | _ => none
+
+/-- Check if value is an unspecified loaded value -/
+def isUnspecified (v : Value) : Option Ctype :=
+  match v with
+  | .loaded (.unspecified ty) => some ty
   | _ => none
 
 /-- Run the main function of a Core file.
@@ -77,7 +85,7 @@ def runMain (file : File) : InterpResult :=
       runUntilDone st file allLabeledConts
   match result with
   | .ok (v, state) =>
-    { returnValue := extractReturnInt v
+    { returnValue := some v
       stdout := state.stdout
       stderr := state.stderr
       error := none }
@@ -89,10 +97,17 @@ def runMain (file : File) : InterpResult :=
 
 /-! ## Differential Testing Support -/
 
+/-- Value status for batch result -/
+inductive ValueStatus where
+  | specified (v : Int)
+  | unspecified (ty : Ctype)
+  | other (desc : String)
+  deriving Repr, Inhabited
+
 /-- Batch execution result (matches Cerberus --batch output) -/
 structure BatchResult where
-  /-- Exit code (return value or signal) -/
-  exitCode : Int
+  /-- Value status (specified int, unspecified, or other) -/
+  valueStatus : Option ValueStatus
   /-- Whether undefined behavior was detected -/
   isUB : Bool
   /-- UB description if any -/
@@ -103,23 +118,43 @@ structure BatchResult where
 def toBatchResult (r : InterpResult) : BatchResult :=
   match r.error with
   | some (.undefinedBehavior ub _) =>
-    { exitCode := -1
+    { valueStatus := none
       isUB := true
       ubDescription := some (toString ub) }
+  | some (.memoryError err) =>
+    -- Memory errors are UB in C semantics
+    { valueStatus := none
+      isUB := true
+      ubDescription := some (toString err) }
   | some _ =>
-    { exitCode := -1
+    { valueStatus := none
       isUB := false
       ubDescription := none }
   | none =>
-    { exitCode := r.returnValue.getD 0
-      isUB := false
-      ubDescription := none }
+    match r.returnValue with
+    | some v =>
+      let status := match v with
+        | .object (.integer iv) => ValueStatus.specified iv.val
+        | .loaded (.specified (.integer iv)) => ValueStatus.specified iv.val
+        | .loaded (.unspecified ty) => ValueStatus.unspecified ty
+        | _ => ValueStatus.other "non-integer"
+      { valueStatus := some status
+        isUB := false
+        ubDescription := none }
+    | none =>
+      { valueStatus := none
+        isUB := false
+        ubDescription := none }
 
 instance : ToString BatchResult where
   toString r :=
     if r.isUB then
       s!"UB: {r.ubDescription.getD "unknown"}"
     else
-      s!"exit {r.exitCode}"
+      match r.valueStatus with
+      | some (.specified v) => s!"exit {v}"
+      | some (.unspecified _) => "UNSPECIFIED"
+      | some (.other _) => "other"
+      | none => "void"
 
 end CToLean.Semantics

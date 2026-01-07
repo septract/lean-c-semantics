@@ -5,11 +5,13 @@
 import CToLean.Parser
 import CToLean.Semantics
 import CToLean.Memory
+import CToLean.PrettyPrint
 
 open CToLean.Core
 open CToLean.Parser
 open CToLean.Semantics
 open CToLean.Memory
+open CToLean.PrettyPrint
 
 /-- Convert UndefinedBehavior to its canonical code string (matching Cerberus) -/
 def ubToCode : UndefinedBehavior → String
@@ -111,13 +113,23 @@ def runFile (jsonPath : String) (batch : Bool) : IO Unit := do
         IO.println s!"Error \{msg: \"{e}\"}"
       | none =>
         match result.returnValue with
-        | some v => IO.println s!"Defined \{value: \"{v}\"}"
+        | some v =>
+          -- Check for unspecified value
+          match v with
+          | .loaded (.unspecified ty) =>
+            IO.println s!"Defined \{value: \"Unspecified('{ppCtype ty}')\"}"
+          | .object (.integer iv) =>
+            IO.println s!"Defined \{value: \"Specified({iv.val})\"}"
+          | .loaded (.specified (.integer iv)) =>
+            IO.println s!"Defined \{value: \"Specified({iv.val})\"}"
+          | _ =>
+            IO.println s!"Defined \{value: \"{ppValue v}\"}"
         | none => IO.println "Defined {value: \"void\"}"
     else
       -- Verbose mode: full details
       IO.println s!"Result: {result}"
       match result.returnValue with
-      | some v => IO.println s!"Return value: {v}"
+      | some v => IO.println s!"Return value: {ppValue v}"
       | none => IO.println "No return value"
       if result.stdout != "" then
         IO.println s!"stdout: {result.stdout}"

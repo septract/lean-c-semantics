@@ -20,9 +20,19 @@
 - **Cerberus behavior**: `step_eval_pexpr` returns `pexpr` (partially or fully evaluated)
   - `valueFromPexpr` extracts value only if pexpr is `PEval cval`, else returns `Nothing`
   - Unevaluated subexpressions are returned as-is (e.g., `PEmemberof tag member pe'`)
+  - Partial evaluation happens for: concurrent model, PEconstrained, memory wait states
 - **Our behavior**: `evalPexpr` returns `Value` directly (always fully evaluated)
 - **Impact**: We can't return partially evaluated expressions
-- **Status**: This may be acceptable for sequential execution but needs audit
+- **Analysis**:
+  - For sequential execution without `PEconstrained`, sub-expressions either:
+    1. Evaluate to a value (normal case)
+    2. Fail with an error (UB, type error, etc.)
+  - The "return partial expression" path in Cerberus is mainly for:
+    - Concurrent execution (we don't support)
+    - Constrained expressions (we don't support)
+    - Memory operations that need to wait (sequential model completes immediately)
+  - **Conclusion**: For sequential execution, our design should be equivalent
+- **Status**: Acceptable for sequential execution, but worth auditing if any tests fail mysteriously
 - **Location**: `Semantics/Eval.lean:evalPexpr`
 
 ### Struct Reconstruction Not Implemented - FIXED 2026-01-06
