@@ -330,7 +330,10 @@ partial def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym
         })
       | .error err => throw err
     | .impl ic =>
-      throw (.notImplemented s!"impl proc: {repr ic}")
+      let msg := match ic with
+        | .other name => s!"builtin function '{name}' not implemented (requires driver layer)"
+        | _ => s!"impl proc: {repr ic}"
+      throw (.notImplemented msg)
 
   -- Eaction: execute memory action
   -- Corresponds to: core_action_step in core_run.lem:275-650
