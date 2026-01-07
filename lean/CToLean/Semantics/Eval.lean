@@ -230,6 +230,89 @@ def valueToInt (v : Value) : Option IntegerValue :=
   | .loaded (.specified (.integer iv)) => some iv
   | _ => none
 
+/-! ## Value Conversion Helpers
+
+Corresponds to: memValueFromValue and valueFromMemValue in core_aux.lem:114-200
+These convert between Core Values and Memory MemValues for load/store operations.
+-/
+
+/-- Strip atomic qualifier from a Ctype_.
+    Corresponds to: unatomic_ in ctype.lem -/
+def unatomic_ : Ctype_ → Ctype_
+  | .atomic ty => unatomic_ ty
+  | ty => ty
+
+/-- Convert a Core Value to a MemValue for storing to memory.
+    Corresponds to: memValueFromValue in core_aux.lem:137-200
+    Audited: 2026-01-06
+    Deviations: None - matches Cerberus case-by-case -/
+partial def memValueFromValue (ty : Ctype) (v : Value) : Option MemValue :=
+  let ty' := unatomic_ ty.ty
+  match ty', v with
+  -- Corresponds to: core_aux.lem:141-152
+  | _, .unit => none
+  | _, .true_ => none
+  | _, .false_ => none
+  | _, .list _ _ => none
+  | _, .tuple _ => none
+  | _, .ctype _ => none
+  -- Corresponds to: core_aux.lem:153-154
+  | _, .loaded (.unspecified ty'') => some (.unspecified ty'')
+  -- Corresponds to: core_aux.lem:155-158
+  | .basic (.integer ity), .object (.integer iv) => some (.integer ity iv)
+  | .basic (.integer ity), .loaded (.specified (.integer iv)) => some (.integer ity iv)
+  -- Corresponds to: core_aux.lem:159-162
+  | .byte, .object (.integer iv) => some (.integer (.unsigned .ichar) iv)
+  | .byte, .loaded (.specified (.integer iv)) => some (.integer (.unsigned .ichar) iv)
+  -- Corresponds to: core_aux.lem:163-166
+  | .basic (.floating fty), .object (.floating fv) => some (.floating fty fv)
+  | .basic (.floating fty), .loaded (.specified (.floating fv)) => some (.floating fty fv)
+  -- Corresponds to: core_aux.lem:167-170
+  | .pointer _ refTy, .object (.pointer pv) =>
+    some (.pointer { annots := [], ty := refTy } pv)
+  | .pointer _ refTy, .loaded (.specified (.pointer pv)) =>
+    some (.pointer { annots := [], ty := refTy } pv)
+  -- Corresponds to: core_aux.lem:171-181
+  | .array elemTy _, .loaded (.specified (.array lvs)) =>
+    let elemCty : Ctype := { annots := [], ty := elemTy }
+    let mvalsOpt := lvs.mapM fun lv =>
+      memValueFromValue elemCty (.loaded lv)
+    mvalsOpt.map MemValue.array
+  -- Corresponds to: core_aux.lem:182-190
+  | .struct_ tag, .loaded (.specified (.struct_ tag' members)) =>
+    if tag == tag' then
+      let memberList := members.map fun m => (m.name, m.ty, m.value)
+      some (.struct_ tag memberList)
+    else none
+  -- Corresponds to: core_aux.lem:191-195
+  | .union_ tag, .loaded (.specified (.union_ tag' ident mv)) =>
+    if tag == tag' then some (.union_ tag ident mv) else none
+  -- Corresponds to: core_aux.lem:196-199
+  | _, _ => none
+
+/-- Convert a MemValue to a Core Value after loading from memory.
+    Corresponds to: valueFromMemValue in core_aux.lem:114-135
+    Audited: 2026-01-06
+    Deviations: Returns just the value (not the object type) -/
+def valueFromMemValue (mv : MemValue) : Value :=
+  match mv with
+  | .unspecified ty => .loaded (.unspecified ty)
+  | .integer _ity iv => .loaded (.specified (.integer iv))
+  | .floating _fty fv => .loaded (.specified (.floating fv))
+  | .pointer _ty pv => .loaded (.specified (.pointer pv))
+  | .array mvs =>
+    let lvs := mvs.map fun mv' =>
+      match valueFromMemValue mv' with
+      | .loaded lv => lv
+      | _ => .unspecified .void
+    .loaded (.specified (.array lvs))
+  | .struct_ tag members =>
+    let structMembers := members.map fun (name, ty, mval) =>
+      { name, ty, value := mval : StructMember }
+    .loaded (.specified (.struct_ tag structMembers))
+  | .union_ tag ident mv' =>
+    .loaded (.specified (.union_ tag ident mv'))
+
 /-- Evaluate a binary operation on values.
     Corresponds to: step_eval_peop in core_eval.lem:320-540 -/
 def evalBinop (op : Binop) (v1 v2 : Value) : InterpM Value := do
@@ -688,40 +771,66 @@ partial def evalPexpr (env : List (HashMap Sym Value)) (pe : APexpr) : InterpM V
       | _ => InterpM.throwNotImpl s!"impl call: {repr ic}"
 
   | .struct_ tag members =>
+    -- Corresponds to: core_eval.lem:860-877 (PEstruct case)
+    -- Algorithm:
+    --   1. Evaluate each member expression
+    --   2. Look up struct tag to get member types
+    --   3. Convert each value using memValueFromValue with proper type
+    --   4. Return OVstruct
+    -- Audited: 2026-01-06
     let memberVals ← members.mapM fun (name, e) => do
       let v ← evalPexpr env (mkAPexpr e)
       pure (name, v)
-    -- Convert to struct value
-    -- Note: member values can be either raw object values or loaded values
-    let structMembers := memberVals.map fun (name, v) =>
-      let mv : MemValue := match v with
-      | .object ov =>
-        -- Raw object value
-        match ov with
-        | .integer iv => .integer (.signed .int_) iv  -- Assume int
-        | .floating fv => .floating (.realFloating .double) fv
-        | .pointer pv => .pointer .void pv
-        | _ => .unspecified .void
-      | .loaded (.specified ov) =>
-        -- Loaded specified value - extract the inner object value
-        match ov with
-        | .integer iv => .integer (.signed .int_) iv
-        | .floating fv => .floating (.realFloating .double) fv
-        | .pointer pv => .pointer .void pv
-        | _ => .unspecified .void
-      | .loaded (.unspecified ty) =>
-        -- Loaded unspecified value
-        .unspecified ty
-      | _ => .unspecified .void
-      { name, ty := .void, value := mv : StructMember }
-    pure (.object (.struct_ tag structMembers))
+    -- Look up struct definition to get member types
+    -- Corresponds to: core_eval.lem:861-870
+    let typeEnv ← InterpM.getTypeEnv
+    match typeEnv.lookupTag tag with
+    | some (.struct_ fields _) =>
+      -- Convert each member value using proper type from struct definition
+      -- Corresponds to: core_eval.lem:870-872
+      let structMembers ← memberVals.mapM fun (membIdent, cval) => do
+        -- Look up member type: let (_, _, _, memb_ty) = List.lookup memb_ident membrs
+        match fields.find? (·.name == membIdent) with
+        | some field =>
+          -- let mval = memValueFromValue memb_ty cval
+          match memValueFromValue field.ty cval with
+          | some mval => pure { name := membIdent, ty := field.ty, value := mval : StructMember }
+          | none => InterpM.throwTypeError s!"struct {tag.name}: cannot convert member {membIdent.name} value to MemValue"
+        | none =>
+          InterpM.throwTypeError s!"struct {tag.name}: member {membIdent.name} not found in definition"
+      pure (.object (.struct_ tag structMembers))
+    | some (.union_ _) =>
+      InterpM.throwTypeError s!"struct construction: expected struct but found union for tag {tag.name}"
+    | none =>
+      InterpM.throwTypeError s!"struct construction: undefined tag {tag.name}"
 
   | .union_ tag member e =>
+    -- Corresponds to: core_eval.lem:884-897 (PEunion case)
+    -- Algorithm:
+    --   1. Evaluate the member expression
+    --   2. Look up union tag to get member type
+    --   3. Convert value using memValueFromValue with proper type
+    --   4. Return OVunion
+    -- Audited: 2026-01-06
     let v ← evalPexpr env (mkAPexpr e)
-    let mv : MemValue := match v with
-      | .object (.integer iv) => .integer (.signed .int_) iv
-      | _ => .unspecified .void
-    pure (.object (.union_ tag member mv))
+    -- Look up union definition to get member type
+    -- Corresponds to: core_eval.lem:888-890
+    let typeEnv ← InterpM.getTypeEnv
+    match typeEnv.lookupTag tag with
+    | some (.union_ fields) =>
+      -- Look up member type: let (_, _, _, memb_ty) = List.lookup memb_ident membrs
+      match fields.find? (·.name == member) with
+      | some field =>
+        -- let mval = memValueFromValue memb_ty cval
+        match memValueFromValue field.ty v with
+        | some mval => pure (.object (.union_ tag member mval))
+        | none => InterpM.throwTypeError s!"union {tag.name}: cannot convert member {member.name} value to MemValue"
+      | none =>
+        InterpM.throwTypeError s!"union {tag.name}: member {member.name} not found in definition"
+    | some (.struct_ _ _) =>
+      InterpM.throwTypeError s!"union construction: expected union but found struct for tag {tag.name}"
+    | none =>
+      InterpM.throwTypeError s!"union construction: undefined tag {tag.name}"
 
   | .arrayShift ptr ty idx =>
     let ptrVal ← evalPexpr env (mkAPexpr ptr)
