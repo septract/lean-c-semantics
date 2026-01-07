@@ -39,7 +39,8 @@ c-to-lean/
 │   └── test_pp.sh     # Run pretty-printer comparison tests
 ├── tests/             # C test files for differential testing
 │   ├── minimal/       # Core test suite (NNN-description.c)
-│   └── debug/         # Debug/investigation tests (category-NN-description.c)
+│   ├── debug/         # Debug/investigation tests (category-NN-description.c)
+│   └── csmith/        # Csmith fuzz testing infrastructure
 ├── context/           # Background materials
 ├── CLAUDE.md          # This file
 ├── PLAN.md            # High-level goals
@@ -209,6 +210,42 @@ The test script outputs files to a temp directory. To investigate a specific mis
 #   Cerberus: 'store_lock('signed int', a'
 ```
 Do NOT use `diff` directly - it doesn't normalize whitespace. Always use the `--compare` flag with the Lean tool.
+
+**Csmith Fuzz Testing** (`scripts/fuzz_csmith.sh`):
+Generates random C programs with csmith and compares Cerberus vs our interpreter.
+```bash
+# Generate and test 100 random programs (default)
+./scripts/fuzz_csmith.sh
+
+# Generate and test N random programs
+./scripts/fuzz_csmith.sh 500
+
+# Specify output directory
+./scripts/fuzz_csmith.sh 100 tests/csmith/my_results
+```
+
+The script:
+1. Generates random csmith tests with `--no-argc --no-bitfields`
+2. Replaces csmith.h with our `csmith_cerberus.h` (uses exit() instead of printf)
+3. Runs `test_interp.sh` on all generated tests
+4. Saves any failures/mismatches to `tests/csmith/fuzz_results/`
+
+Output categories in `fuzz_log.txt`:
+- **MATCH**: Both interpreters return the same value
+- **FAIL**: Interpreter error (e.g., fuel exhausted, not implemented)
+- **DIFF**: Semantic difference (e.g., Cerberus returns Unspecified, we return concrete)
+- **MISMATCH**: Different concrete values (potential bug!)
+
+Generate a single csmith test for debugging:
+```bash
+./scripts/gen_csmith_test.sh 12345 tests/csmith/debug.c
+./scripts/test_interp.sh tests/csmith/debug.c
+```
+
+**Known csmith limitations**:
+- Many csmith tests fail Cerberus compilation due to pointer type strictness
+- Tests using unions may show DIFF (Unspecified vs concrete) - we don't track active union member
+- Large tests may exhaust interpreter fuel (not a semantic bug)
 
 ### Differential Testing
 Compare Lean interpreter output against Cerberus:

@@ -17,6 +17,20 @@ open CToLean.Core
 /-- Indentation level -/
 abbrev Indent := Nat
 
+/-- Check if a location is from the main file (i.e., a .c or .core file).
+    Corresponds to: cerb_location.ml:from_main_file
+    This is used to filter out stdlib/header definitions in pretty-printing. -/
+def Loc.fromMainFile (loc : Loc) : Bool :=
+  match loc with
+  | .unknown => false
+  | .other _ => false
+  | .point pos => pos.file.endsWith ".c" || pos.file.endsWith ".core"
+  | .region pos _ _ => pos.file.endsWith ".c" || pos.file.endsWith ".core"
+  | .regions poss _ =>
+    match poss with
+    | [] => false
+    | (pos, _) :: _ => pos.file.endsWith ".c" || pos.file.endsWith ".core"
+
 /-- Join strings with separator -/
 def joinWith (sep : String) (xs : List String) : String :=
   match xs with
@@ -759,29 +773,46 @@ def ppGlobDecl (sym : Sym) (decl : GlobDecl) : String :=
 
 /-! ## File Printing -/
 
-/-- Pretty-print a complete Core file -/
+/-- Get location from a FunDecl (for filtering) -/
+def funDeclGetLoc : FunDecl → Option Loc
+  | .fun_ _ _ _ => none  -- Fun has no location, always included
+  | .proc loc _ _ _ _ => some loc
+  | .procDecl loc _ _ => some loc
+  | .builtinDecl loc _ _ => some loc
+
+/-- Check if a function should be printed (from main file or has no location).
+    Corresponds to: pp_cond in pp_core.ml -/
+def funDeclShouldPrint (decl : FunDecl) : Bool :=
+  match funDeclGetLoc decl with
+  | none => true  -- Fun always prints
+  | some loc => Loc.fromMainFile loc
+
+/-- Pretty-print a complete Core file.
+    Filters stdlib/header items to match Cerberus Basic mode output.
+    Corresponds to: pp_file in pp_core.ml -/
 def ppFile (file : File) : String :=
   let parts : List String := []
 
-  -- Tag definitions (structs/unions)
-  let hasAggregates := !file.tagDefs.isEmpty
+  -- Tag definitions (structs/unions) - filter by location
+  let mainFileTags := file.tagDefs.filter fun (_, (loc, _)) => Loc.fromMainFile loc
+  let hasAggregates := !mainFileTags.isEmpty
 
   let parts := if hasAggregates then
-    let tagParts := file.tagDefs.map fun (sym, def_) => ppTagDef sym def_
+    let tagParts := mainFileTags.map fun (sym, def_) => ppTagDef sym def_
     parts ++ ["-- Aggregates"] ++ tagParts
   else parts
 
   -- Global definitions
-  -- Note: JSON export (json_core.ml) now filters out GlobalDecl (like pp_globs does),
-  -- so we only get GlobalDef entries and don't need to filter library globals here
+  -- Note: JSON export filters out GlobalDecl (like pp_globs does)
   let hasGlobs := !file.globs.isEmpty
   let globComment := if hasGlobs then ["-- Globals"] else []
   let globParts := file.globs.map fun (sym, decl) => ppGlobDecl sym decl
   let parts := parts ++ globComment ++ globParts
 
-  -- Functions (funs is now a List, preserving order from JSON)
+  -- Functions - filter by location (like pp_cond in pp_core.ml)
+  let mainFileFuns := file.funs.filter fun (_, decl) => funDeclShouldPrint decl
   let funMapComment := if hasAggregates || hasGlobs then ["-- Fun map"] else []
-  let funParts := file.funs.map fun (sym, decl) => ppFunDecl sym decl
+  let funParts := mainFileFuns.map fun (sym, decl) => ppFunDecl sym decl
   let parts := parts ++ funMapComment ++ funParts
 
   joinWith "\n\n" parts

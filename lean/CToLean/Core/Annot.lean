@@ -7,26 +7,59 @@
 
 namespace CToLean.Core
 
-/-! ## Source Location
+/-! ## Source Position
 
-Corresponds to: cerberus/frontend/model/loc.lem
+Corresponds to: cerberus/util/cerb_position.ml
 -/
 
-/-- Source location
-    Corresponds to: Loc.t in loc.lem
-    Audited: 2025-12-31
-    Deviations: Simplified representation -/
-structure Loc where
+/-- Source position (file, line, column)
+    Corresponds to: Cerb_position.t -/
+structure Pos where
   file : String
-  startLine : Nat
-  startCol : Nat
-  endLine : Nat
-  endCol : Nat
+  line : Nat
+  col : Nat
   deriving Repr, BEq, Inhabited
 
-/-- Unknown source location (internal helper)
-    Corresponds to: Loc.unknown in loc.lem -/
-def Loc.unknown : Loc := ⟨"<unknown>", 0, 0, 0, 0⟩
+/-! ## Source Location
+
+Corresponds to: cerberus/util/cerb_location.ml
+```ocaml
+type cursor =
+  | NoCursor
+  | PointCursor of Cerb_position.t
+  | RegionCursor of Cerb_position.t * Cerb_position.t
+
+type t =
+  | Loc_unknown
+  | Loc_other of string
+  | Loc_point of Cerb_position.t
+  | Loc_region of Cerb_position.t * Cerb_position.t * cursor
+  | Loc_regions of (Cerb_position.t * Cerb_position.t) list * cursor
+```
+-/
+
+/-- Cursor within a location
+    Corresponds to: cursor in cerb_location.ml -/
+inductive Cursor where
+  | noCursor
+  | pointCursor (pos : Pos)
+  | regionCursor (start : Pos) (end_ : Pos)
+  deriving Repr, BEq, Inhabited
+
+/-- Source location
+    Corresponds to: t in cerb_location.ml
+    Audited: 2025-01-07
+    Deviations: None -/
+inductive Loc.t where
+  | unknown
+  | other (desc : String)
+  | point (pos : Pos)
+  | region (start : Pos) (end_ : Pos) (cursor : Cursor)
+  | regions (regions : List (Pos × Pos)) (cursor : Cursor)
+  deriving Repr, BEq, Inhabited
+
+/-- Abbreviation for backwards compatibility -/
+abbrev Loc := Loc.t
 
 /-! ## BMC Annotation
 

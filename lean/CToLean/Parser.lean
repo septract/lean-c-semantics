@@ -180,56 +180,73 @@ def parseSymOpt (j : Json) : Except String (Option Sym) :=
 def parseIdentifier (j : Json) : Except String Identifier := do
   let s ← j.getStr?
   -- Identifier in JSON is just a string; we create a dummy location
-  .ok { loc := Loc.unknown, name := s }
+  .ok { loc := .unknown, name := s }
 
-/-- Parse a position (file, line, column) from JSON -/
-def parsePos (j : Json) : Except String (String × Nat × Nat) := do
+/-- Parse a position from JSON: {file: string, line: nat, column: nat}
+    Corresponds to: Cerb_position.t -/
+def parsePos (j : Json) : Except String Pos := do
   let file ← getStr j "file"
   let line ← getNat j "line"
   let col ← getNat j "column"
-  .ok (file, line, col)
+  .ok { file, line, col }
+
+/-- Parse cursor from JSON.
+    Corresponds to: cursor in cerb_location.ml
+    Note: cursor can be null for NoCursor -/
+def parseCursor (j : Json) : Except String Cursor := do
+  if j.isNull then
+    return .noCursor
+  let tag ← getTag j
+  match tag with
+  | "NoCursor" => .ok .noCursor
+  | "PointCursor" =>
+    let posJ ← getField j "pos"
+    let pos ← parsePos posJ
+    .ok (.pointCursor pos)
+  | "RegionCursor" =>
+    let beginJ ← getField j "begin"
+    let endJ ← getField j "end"
+    let start ← parsePos beginJ
+    let end_ ← parsePos endJ
+    .ok (.regionCursor start end_)
+  | other => .error s!"unknown cursor tag '{other}'"
 
 /-- Parse a Loc from JSON.
-    Handles both old string format and new structured format from Cerberus.
-    New format has tag: "Region", "Point", "Other", or null for unknown. -/
+    Corresponds to: t in cerb_location.ml -/
 def parseLoc (j : Json) : Except String Loc := do
   -- null means unknown location
   if j.isNull then
-    return Loc.unknown
-  -- Try string format first (old Cerberus format)
-  match j.getStr? with
-  | .ok s =>
-    -- Simple string format - just store file name for now
-    .ok { file := s, startLine := 0, startCol := 0, endLine := 0, endCol := 0 }
-  | .error _ =>
-    -- Try new structured format with tag
-    let tag ← getTag j
-    match tag with
-    | "Region" =>
-      let beginJ ← getField j "begin"
-      let (file, startLine, startCol) ← parsePos beginJ
-      let endJ ← getField j "end"
-      let (_, endLine, endCol) ← parsePos endJ
-      .ok { file, startLine, startCol, endLine, endCol }
-    | "Point" =>
-      let posJ ← getField j "pos"
-      let (file, line, col) ← parsePos posJ
-      .ok { file, startLine := line, startCol := col, endLine := line, endCol := col }
-    | "Other" =>
-      -- "Other" locations have a description but no position info
-      .ok Loc.unknown
-    | "Regions" =>
-      -- Multiple regions - take the first one for now
-      let regionsJ ← getArr j "regions"
-      match regionsJ.toList with
-      | [] => .ok Loc.unknown
-      | first :: _ =>
-        let beginJ ← getField first "begin"
-        let (file, startLine, startCol) ← parsePos beginJ
-        let endJ ← getField first "end"
-        let (_, endLine, endCol) ← parsePos endJ
-        .ok { file, startLine, startCol, endLine, endCol }
-    | other => .error s!"unknown location tag '{other}', expected Region, Point, Other, or Regions"
+    return .unknown
+  -- Parse structured format with tag
+  let tag ← getTag j
+  match tag with
+  | "Region" =>
+    let beginJ ← getField j "begin"
+    let endJ ← getField j "end"
+    let cursorJ ← getField j "cursor"
+    let start ← parsePos beginJ
+    let end_ ← parsePos endJ
+    let cursor ← parseCursor cursorJ
+    .ok (.region start end_ cursor)
+  | "Point" =>
+    let posJ ← getField j "pos"
+    let pos ← parsePos posJ
+    .ok (.point pos)
+  | "Other" =>
+    let desc ← getStr j "desc"
+    .ok (.other desc)
+  | "Regions" =>
+    let regionsJ ← getArr j "regions"
+    let cursorJ ← getField j "cursor"
+    let cursor ← parseCursor cursorJ
+    let regions ← regionsJ.toList.mapM fun r => do
+      let beginJ ← getField r "begin"
+      let endJ ← getField r "end"
+      let start ← parsePos beginJ
+      let end_ ← parsePos endJ
+      .ok (start, end_)
+    .ok (.regions regions cursor)
+  | other => .error s!"unknown location tag '{other}', expected Region, Point, Other, or Regions"
 
 /-- Parse annotations from JSON -/
 def parseAnnots (j : Json) : Except String Annots := do

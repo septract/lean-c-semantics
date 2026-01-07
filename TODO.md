@@ -72,6 +72,14 @@ Our memory addresses differ from Cerberus by ~4608 bytes for the first allocatio
 - See `docs/ADDRESS_DIFFERENCE_INVESTIGATION.md` for details
 - **Impact:** UB detection works correctly; only raw address values differ
 
+### Union Active Member Tracking (not implemented)
+Reading a union member other than the last one written produces "Unspecified" in Cerberus.
+- Our interpreter returns a concrete value (type punning reinterpretation)
+- Cerberus tracks which union member was last written
+- We would need to track "active member" metadata per union allocation
+- **Impact:** Programs doing type punning via unions may show DIFF (not MISMATCH)
+- **Test case:** `tests/csmith/interesting_cases/union_unspecified_3014219861.c` (seed 3014219861)
+
 ### Other Semantic Differences (1 test)
 - **treiber**: Uses `builtin_printf` (see Future Work below)
 
@@ -162,12 +170,15 @@ To support `builtin_printf` and other I/O functions, we need:
 ## Test Commands
 
 ```bash
-# Run minimal test suite (72 tests, 100% pass)
+# Run minimal test suite (74 tests, 100% pass)
 make test-interp
 # or: ./scripts/test_interp.sh tests/minimal
 
 # Run on Cerberus CI suite (~200 tests)
 ./scripts/test_interp.sh cerberus/tests/ci
+
+# Run csmith fuzz testing (100 random programs)
+./scripts/fuzz_csmith.sh
 
 # Run all quick tests
 make test
