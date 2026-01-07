@@ -1,21 +1,69 @@
-/-
-  Weakest Precondition (WP) Calculus for Core IR
-
-  This module defines a WP transformer for compositional reasoning about
-  UB-freeness and functional correctness of Core programs.
-
-  The WP calculus allows us to:
-  1. Compute preconditions for postconditions to hold
-  2. Reason compositionally about program fragments
-  3. Generate verification conditions automatically
-
-  See docs/VERIFICATION_PLAN.md for the overall verification strategy.
--/
-
 import CToLean.Theorems.UBFree
 import CToLean.Semantics.Eval
 import CToLean.Semantics.Step
 import Std.Data.HashMap
+
+/-!
+# Weakest Precondition (WP) Calculus for Core IR
+
+This module defines a WP transformer for compositional reasoning about
+UB-freeness and functional correctness of Core programs.
+
+## Design Strategy
+
+The WP calculus enables **compositional verification**: proving properties of
+compound expressions from properties of their subexpressions. This avoids
+reasoning about the entire interpreter for each proof.
+
+### Key Design Decisions
+
+1. **Fuel-indexed WP (`wpPureN`)**: Uses explicit fuel parameter matching
+   `evalPexpr`'s recursion structure. This enables compositional rules because
+   `evalPexpr (fuel+1)` for compound expressions calls `evalPexpr fuel` for
+   subexpressions.
+
+2. **Result state in postcondition**: `wpPureN` passes the result state `s'`
+   (not the input state) to the postcondition. This enables clean compositional
+   rules since state threads through sequential evaluation.
+
+3. **UB as False, other errors as True**: The WP is `False` only for undefined
+   behavior. Type errors, pattern match failures, etc. are treated as `True`
+   (vacuously satisfied) since they indicate interpreter limitations, not UB.
+
+### Proof Technique
+
+All compositional proofs follow the same pattern:
+1. `simp only [wpPureN]` - unfold WP definition
+2. `rw [evalPexpr_X']` - apply equation lemma for the expression form
+3. `rw [InterpM_bind_run]` - distribute bind through monad transformers
+4. Case split on subexpression results
+5. `simp only [hcase] at h ⊢` - substitute case hypothesis
+
+### Key Lemmas
+
+- `evalPexpr_if'`, `evalPexpr_let'`, `evalPexpr_op'`: Equation lemmas that
+  characterize `evalPexpr (fuel+1)` for each expression constructor
+- `InterpM_bind_run`: Shows how bind distributes through `.run.run`:
+  `((m >>= f).run env).run state = match m.run.run with ok => f ... | err => err`
+
+## Module Structure
+
+- **Postcondition Types**: `PurePost`, `ExprPost`
+- **WP Definitions**: `wpPureN`, `wpPure`, `wpExpr`
+- **Soundness Theorems**: `wpPureN_noUB`, `wpPureN_post`
+- **Compositional Rules**: `wpPureN_val`, `wpPureN_if`, `wpPureN_let`, etc.
+
+## Related Modules
+
+- `CToLean.Theorems.UBFree`: Basic UB-freeness predicates
+- `CToLean.Semantics.Eval`: Pure expression evaluator with equation lemmas
+- `docs/VERIFICATION_PLAN.md`: Overall verification strategy
+
+## References
+
+- Dijkstra's weakest precondition calculus
+- Hoare logic for imperative programs
+-/
 
 namespace CToLean.Theorems.WP
 

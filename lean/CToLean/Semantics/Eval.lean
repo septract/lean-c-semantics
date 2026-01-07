@@ -1,14 +1,70 @@
-/-
-  Pure expression evaluation
-  Corresponds to: cerberus/frontend/model/core_eval.lem
-  Audited: 2025-01-01
-  Deviations: None - matches Cerberus exactly
--/
-
 import CToLean.Semantics.Monad
 import CToLean.Semantics.State
 import CToLean.Memory.Interface
 import Std.Data.HashMap
+
+/-!
+# Pure Expression Evaluation
+
+Implements evaluation of pure Core expressions (Pexpr), corresponding to
+`cerberus/frontend/model/core_eval.lem`.
+
+## Design Strategy
+
+This module provides the semantic foundation for pure expression evaluation.
+It is designed to:
+
+1. **Match Cerberus exactly**: Every function is auditable against the
+   corresponding Cerberus code. No "improvements" - only faithful translation.
+
+2. **Enable verification**: The evaluator is total (uses fuel) and has
+   equation lemmas that enable compositional proofs in `Theorems/WP.lean`.
+
+### Key Design Decisions
+
+1. **Fuel-based termination**: `evalPexpr` uses explicit fuel parameter
+   instead of `partial`. This enables unfolding in proofs and ensures
+   totality.
+
+2. **Equation lemmas**: Theorems like `evalPexpr_if'`, `evalPexpr_let'`,
+   `evalPexpr_op'` characterize how `evalPexpr (fuel+1)` behaves for each
+   expression constructor. These are proven by `simp only [evalPexpr]`
+   which uses Lean's auto-generated equation lemmas for the mutual recursion.
+
+3. **InterpM monad**: All evaluation happens in `InterpM` which provides
+   access to interpreter environment (type info, function table) and state
+   (memory, allocations).
+
+## Module Structure
+
+- **Bitwise Operations**: `intBitwiseAnd`, `intBitwiseOr`, `intBitwiseXor`
+- **Binary Operations**: `evalBinop` for arithmetic, comparison, logical ops
+- **Expression Evaluation**: `evalPexpr`, `evalPexprList`, etc.
+- **Equation Lemmas**: `evalPexpr_val'`, `evalPexpr_if'`, `evalPexpr_let'`, etc.
+
+## Cerberus Correspondence
+
+- **File**: `cerberus/frontend/model/core_eval.lem`
+- **Audited**: 2025-01-01
+- **Deviations**: None - matches Cerberus exactly
+
+## Usage in Proofs
+
+The equation lemmas enable compositional WP proofs:
+```lean
+theorem wpPureN_if ... := by
+  simp only [wpPureN]
+  rw [evalPexpr_if']  -- Unfolds to: evalPexpr cond >>= fun cv => ...
+  rw [InterpM_bind_run]
+  ...
+```
+
+## Related Modules
+
+- `CToLean.Semantics.Monad`: Defines `InterpM` monad
+- `CToLean.Theorems.WP`: Uses equation lemmas for compositional proofs
+- `CToLean.Memory.Interface`: Memory operations used by effectful evaluation
+-/
 
 namespace CToLean.Semantics
 
