@@ -854,8 +854,38 @@ partial def evalPexpr (env : List (HashMap Sym Value)) (pe : APexpr) : InterpM V
       pure (.object (.pointer newPtr))
     | _ => InterpM.throwTypeError "memberShift requires pointer"
 
-  | .memberof _tag _member _e =>
-    InterpM.throwNotImpl "memberof"
+  -- memberof: extract member from struct/union rvalue
+  -- Corresponds to: core_eval.lem:941-963 (PEmemberof case)
+  -- Audited: 2026-01-06
+  -- NOTE: Cerberus only matches Vobject (OVstruct/OVunion), NOT Vloaded values.
+  -- If value is not fully evaluated, Cerberus returns unevaluated PEmemberof.
+  -- Our interpreter fully evaluates, so we only handle the Vobject cases.
+  | .memberof tag member e =>
+    let val ← evalPexpr env (mkAPexpr e)
+    match val with
+    | .object (.struct_ tag' members) =>
+      -- Corresponds to: core_eval.lem:944-951
+      if tag != tag' then
+        InterpM.throwIllformed s!"PEmemberof(struct) ==> mismatched tags: {tag.name} vs {tag'.name}"
+      else
+        -- Corresponds to: List.lookup memb_ident (List.map (fun (a,_,b) -> (a,b)) xs)
+        match members.find? (fun m => m.name == member) with
+        | none => InterpM.throwIllformed s!"PEmemberof ==> invalid member: {member.name}"
+        | some m =>
+          -- Corresponds to: EU.return (PEval (snd (Caux.valueFromMemValue mval)))
+          pure (valueFromMemValue m.value)
+    | .object (.union_ tag' membIdent mval) =>
+      -- Corresponds to: core_eval.lem:953-959
+      if tag != tag' then
+        InterpM.throwIllformed s!"PEmemberof(union) ==> mismatched tags: {tag.name} vs {tag'.name}"
+      else if member != membIdent then
+        -- Corresponds to: error "TODO: evaluation of PEmemberof => union puning"
+        InterpM.throwNotImpl "TODO: evaluation of PEmemberof => union punning"
+      else
+        pure (valueFromMemValue mval)
+    | _ =>
+      -- Corresponds to: core_eval.lem:960-961
+      InterpM.throwIllformed s!"PEmemberof ==> unexpected value (expected Vobject struct/union)"
 
   | .cfunction e =>
     -- cfunction extracts function type info from a function pointer
