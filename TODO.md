@@ -169,14 +169,27 @@ To support `builtin_printf` and other I/O functions, we need:
 - [x] **Remove all `partial` from interpreter** - enables unfolding in proofs!
 - [x] **Prove `UBFree_bind`** - compositional reasoning enabled
 
-### Phase 7: Weakest Precondition (WP) Calculus (Next)
+### Phase 7: Weakest Precondition (WP) Calculus - Core Complete ✓
 
-**Tasks:**
-- [ ] Define `wp` transformer for expressions
-- [ ] Prove soundness: `wp e Q s → NoUB e ∧ (∀ v s', run e s = .ok (v, s') → Q v s')`
-- [ ] Prove compositional rules (seq, if, let, call)
+**Completed (2026-01-06):**
+- [x] Define `wpPureN` fuel-indexed WP transformer (`CToLean/Theorems/WP.lean`)
+- [x] Define `wpPure` with default fuel
+- [x] Prove `wpPureN_noUB`: WP implies no undefined behavior
+- [x] Prove `wpPureN_post`: WP implies postcondition holds on success
+- [x] Prove `wpPureN_val`: WP for value literals
+- [x] Prove `InterpM_bind_run`: Monad bind distribution through `.run.run`
+- [x] Prove `wpPureN_if`: Compositional rule for conditionals
+- [x] Prove `wpPureN_let`: Compositional rule for let bindings
+- [x] Prove `wpPureN_binop_implies_e1`: First operand of binop must be UB-free
+
+**Key Insights:**
+- `simp only [evalPexpr]` uses auto-generated equation lemmas
+- `InterpM_bind_run` distributes bind through ReaderT/StateT/Except
+- Changed `wpPureN` to use result state in postcondition (enables compositionality)
+- All compositional proofs follow same pattern: equation lemma → bind distribution → case split
+
+**Remaining Tasks:**
 - [ ] Handle loops with explicit invariant parameter
-- [ ] Add lemmas for `evalPexpr` cases (what each constructor does)
 - [ ] Add lemmas for `evalBinop` safety (e.g., `evalBinop_add_safe`)
 
 **Future Phases:**
