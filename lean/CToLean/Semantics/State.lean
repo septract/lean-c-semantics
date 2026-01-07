@@ -264,9 +264,11 @@ Helper for extracting bindings from pattern matches.
 Corresponds to the pattern matching in core_aux.lem (match_pattern).
 -/
 
+mutual
 /-- Extract symbol bindings from a pattern match.
-    Returns None if pattern doesn't match. -/
-partial def matchPatternBindings (pat : Pattern) (val : Value) : Option (List (Sym × Value)) :=
+    Returns None if pattern doesn't match.
+    Terminates because we recurse on structurally smaller patterns. -/
+def matchPatternBindings (pat : Pattern) (val : Value) : Option (List (Sym × Value)) :=
   match pat, val with
   | .base (some sym) _, v =>
     -- Named pattern: bind the symbol
@@ -287,14 +289,10 @@ partial def matchPatternBindings (pat : Pattern) (val : Value) : Option (List (S
     matchPatternBindings inner (.ctype ty)
   | .ctor .tuple args, .tuple vs =>
     if args.length != vs.length then none else
-    let results := args.zip vs |>.map fun (p, v) => matchPatternBindings p v
-    if results.any Option.isNone then none else
-    some (results.filterMap id |>.flatten)
+    matchPatternBindingsAll args vs
   | .ctor .array args, .list _ vs =>
     if args.length != vs.length then none else
-    let results := args.zip vs |>.map fun (p, v) => matchPatternBindings p v
-    if results.any Option.isNone then none else
-    some (results.filterMap id |>.flatten)
+    matchPatternBindingsAll args vs
   | .ctor (.nil _) [], .list _ [] =>
     some []
   | .ctor .cons [hd, tl], .list ty (v :: vs) =>
@@ -312,6 +310,17 @@ partial def matchPatternBindings (pat : Pattern) (val : Value) : Option (List (S
     if let .base none .unit := pat then some [] else none
   | _, _ =>
     none
+
+/-- Helper: match a list of patterns against a list of values -/
+def matchPatternBindingsAll (pats : List Pattern) (vals : List Value) : Option (List (Sym × Value)) :=
+  match pats, vals with
+  | [], [] => some []
+  | p :: ps, v :: vs =>
+    match matchPatternBindings p v, matchPatternBindingsAll ps vs with
+    | some b1, some b2 => some (b1 ++ b2)
+    | _, _ => none
+  | _, _ => none
+end
 
 namespace ThreadState
 

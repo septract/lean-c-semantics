@@ -156,10 +156,28 @@ To support `builtin_printf` and other I/O functions, we need:
 **Affected tests:** treiber + 13 other tests that use printf
 **Cerberus files:** `driver.lem`, `formatted.lem`, `core_run.lem:1062-1098`
 
-### Phase 6: UB-Freeness Theorems
-- [ ] Define `UBFree` predicate
-- [ ] Implement theorem statement generator
-- [ ] Create example theorems for simple programs
+### Phase 6: UB-Freeness Theorems (In Progress)
+
+**Completed (2026-01-06):**
+- [x] Define `UBFree` predicate (`CToLean/Theorems/UBFree.lean`)
+- [x] Define `UBFreeIn`, `UBFreeWith`, `UBFreeIf` predicates
+- [x] Define `SafeResult` type for classifying execution outcomes
+- [x] Define memory safety predicates (`ValidPointer`, `ValidInitializedPointer`)
+- [x] Define arithmetic safety predicates (`SafeDiv`, `SafeShift`, `inRangeForType`)
+- [x] Prove basic theorems (`UBFree_pure`, `UBFreeIn_safe_result`, etc.)
+- [x] Add decidability instances for automation
+
+**In Progress:**
+- [ ] Complete `UBFree_bind` theorem (currently uses `sorry`)
+- [ ] Define Weakest Precondition (WP) calculus
+- [ ] Integrate lean-smt for automated proof discharge
+
+**Future:**
+- [ ] Function specifications (pre/postconditions)
+- [ ] Memory ownership tracking (lightweight separation logic)
+- [ ] Example verified programs (abs, max, min)
+
+See `docs/VERIFICATION_PLAN.md` for the full verification strategy.
 
 ### Out of Scope
 - Concurrent semantics (`Epar`, `Eunseq`)
@@ -188,3 +206,5 @@ make test
 - `docs/INTERPRETER_STATUS.md` - Current test results and issues
 - `docs/MEMORY_AUDIT.md` - Memory model Cerberus correspondence
 - `docs/TESTING.md` - Test infrastructure guide
+- `docs/VERIFICATION_PLAN.md` - Verification strategy and roadmap
+- `docs/REASONING.md` - Analysis of verification approaches

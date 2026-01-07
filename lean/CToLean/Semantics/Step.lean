@@ -137,7 +137,7 @@ partial def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym
     | some cval => pure (.done cval)
     | none =>
       -- Need to evaluate the pure expression
-      let cval ← evalPexpr st.env pe
+      let cval ← evalPexpr defaultPexprFuel st.env pe
       pure (.continue_ { st with arena := mkValueExpr arenaAnnots cval })
 
   -- Epure(PEval cval) with non-empty stack
@@ -177,13 +177,13 @@ partial def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym
 
     | none =>
       -- Need to evaluate the pure expression
-      let cval ← evalPexpr st.env pe
+      let cval ← evalPexpr defaultPexprFuel st.env pe
       pure (.continue_ { st with arena := mkValueExpr arenaAnnots cval })
 
   -- Elet pat pe1 e2: evaluate pe1, bind pattern, continue with e2
   -- Corresponds to: core_run.lem:837-865
   | .let_ pat pe1 e2, _ =>
-    let cval ← evalPexpr st.env pe1
+    let cval ← evalPexpr defaultPexprFuel st.env pe1
     match st.updateEnv pat cval with
     | some st' => pure (.continue_ { st' with arena := e2 })
     | none => throw .patternMatchFailed
@@ -191,7 +191,7 @@ partial def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym
   -- Eif: evaluate condition and branch
   -- Corresponds to: core_run.lem:870-924
   | .if_ cond then_ else_, .cons _ _ _ =>
-    let condVal ← evalPexpr st.env cond
+    let condVal ← evalPexpr defaultPexprFuel st.env cond
     match condVal with
     | .true_ => pure (.continue_ { st with arena := then_ })
     | .false_ => pure (.continue_ { st with arena := else_ })
@@ -203,7 +203,7 @@ partial def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym
   -- Ecase: evaluate scrutinee and match branches
   -- Corresponds to: core_run.lem:785-835
   | .case_ scrut branches, _ =>
-    let scrutVal ← evalPexpr st.env scrut
+    let scrutVal ← evalPexpr defaultPexprFuel st.env scrut
     let rec tryBranches : List (APattern × AExpr) → InterpM StepResult
       | [] => throw .patternMatchFailed
       | (pat, body) :: rest =>
@@ -227,7 +227,7 @@ partial def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym
       match e1.expr with
       | .pure pe1 =>
         -- Evaluate pure expression
-        let cval ← evalPexpr st.env pe1
+        let cval ← evalPexpr defaultPexprFuel st.env pe1
         match st.updateEnv pat cval with
         | some st' => pure (.continue_ { st' with arena := e2 })
         | none => throw .patternMatchFailed
@@ -255,7 +255,7 @@ partial def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym
       match e1.expr with
       | .pure pe1 =>
         -- Evaluate pure expression
-        let cval ← evalPexpr st.env pe1
+        let cval ← evalPexpr defaultPexprFuel st.env pe1
         match st.updateEnv pat cval with
         | some st' => pure (.continue_ { st' with arena := e2 })
         | none => throw .patternMatchFailed
@@ -275,7 +275,7 @@ partial def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym
   | .save _sym _retTy symBTyPes body, _ =>
     -- Evaluate default argument values and bind them
     let st' ← symBTyPes.foldlM (init := st) fun acc (sym, _bTy, pe) => do
-      let cval ← evalPexpr acc.env pe
+      let cval ← evalPexpr defaultPexprFuel acc.env pe
       pure (acc.bindSym sym cval)
     pure (.continue_ { st' with arena := body })
 
@@ -290,7 +290,7 @@ partial def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym
       throw (.illformedProgram s!"Erun couldn't resolve label: '{sym.name}' for procedure '{currentProc.name}'")
     | some labeledCont =>
       -- Evaluate arguments
-      let cvals ← pes.mapM (evalPexpr st.env)
+      let cvals ← pes.mapM (evalPexpr defaultPexprFuel st.env)
       -- Substitute arguments into continuation body
       if labeledCont.params.length != cvals.length then
         throw (.typeError s!"Erun '{sym.name}': wrong number of arguments")
@@ -316,7 +316,7 @@ partial def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym
     match name with
     | .sym psym =>
       -- Evaluate arguments
-      let cvals ← pes.mapM (evalPexpr st.env)
+      let cvals ← pes.mapM (evalPexpr defaultPexprFuel st.env)
       -- Look up and call procedure
       match callProc file psym cvals with
       | .ok (procEnv, body) =>
@@ -343,8 +343,8 @@ partial def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym
     -- Create: allocate memory for a typed object
     -- Corresponds to: core_run.lem:297-338 (Create case)
     | .create alignPe sizePe prefix_ =>
-      let alignVal ← evalPexpr st.env alignPe
-      let sizeVal ← evalPexpr st.env sizePe
+      let alignVal ← evalPexpr defaultPexprFuel st.env alignPe
+      let sizeVal ← evalPexpr defaultPexprFuel st.env sizePe
       match alignVal, sizeVal with
       | .object (.integer alignIv), .ctype ty =>
         let typeEnv ← InterpM.getTypeEnv
@@ -359,9 +359,9 @@ partial def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym
     -- CreateReadonly: allocate read-only memory with initial value
     -- Corresponds to: core_run.lem:340-408 (CreateReadOnly case)
     | .createReadonly alignPe sizePe initPe prefix_ =>
-      let alignVal ← evalPexpr st.env alignPe
-      let sizeVal ← evalPexpr st.env sizePe
-      let initVal ← evalPexpr st.env initPe
+      let alignVal ← evalPexpr defaultPexprFuel st.env alignPe
+      let sizeVal ← evalPexpr defaultPexprFuel st.env sizePe
+      let initVal ← evalPexpr defaultPexprFuel st.env initPe
       match alignVal, sizeVal with
       | .object (.integer alignIv), .ctype ty =>
         let typeEnv ← InterpM.getTypeEnv
@@ -381,8 +381,8 @@ partial def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym
     -- Alloc: allocate raw memory region (malloc-style)
     -- Corresponds to: core_run.lem:409-449 (Alloc case)
     | .alloc alignPe sizePe prefix_ =>
-      let alignVal ← evalPexpr st.env alignPe
-      let sizeVal ← evalPexpr st.env sizePe
+      let alignVal ← evalPexpr defaultPexprFuel st.env alignPe
+      let sizeVal ← evalPexpr defaultPexprFuel st.env sizePe
       match alignVal, sizeVal with
       | .object (.integer alignIv), .object (.integer sizeIv) =>
         let prefixName := prefix_.val
@@ -395,7 +395,7 @@ partial def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym
     -- Kill: deallocate memory
     -- Corresponds to: core_run.lem:451-477 (Kill case)
     | .kill kind ptrPe =>
-      let ptrVal ← evalPexpr st.env ptrPe
+      let ptrVal ← evalPexpr defaultPexprFuel st.env ptrPe
       match ptrVal with
       | .object (.pointer ptr) =>
         let isDynamic := match kind with
@@ -417,9 +417,9 @@ partial def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym
     -- Store: store value to memory
     -- Corresponds to: core_run.lem:505-569 (Store case)
     | .store isLocking tyPe ptrPe valPe _order =>
-      let tyVal ← evalPexpr st.env tyPe
-      let ptrVal ← evalPexpr st.env ptrPe
-      let cval ← evalPexpr st.env valPe
+      let tyVal ← evalPexpr defaultPexprFuel st.env tyPe
+      let ptrVal ← evalPexpr defaultPexprFuel st.env ptrPe
+      let cval ← evalPexpr defaultPexprFuel st.env valPe
       match tyVal, ptrVal with
       | .ctype ty, .object (.pointer ptr) =>
         match memValueFromValue ty cval with
@@ -443,8 +443,8 @@ partial def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym
     -- Load: load value from memory
     -- Corresponds to: core_run.lem:579-612 (Load case)
     | .load tyPe ptrPe _order =>
-      let tyVal ← evalPexpr st.env tyPe
-      let ptrVal ← evalPexpr st.env ptrPe
+      let tyVal ← evalPexpr defaultPexprFuel st.env tyPe
+      let ptrVal ← evalPexpr defaultPexprFuel st.env ptrPe
       match tyVal, ptrVal with
       | .ctype ty, .object (.pointer ptr) =>
         let (_, mval) ← InterpM.liftMem (loadImpl ty ptr)
@@ -471,8 +471,8 @@ partial def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym
     -- 6. Store new value: Mem.store ty false ptrval mval'
     -- 7. Return old value (if not with_forward) or new value (if with_forward)
     | .seqRmw withForward tyPe ptrPe sym valPe =>
-      let tyVal ← evalPexpr st.env tyPe
-      let ptrVal ← evalPexpr st.env ptrPe
+      let tyVal ← evalPexpr defaultPexprFuel st.env tyPe
+      let ptrVal ← evalPexpr defaultPexprFuel st.env ptrPe
       match tyVal, ptrVal with
       | .ctype ty, .object (.pointer ptr) =>
         -- Step 2: Load current value
@@ -482,7 +482,7 @@ partial def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym
         let loadedVal := valueFromMemValue mval
         let newEnv := bindInEnv sym loadedVal st.env
         -- Step 4: Evaluate update expression with sym bound
-        let cval3 ← evalPexpr newEnv valPe
+        let cval3 ← evalPexpr defaultPexprFuel newEnv valPe
         -- Step 5: Convert to MemValue
         -- Corresponds to: memValueFromValue (Ctype.Ctype [] (Ctype.unatomic_ ty)) cval3
         let ty' : Ctype := { annots := [], ty := unatomic_ ty.ty }
@@ -501,7 +501,7 @@ partial def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym
         let (_, mval) ← InterpM.liftMem (loadImpl ty ptr)
         let loadedVal := valueFromMemValue mval
         let newEnv := bindInEnv sym loadedVal st.env
-        let cval3 ← evalPexpr newEnv valPe
+        let cval3 ← evalPexpr defaultPexprFuel newEnv valPe
         let ty' : Ctype := { annots := [], ty := unatomic_ ty.ty }
         match memValueFromValue ty' cval3 with
         | some mval' =>
@@ -527,7 +527,7 @@ partial def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym
   -- Corresponds to: core_run.lem:926-999
   | .ccall funPtr _funTy args, sk =>
     -- Step 1: Evaluate function pointer expression
-    let funPtrVal ← evalPexpr st.env funPtr
+    let funPtrVal ← evalPexpr defaultPexprFuel st.env funPtr
     -- Step 2: Extract function symbol from pointer value
     -- Corresponds to: core_run.lem:927-936 (valueFromPexpr and case_ptrval)
     let funSym ← match funPtrVal with
@@ -545,7 +545,7 @@ partial def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym
       | _ => throw (.undefinedBehavior .ub_cerb003_invalidFunctionPointer none)
     -- Step 3: Evaluate arguments
     -- Corresponds to: core_run.lem:948-956
-    let argVals ← args.mapM (evalPexpr st.env)
+    let argVals ← args.mapM (evalPexpr defaultPexprFuel st.env)
     -- Step 4: Check for builtin functions before calling procedure
     -- Corresponds to: core_run.lem:1046-1127 (Impl BuiltinFunction cases)
     if funSym.name == some "exit" then
@@ -637,7 +637,7 @@ partial def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym
   -- Pattern matches on memop kind and evaluates accordingly
   | .memop op args, _ =>
     -- First evaluate all argument pexprs to values
-    let argVals ← args.mapM (evalPexpr st.env)
+    let argVals ← args.mapM (evalPexpr defaultPexprFuel st.env)
     -- Pattern match on memop kind with argument values
     let result ← match op, argVals with
     -- Pointer comparisons
