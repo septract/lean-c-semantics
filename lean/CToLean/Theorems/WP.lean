@@ -172,13 +172,59 @@ example : wpPure ⟨[], none, .val Value.true_⟩ (fun _ _ => True) [] default d
 example : wpPure ⟨[], none, .val Value.unit⟩ (fun v _ => v = Value.unit) [] default default := by
   simp only [wpPure_val]
 
-/-! ## Compositional Rules (To Be Proven)
+/-! ### Concrete WP Examples
 
-These rules enable modular reasoning. They are stated here and will be
-proven as we develop more infrastructure.
+These examples demonstrate that the WP infrastructure works correctly
+by computing specific cases. They serve as sanity checks and show how
+the WP calculus will be used in practice.
 -/
 
-/-- WP for conditionals: requires WP for condition, then appropriate branch -/
+/-- Example: if true then 1 else 2 is UB-free (evaluates without UB) -/
+example : wpPure ⟨[], none, .if_ (.val .true_) (.val (mkIntVal 1)) (.val (mkIntVal 2))⟩
+    (fun _ _ => True) [] default default := by
+  -- The computation succeeds with .ok, so wpPure returns True
+  simp only [wpPure, evalPexpr, defaultPexprFuel, mkAPexpr]
+  -- Reduce the monad transformers and match
+  simp only [pure, bind, ReaderT.bind, StateT.bind, StateT.run, ReaderT.run]
+  trivial
+
+/-- Example: if false then 1 else 2 is UB-free -/
+example : wpPure ⟨[], none, .if_ (.val .false_) (.val (mkIntVal 1)) (.val (mkIntVal 2))⟩
+    (fun _ _ => True) [] default default := by
+  simp only [wpPure, evalPexpr, defaultPexprFuel, mkAPexpr]
+  simp only [pure, bind, ReaderT.bind, StateT.bind, StateT.run, ReaderT.run]
+  trivial
+
+/-! ## Compositional Rules
+
+These rules enable modular reasoning about WP.
+
+Note: The proofs require reasoning about how evalPexpr evaluates each
+expression form. Since evalPexpr is a large function with many cases,
+full proofs require careful unfolding and case analysis on the monad
+transformer stack. The key insight is:
+
+1. Pure expressions don't modify state (only read from it via TypeEnv)
+2. evalPexpr is total (has fuel) so we can unfold it in proofs
+3. The WP definition matches the evaluation structure
+
+For now, these theorems are stated with sorry to establish the interface.
+The proofs can be completed once we have more experience with the monad
+transformer reasoning patterns.
+-/
+
+/-- WP for conditionals: requires WP for condition, then appropriate branch.
+
+    The proof would unfold evalPexpr for if_, showing it:
+    1. Evaluates cond to get condVal
+    2. If condVal = true_, evaluates then_
+    3. If condVal = false_, evaluates else_
+    4. Otherwise throws type error (not UB)
+
+    NOTE: This theorem is stated but proving it requires detailed reasoning
+    about the monad transformer stack. The statement captures the intended
+    semantics; proof is deferred.
+-/
 theorem wpPure_if (cond then_ else_ : Pexpr) (Q : PurePost)
     (env : List (HashMap Sym Value)) (interpEnv : InterpEnv) (state : InterpState) :
     wpPure ⟨[], none, .if_ cond then_ else_⟩ Q env interpEnv state ↔
@@ -188,6 +234,12 @@ theorem wpPure_if (cond then_ else_ : Pexpr) (Q : PurePost)
       | .false_ => wpPure ⟨[], none, else_⟩ Q env interpEnv s
       | _ => True  -- Type error, not UB
     ) env interpEnv state := by
+  -- The proof requires unfolding evalPexpr and reasoning about bind
+  -- Key steps:
+  -- 1. unfold wpPure, evalPexpr
+  -- 2. simplify the fuel check (defaultPexprFuel = 100000 > 0)
+  -- 3. case split on result of evaluating cond
+  -- 4. show the WP matches for each case
   sorry
 
 /-- WP for let binding: WP of e1, then WP of e2 with bindings -/
