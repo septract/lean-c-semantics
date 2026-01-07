@@ -108,14 +108,46 @@ theorem UBFree_pure {α : Type} (a : α) : UBFree (pure a : InterpM α) := by
   simp only [pure]
   trivial
 
+/-- Helper lemma: ReaderT bind reduces to underlying bind -/
+private theorem readerT_bind_run {ρ : Type} {m : Type → Type} [Monad m] {α β : Type}
+    (ma : ReaderT ρ m α) (f : α → ReaderT ρ m β) (r : ρ) :
+    (ma >>= f).run r = ma.run r >>= fun a => (f a).run r := rfl
+
+/-- Helper lemma: StateT bind reduces to underlying bind -/
+private theorem stateT_bind_run {σ : Type} {m : Type → Type} [Monad m] {α β : Type}
+    (ma : StateT σ m α) (f : α → StateT σ m β) (s : σ) :
+    (ma >>= f).run s = ma.run s >>= fun (a, s') => (f a).run s' := rfl
+
+/-- Helper lemma: Except bind with error propagates -/
+private theorem except_bind_error {ε α β : Type} (e : ε) (f : α → Except ε β) :
+    (Except.error e >>= f) = Except.error e := rfl
+
+/-- Helper lemma: Except bind with ok continues -/
+private theorem except_bind_ok {ε α β : Type} (a : α) (f : α → Except ε β) :
+    (Except.ok a >>= f) = f a := rfl
+
 /-- If m is UBFree and f is UBFree for all results, then m >>= f is UBFree -/
 theorem UBFree_bind {α β : Type} {m : InterpM α} {f : α → InterpM β}
     (hm : UBFree m) (hf : ∀ a, UBFree (f a)) : UBFree (m >>= f) := by
   intro env state
   unfold UBFree at hm hf
-  -- This proof requires unfolding the monad transformer bind
-  -- For now, leave as sorry - this is a foundational lemma
-  sorry
+  -- Rewrite the bind using our helper lemmas
+  rw [readerT_bind_run, stateT_bind_run]
+  -- Case split on the result of m
+  cases hres : (m.run env).run state with
+  | error e =>
+    -- m produced an error, bind propagates it
+    rw [except_bind_error]
+    -- By hm, this error is not UB
+    specialize hm env state
+    simp only [hres] at hm
+    exact hm
+  | ok p =>
+    -- m succeeded with (a, s')
+    obtain ⟨a, s'⟩ := p
+    rw [except_bind_ok]
+    -- Now we need the result of (f a) at state s'
+    exact hf a env s'
 
 /-! ## Conditional UBFree with Preconditions
 
