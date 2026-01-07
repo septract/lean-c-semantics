@@ -1,18 +1,63 @@
-/-
-  UB-freeness predicates and foundational verification infrastructure
-
-  This module defines predicates for reasoning about undefined behavior
-  in Core programs, building on the operational semantics in Semantics/.
-
-  Key predicates:
-  - `UBFree`: An InterpM computation doesn't produce undefined behavior
-  - `NoUB`: An expression doesn't produce UB given environment and state
-  - `SafeResult`: Classification of execution outcomes
--/
-
 import CToLean.Semantics.Monad
 import CToLean.Semantics.Interpreter
 import CToLean.Core.Undefined
+
+/-!
+# UB-Freeness Predicates and Verification Infrastructure
+
+This module defines predicates for reasoning about undefined behavior (UB)
+in Core programs, building on the operational semantics in `Semantics/`.
+
+## Design Strategy
+
+The verification approach distinguishes **undefined behavior** (true semantic
+errors in C) from **interpreter errors** (limitations of our implementation).
+Only UB should cause proof obligations to fail.
+
+### Key Design Decisions
+
+1. **UBFree as monadic predicate**: `UBFree m` states that the monadic
+   computation `m : InterpM α` never produces a `undefinedBehavior` error,
+   regardless of the environment and state. This is the strongest form.
+
+2. **Conditional variants**: `UBFreeIn`, `UBFreeIf`, `UBFreeWith` allow
+   preconditions on the environment/state, enabling practical verification
+   where UB-freeness depends on input constraints.
+
+3. **Error classification**: `SafeResult` distinguishes:
+   - `ok`: Successful completion
+   - `ub`: Undefined behavior (proof obligation fails)
+   - `otherError`: Type errors, not-implemented, etc. (vacuously satisfied)
+
+4. **Decidable predicates**: Range checks (`inRangeForType`), safety conditions
+   (`SafeDiv`, `SafeShift`) have `Decidable` instances for automation.
+
+## Module Structure
+
+- **Result Classification**: `SafeResult`, `toSafeResult`, `isUBError`
+- **UBFree Predicates**: `UBFree`, `UBFreeIn`, `UBFreeWith`, `UBFreeIf`
+- **Range Predicates**: `inInt32Range`, `inRangeForType`, `intTypeRange`
+- **Memory Predicates**: `ValidPointer`, `ValidInitializedPointer`
+- **Operation Safety**: `SafeDiv`, `SafeShift`, `SafeLeftShift`
+
+## Key Theorems
+
+- `UBFree_pure`: `pure a` is always UB-free
+- `UBFree_bind`: If `m` and `f` are UB-free, so is `m >>= f`
+- `UBFreeIn_safe_result`: `UBFreeIn` implies the result is not UB
+
+## Related Modules
+
+- `CToLean.Theorems.WP`: Weakest precondition calculus (uses these predicates)
+- `CToLean.Semantics.Monad`: Defines `InterpM` and `InterpError`
+- `CToLean.Core.Undefined`: Enumeration of undefined behaviors
+
+## C Standard References
+
+The `UndefinedBehavior` enumeration in `Core.Undefined` lists behaviors that
+are undefined per the C standard. Our predicates track which operations can
+trigger these behaviors and under what conditions.
+-/
 
 namespace CToLean.Theorems
 
