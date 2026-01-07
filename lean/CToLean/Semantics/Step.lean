@@ -124,7 +124,7 @@ Each case matches the corresponding case in Cerberus.
     - No PEconstrained handling (for bounded model checking)
     - No core_extern handling (external symbol remapping)
     - Simplified memory action handling -/
-partial def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym LabeledConts)
+def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym LabeledConts)
     : InterpM StepResult := do
   let arena := st.arena
   let arenaAnnots := arena.annots
@@ -744,14 +744,16 @@ Run steps until done or error.
 
 /-- Run the interpreter until completion or error.
     Returns the final value or an error. -/
-partial def runUntilDone (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym LabeledConts)
+def runUntilDone (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym LabeledConts)
     (fuel : Nat := 1000000) : InterpM Value := do
-  if fuel == 0 then
-    throw (.illformedProgram "execution fuel exhausted")
+  match fuel with
+  | 0 => throw (.illformedProgram "execution fuel exhausted")
+  | fuel' + 1 =>
   match ← step st file allLabeledConts with
   | .done v => pure v
-  | .continue_ st' => runUntilDone st' file allLabeledConts (fuel - 1)
+  | .continue_ st' => runUntilDone st' file allLabeledConts fuel'
   | .error err => throw err
+  termination_by fuel
 
 /-! ## Global Variable Initialization
 
@@ -770,7 +772,7 @@ Global variables are initialized before main() runs:
     Corresponds to: driver2 loop in driver.lem
     Audited: 2026-01-01
     Deviations: Simplified - no concurrency support -/
-partial def runExprToValue (expr : AExpr) (env : List (HashMap Sym Value))
+def runExprToValue (expr : AExpr) (env : List (HashMap Sym Value))
     (file : File) (fuel : Nat := 100000) : InterpM Value := do
   -- Use a minimal stack with empty continuation (like Cerberus)
   -- Corresponds to: Stack_cons Nothing [] Stack_empty in driver.lem
