@@ -37,7 +37,9 @@ c-to-lean/
 ├── scripts/           # Development scripts
 │   ├── test_parser.sh # Run parser against Cerberus test suite
 │   └── test_pp.sh     # Run pretty-printer comparison tests
-├── tests/             # Simple C test files
+├── tests/             # C test files for differential testing
+│   ├── minimal/       # Core test suite (NNN-description.c)
+│   └── debug/         # Debug/investigation tests (category-NN-description.c)
 ├── context/           # Background materials
 ├── CLAUDE.md          # This file
 ├── PLAN.md            # High-level goals
@@ -208,7 +210,7 @@ The test script outputs files to a temp directory. To investigate a specific mis
 ```
 Do NOT use `diff` directly - it doesn't normalize whitespace. Always use the `--compare` flag with the Lean tool.
 
-### Differential Testing (Future)
+### Differential Testing
 Compare Lean interpreter output against Cerberus:
 1. Run Cerberus on C file, get Core + execution result
 2. Parse Core in Lean
@@ -216,6 +218,23 @@ Compare Lean interpreter output against Cerberus:
 4. Compare results (return value, UB detection)
 
 Target: 90%+ agreement on sequential tests.
+
+### Test Files (`tests/`)
+
+**Naming conventions:**
+- `tests/minimal/`: Core test suite with numbered files: `NNN-description.c`
+  - Examples: `001-return-literal.c`, `068-div-by-zero.undef.c`
+  - Files with `.undef.c` suffix test undefined behavior detection
+- `tests/debug/`: Debug/investigation tests: `category-NN-description.c`
+  - Examples: `conv-01-neg-to-unsigned.c`, `ptr-03-no-decr.c`, `struct-01-init.c`
+  - Categories group related tests (conv, ptr, rec, struct, etc.)
+
+**Debugging strategy:**
+When investigating a bug or unexpected behavior:
+1. Create a minimal reproducer in `tests/debug/` with an appropriate category prefix
+2. Run `./scripts/test_interp.sh tests/debug` to compare against Cerberus
+3. Debug tests should be committed for future regression testing
+4. Once fixed, consider adding to `tests/minimal/` if it covers a new case
 
 ## Development Notes
 

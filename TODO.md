@@ -2,10 +2,40 @@
 
 ## Current Status: Interpreter Working (100% on minimal tests, 91% on CI)
 
-**Test Results (2026-01-02):**
-- Minimal test suite: 72/72 (100% match with Cerberus)
+**Test Results (2026-01-06):**
+- Minimal test suite: 74/74 (100% match with Cerberus)
 - Cerberus CI suite: 91% match rate on successful tests
-- See `docs/INTERPRETER_STATUS.md` for detailed breakdown
+- See `docs/INTERPRETER_STATUS.md` and `docs/FULL_TEST_RESULTS_2026-01-02.md` for detailed breakdown
+
+## Recent Fixes (2026-01-06)
+
+- **exit()/abort() builtins**: Implemented early termination support
+- **Negative pointer arithmetic**: Fixed `arrayShiftPtrval` to handle negative offsets
+  - Bug: `n.val.toNat` converted -1 to 0, breaking `p--` and `p - 1`
+  - Fix: Use Int arithmetic throughout, convert to Nat only at end
+
+## Bugs Discovered (Investigation Needed)
+
+### Struct Reconstruction Not Implemented
+- `reconstructValue` in `Memory/Concrete.lean:423` panics for structs
+- Affects tests: 20021118-1, 950607-2, 20030914-1, and others using struct loads
+- Need to implement struct field-by-field reconstruction from bytes
+
+### False Positive UB Issues (from full test suite)
+See `docs/FULL_TEST_RESULTS_2026-01-02.md` for test names.
+
+- **UB036_exceptional_condition** (5 tests): Need investigation - may be struct reconstruction issue
+- **UB_CERB002a_out_of_bound_load** (2 tests): 20060412-1, 20080604-1
+- **UB025_misaligned_pointer_conversion** (1 test): pr36339
+- **UB_CERB004_unspecified__equality** (1 test): pr52129
+- **UB_internal_type_error** (1 test): 941014-1
+
+### False Negative UB
+- **function_vs_var**: Missing UB024_out_of_range_pointer_to_integer_conversion
+
+### Other Semantic Differences
+- **0046-jump_inside_lifetime**: Lean returns 0, Cerberus returns UNSPECIFIED
+- **treiber**: Lean returns UB_CERB004_unspecified__equality_ptr_vs_NULL, Cerberus returns 0
 
 ## Completed Phases
 
@@ -48,11 +78,13 @@
 ### Remaining Interpreter Issues (from CI tests)
 See `docs/INTERPRETER_STATUS.md` for details.
 
-**Fixed (2026-01-02):**
+**Fixed (2026-01-02 and 2026-01-06):**
 - [x] 0056-unary_plus: Fixed by correcting test script to compare return values
 - [x] 0335-non_decimal_unsigned_long_int_constants: Fixed floored remainder (`rem_f`) bug
 - [x] 0297-atomic_memberof: Added atomic member access UB detection (UB042)
 - [x] 0298-atomic_memberofptr: Fixed by same atomic member access check
+- [x] exit()/abort() builtins: Implemented for early termination
+- [x] Negative pointer arithmetic: Fixed `arrayShiftPtrval` Int handling
 
 **Semantic Mismatches (7 tests):**
 - [ ] 0300-0306 unseq_race tests: Out of scope (we sequentialize execution)
@@ -61,6 +93,9 @@ See `docs/INTERPRETER_STATUS.md` for details.
 - [ ] 0324-atomics
 - [ ] 0328-indeterminate_block_declaration
 - [ ] 0329, 0331, 0332 - rvalue temporary lifetime tests
+
+**High Priority (struct support):**
+- [ ] Implement struct reconstruction in `Memory/Concrete.lean:reconstructValue`
 
 **Low Priority:**
 - [ ] Implement `builtin_printf` for test compatibility (13 tests)
