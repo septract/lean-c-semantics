@@ -20,6 +20,15 @@
 - **Negative pointer arithmetic**: Fixed `arrayShiftPtrval` to handle negative offsets
   - Bug: `n.val.toNat` converted -1 to 0, breaking `p--` and `p - 1`
   - Fix: Use Int arithmetic throughout, convert to Nat only at end
+- **941014-1 function pointer to int**: Fixed `intfromPtrImpl` to convert function symbol ID
+  - Bug: Was throwing error for function pointers instead of converting
+  - Corresponds to: impl_mem.ml:2249-2272
+- **pr55875 false positive UB043**: Fixed `validForDerefImpl` to match Cerberus semantics
+  - Bug: Was checking bounds in validForDeref, but Cerberus only checks alignment there
+  - Bounds checking happens in load/store, not in validForDeref
+  - Corresponds to: impl_mem.ml:2086-2123
+- **b.c pointer equality**: Fixed `eqPtrvalImpl` to use provenance-aware comparison
+  - Corresponds to: defacto_memory.lem:1430-1479
 
 ## Bugs Discovered (Investigation Needed)
 
@@ -46,17 +55,13 @@
 - ~~`reconstructValue` in `Memory/Concrete.lean:423` panics for structs~~
 - Fixed: Implemented struct/union reconstruction matching Cerberus impl_mem.ml
 
-### Remaining False Positive UB Issues (2 tests)
-Most false positives fixed as of 2026-01-06. See `docs/FULL_TEST_RESULTS_2026-01-02.md`.
-
-- **941014-1**: UB_internal_type_error - Internal type mismatch (needs investigation)
-- **pr55875**: UB043_indirection_invalid_value - Invalid pointer deref (needs investigation)
+### Remaining False Positive UB Issues
+All previously reported false positive UB issues have been fixed as of 2026-01-06.
 
 ### False Negative UB (1 test)
 - **function_vs_var**: Missing UB024_out_of_range_pointer_to_integer_conversion
 
-### Other Semantic Differences (2 tests)
-- **b**: Lean returns 110, Cerberus returns 220 (memory model difference)
+### Other Semantic Differences (1 test)
 - **treiber**: Uses unimplemented impl function
 
 ## Completed Phases

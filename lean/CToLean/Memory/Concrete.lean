@@ -784,29 +784,6 @@ def intfromPtrImpl (_fromTy : Ctype) (_toTy : IntegerType) (ptr : PointerValue) 
     -- TODO: Add range check for _toTy (MerrIntFromPtr if out of range)
     pure (integerIvalWithProv addr ptr.prov)
 
-/-- Check pointer validity for dereference.
-    Corresponds to: validForDeref_ptrval in impl_mem.ml
-    Audited: 2026-01-01
-    Deviations: None -/
-def validForDerefImpl (ty : Ctype) (ptr : PointerValue) : ConcreteMemM Bool := do
-  let env ← read
-  match ptr.base with
-  | .null _ => pure false
-  | .function _ => pure false
-  | .concrete _ addr =>
-    match ptr.prov with
-    | .some allocId =>
-      let st ← get
-      if st.deadAllocations.contains allocId then
-        pure false
-      else
-        match st.allocations[allocId]? with
-        | some alloc =>
-          let size := sizeof env ty
-          pure (isInBounds alloc addr size)
-        | none => pure false
-    | _ => pure false
-
 /-- Check pointer alignment.
     Corresponds to: isWellAligned_ptrval in impl_mem.ml
     Audited: 2026-01-01
@@ -819,6 +796,33 @@ def isWellAlignedImpl (ty : Ctype) (ptr : PointerValue) : ConcreteMemM Bool := d
   | .concrete _ addr =>
     let align := alignof env ty
     pure (addr % align == 0)
+
+/-- Check pointer validity for dereference.
+    Corresponds to: validForDeref_ptrval in impl_mem.ml:2086-2123
+    Audited: 2026-01-06
+
+    IMPORTANT: This checks liveness and alignment ONLY, not bounds!
+    Bounds checking is done in load/store operations.
+
+    Cerberus logic:
+    - null/function → false
+    - device → isWellAligned only
+    - Prov_some alloc_id → is_dead? then false, else isWellAligned
+    - Prov_none → false -/
+def validForDerefImpl (ty : Ctype) (ptr : PointerValue) : ConcreteMemM Bool := do
+  match ptr.base with
+  | .null _ => pure false
+  | .function _ => pure false
+  | .concrete _ _ =>
+    match ptr.prov with
+    | .some allocId =>
+      let st ← get
+      if st.deadAllocations.contains allocId then
+        pure false
+      else
+        -- Only check alignment, not bounds (bounds checked at load/store)
+        isWellAlignedImpl ty ptr
+    | _ => pure false
 
 /-! ## Memory Functions
 
