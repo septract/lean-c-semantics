@@ -341,13 +341,21 @@ def allocateImpl (name : String) (size : Nat) (ty : Option Ctype)
   }
 
   -- Initialize memory if provided
+  -- Corresponds to: impl_mem.ml:1304-1322 (allocate_object init handling)
+  -- Audited: 2026-01-06
   match init with
   | some val =>
     let bytes := memValueToBytes env val
     writeBytes alignedAddr bytes
   | none =>
-    -- Zero-initialize with allocation's provenance
-    writeBytesWithProv alignedAddr (List.replicate size (some 0)) (.some allocId)
+    -- Write unspecified bytes (NOT zero-initialized)
+    -- Corresponds to: impl_mem.ml:1317-1322 (init_opt = None case, no SW_zero_initialised)
+    --   calls repr (MVunspecified ty) at line 1318
+    --   which at impl_mem.ml:1142-1144 produces:
+    --     List.init (sizeof ty) (fun _ -> AbsByte.v Prov_none None)
+    -- We use `size` which equals `sizeof ty` from caller
+    let unspecifiedBytes := List.replicate size { prov := .none, copyOffset := none, value := none : AbsByte }
+    writeBytes alignedAddr unspecifiedBytes
 
   pure (concretePtrval allocId alignedAddr)
 

@@ -179,7 +179,7 @@ for c_file in $TEST_FILES; do
     elif echo "$cerberus_output" | grep -q 'value: "Specified'; then
         cerberus_ret=$(echo "$cerberus_output" | grep -o 'value: "Specified([^)]*)"' | sed 's/value: "Specified(\([^)]*\))"/\1/')
     elif echo "$cerberus_output" | grep -q 'value: "Unspecified'; then
-        cerberus_ret="UNSPECIFIED"
+        cerberus_ret=$(echo "$cerberus_output" | grep -o 'value: "[^"]*"' | sed 's/value: "\([^"]*\)"/\1/')
     elif echo "$cerberus_output" | grep -q '^Error {'; then
         # Cerberus reported an error (ill-formed program, unsupported feature, etc.)
         ((CERBERUS_FAIL++))
@@ -240,7 +240,13 @@ for c_file in $TEST_FILES; do
         lean_ub_code=$(echo "$lean_output" | grep -o 'ub: "[^"]*"' | sed 's/ub: "\([^"]*\)"/\1/')
         lean_ret="UB"
     elif echo "$lean_output" | grep -q '^Defined {'; then
-        lean_ret=$(echo "$lean_output" | grep -o 'value: "[^"]*"' | sed 's/value: "\([^"]*\)"/\1/')
+        if echo "$lean_output" | grep -q 'value: "Specified'; then
+            lean_ret=$(echo "$lean_output" | grep -o 'value: "Specified([^)]*)"' | sed 's/value: "Specified(\([^)]*\))"/\1/')
+        elif echo "$lean_output" | grep -q 'value: "Unspecified'; then
+            lean_ret=$(echo "$lean_output" | grep -o 'value: "[^"]*"' | sed 's/value: "\([^"]*\)"/\1/')
+        else
+            lean_ret=$(echo "$lean_output" | grep -o 'value: "[^"]*"' | sed 's/value: "\([^"]*\)"/\1/')
+        fi
     elif echo "$lean_output" | grep -q '^Error {'; then
         error_msg=$(echo "$lean_output" | grep -o 'msg: "[^"]*"' | sed 's/msg: "\([^"]*\)"/\1/')
         lean_ret="ERROR"

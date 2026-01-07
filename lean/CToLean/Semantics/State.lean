@@ -275,9 +275,16 @@ partial def matchPatternBindings (pat : Pattern) (val : Value) : Option (List (S
     -- Wildcard pattern: no bindings
     some []
   | .ctor .specified [inner], .loaded (.specified ov) =>
+    -- Corresponds to: core_aux.lem:1119-1120 (subst_pattern_val)
+    --   (CaseCtor Cspecified [pat'], Vloaded (LVspecified oval)) ->
+    --       subst_pattern_val pat' (Vobject oval) expr
     matchPatternBindings inner (.object ov)
-  | .ctor .unspecified [], .loaded (.unspecified _) =>
-    some []
+  | .ctor .unspecified [inner], .loaded (.unspecified ty) =>
+    -- Unspecified(cty) pattern - match inner against the ctype
+    -- Corresponds to: core_aux.lem:1121-1122 (subst_pattern_val)
+    --   (CaseCtor Cunspecified [pat'], Vloaded (LVunspecified ty)) ->
+    --       subst_pattern_val pat' (Vctype ty) expr
+    matchPatternBindings inner (.ctype ty)
   | .ctor .tuple args, .tuple vs =>
     if args.length != vs.length then none else
     let results := args.zip vs |>.map fun (p, v) => matchPatternBindings p v
