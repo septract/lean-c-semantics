@@ -351,8 +351,11 @@ def arrayShiftPtrval (env : TypeEnv) (ptr : PointerValue) (elemTy : Ctype) (n : 
   | .function sym => { ptr with base := .function sym }  -- Keep function ptr
   | .concrete unionMem addr =>
     let elemSize := sizeof env elemTy
-    let newAddr := addr + n.val.toNat * elemSize
-    { ptr with base := .concrete unionMem newAddr }
+    -- Handle negative offsets properly (n.val is Int, not Nat)
+    let offset := n.val * elemSize
+    let newAddr := (addr : Int) + offset
+    -- Convert back to Nat (should be non-negative after bounds check)
+    { ptr with base := .concrete unionMem newAddr.toNat }
 
 /-- Pure struct member shift.
     Corresponds to: member_shift_ptrval in memory_model.ml:110
