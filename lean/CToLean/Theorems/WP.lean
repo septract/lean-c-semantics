@@ -45,7 +45,28 @@ For a pure expression `pe`, `wpPure pe Q env state` means:
 - If evaluation succeeds with value `v`, then `Q v state` holds
 -/
 
-/-- Weakest precondition for pure expression evaluation.
+/-- Fuel-parameterized weakest precondition for compositional reasoning.
+
+    `wpPureN fuel pe Q env interpEnv state` holds iff:
+    - Evaluating `pe` with `fuel` steps doesn't produce undefined behavior
+    - If evaluation succeeds with value `v` and final state `s'`, then `Q v s'` holds
+
+    This fuel-indexed version enables compositional rules because
+    `evalPexpr (fuel + 1)` for compound expressions uses `evalPexpr fuel`
+    for subexpressions.
+
+    Note: We use the result state `s'` in the postcondition rather than the
+    parameter state. This enables clean compositional rules since state
+    threads through sequential evaluation.
+-/
+def wpPureN (fuel : Nat) (pe : APexpr) (Q : PurePost) (env : List (HashMap Sym Value))
+    (interpEnv : InterpEnv) (state : InterpState) : Prop :=
+  match ((evalPexpr fuel env pe).run interpEnv).run state with
+  | .ok (v, s') => Q v s'
+  | .error (.undefinedBehavior _ _) => False
+  | .error _ => True  -- Other errors (type errors, not implemented) are not UB
+
+/-- Weakest precondition for pure expression evaluation (default fuel).
 
     `wpPure pe Q env state` holds iff:
     - Evaluating `pe` doesn't produce undefined behavior
@@ -55,10 +76,7 @@ For a pure expression `pe`, `wpPure pe Q env state` means:
 -/
 def wpPure (pe : APexpr) (Q : PurePost) (env : List (HashMap Sym Value))
     (interpEnv : InterpEnv) (state : InterpState) : Prop :=
-  match ((evalPexpr defaultPexprFuel env pe).run interpEnv).run state with
-  | .ok (v, _) => Q v state
-  | .error (.undefinedBehavior _ _) => False
-  | .error _ => True  -- Other errors (type errors, not implemented) are not UB
+  wpPureN defaultPexprFuel pe Q env interpEnv state
 
 /-! ## WP Soundness for Pure Expressions
 
@@ -72,14 +90,14 @@ def isUBResult {α : Type} : Except InterpError α → Bool
   | .error (.undefinedBehavior _ _) => true
   | .error _ => false
 
-/-- If wpPure holds, then evaluation doesn't produce UB -/
-theorem wpPure_noUB (pe : APexpr) (Q : PurePost) (env : List (HashMap Sym Value))
+/-- If wpPureN holds, then evaluation doesn't produce UB -/
+theorem wpPureN_noUB (fuel : Nat) (pe : APexpr) (Q : PurePost) (env : List (HashMap Sym Value))
     (interpEnv : InterpEnv) (state : InterpState)
-    (h : wpPure pe Q env interpEnv state) :
-    isUBResult (((evalPexpr defaultPexprFuel env pe).run interpEnv).run state) = false := by
-  unfold wpPure at h
+    (h : wpPureN fuel pe Q env interpEnv state) :
+    isUBResult (((evalPexpr fuel env pe).run interpEnv).run state) = false := by
+  unfold wpPureN at h
   unfold isUBResult
-  cases hres : ((evalPexpr defaultPexprFuel env pe).run interpEnv).run state with
+  cases hres : ((evalPexpr fuel env pe).run interpEnv).run state with
   | ok p => rfl
   | error e =>
     simp only [hres] at h
@@ -87,16 +105,32 @@ theorem wpPure_noUB (pe : APexpr) (Q : PurePost) (env : List (HashMap Sym Value)
     | undefinedBehavior ub loc => exact absurd h (by simp)
     | _ => rfl
 
+/-- If wpPure holds, then evaluation doesn't produce UB -/
+theorem wpPure_noUB (pe : APexpr) (Q : PurePost) (env : List (HashMap Sym Value))
+    (interpEnv : InterpEnv) (state : InterpState)
+    (h : wpPure pe Q env interpEnv state) :
+    isUBResult (((evalPexpr defaultPexprFuel env pe).run interpEnv).run state) = false :=
+  wpPureN_noUB defaultPexprFuel pe Q env interpEnv state h
+
+/-- If wpPureN holds and evaluation succeeds, postcondition holds -/
+theorem wpPureN_post (fuel : Nat) (pe : APexpr) (Q : PurePost) (env : List (HashMap Sym Value))
+    (interpEnv : InterpEnv) (state : InterpState)
+    (h : wpPureN fuel pe Q env interpEnv state)
+    (result : Value × InterpState)
+    (heval : ((evalPexpr fuel env pe).run interpEnv).run state = Except.ok result) :
+    Q result.1 result.2 := by
+  unfold wpPureN at h
+  rw [heval] at h
+  exact h
+
 /-- If wpPure holds and evaluation succeeds, postcondition holds -/
 theorem wpPure_post (pe : APexpr) (Q : PurePost) (env : List (HashMap Sym Value))
     (interpEnv : InterpEnv) (state : InterpState)
     (h : wpPure pe Q env interpEnv state)
     (result : Value × InterpState)
     (heval : ((evalPexpr defaultPexprFuel env pe).run interpEnv).run state = Except.ok result) :
-    Q result.1 state := by
-  unfold wpPure at h
-  rw [heval] at h
-  exact h
+    Q result.1 result.2 :=
+  wpPureN_post defaultPexprFuel pe Q env interpEnv state h result heval
 
 /-! ## WP Rules for Pure Expression Constructors
 
@@ -104,13 +138,23 @@ These lemmas characterize the WP for each pure expression form.
 They allow compositional reasoning.
 -/
 
+/-- WP for value literals (fuel-indexed): postcondition must hold for the literal -/
+theorem wpPureN_val (fuel : Nat) (v : Value) (Q : PurePost) (env : List (HashMap Sym Value))
+    (interpEnv : InterpEnv) (state : InterpState) :
+    wpPureN (fuel + 1) ⟨[], none, .val v⟩ Q env interpEnv state ↔ Q v state := by
+  unfold wpPureN evalPexpr
+  simp only []
+  constructor <;> intro h <;> exact h
+
 /-- WP for value literals: postcondition must hold for the literal -/
 theorem wpPure_val (v : Value) (Q : PurePost) (env : List (HashMap Sym Value))
     (interpEnv : InterpEnv) (state : InterpState) :
     wpPure ⟨[], none, .val v⟩ Q env interpEnv state ↔ Q v state := by
-  unfold wpPure evalPexpr
-  simp only []
-  constructor <;> intro h <;> exact h
+  unfold wpPure
+  -- defaultPexprFuel = 100000 = 99999 + 1
+  have h : defaultPexprFuel = 99999 + 1 := rfl
+  rw [h]
+  exact wpPureN_val 99999 v Q env interpEnv state
 
 /-! ## WP for Effectful Expressions
 
@@ -179,86 +223,217 @@ by computing specific cases. They serve as sanity checks and show how
 the WP calculus will be used in practice.
 -/
 
-/-- Example: if true then 1 else 2 is UB-free (evaluates without UB) -/
-example : wpPure ⟨[], none, .if_ (.val .true_) (.val (mkIntVal 1)) (.val (mkIntVal 2))⟩
+/-- Example: if true then 1 else 2 is UB-free (evaluates without UB)
+
+    This example verifies that `wpPureN` correctly computes for concrete
+    expressions. Uses small fuel (10) for fast reduction.
+-/
+example : wpPureN 10 ⟨[], none, .if_ (.val .true_) (.val (mkIntVal 1)) (.val (mkIntVal 2))⟩
     (fun _ _ => True) [] default default := by
-  -- The computation succeeds with .ok, so wpPure returns True
-  simp only [wpPure, evalPexpr, defaultPexprFuel, mkAPexpr]
-  -- Reduce the monad transformers and match
-  simp only [pure, bind, ReaderT.bind, StateT.bind, StateT.run, ReaderT.run]
-  trivial
+  -- Unfold and let Lean reduce the computation
+  simp only [wpPureN, evalPexpr, mkAPexpr, bind, pure,
+    ReaderT.bind, ReaderT.pure, ReaderT.run,
+    StateT.bind, StateT.pure, StateT.run,
+    Except.bind, Except.pure]
 
 /-- Example: if false then 1 else 2 is UB-free -/
-example : wpPure ⟨[], none, .if_ (.val .false_) (.val (mkIntVal 1)) (.val (mkIntVal 2))⟩
+example : wpPureN 10 ⟨[], none, .if_ (.val .false_) (.val (mkIntVal 1)) (.val (mkIntVal 2))⟩
     (fun _ _ => True) [] default default := by
-  simp only [wpPure, evalPexpr, defaultPexprFuel, mkAPexpr]
-  simp only [pure, bind, ReaderT.bind, StateT.bind, StateT.run, ReaderT.run]
-  trivial
+  simp only [wpPureN, evalPexpr, mkAPexpr, bind, pure,
+    ReaderT.bind, ReaderT.pure, ReaderT.run,
+    StateT.bind, StateT.pure, StateT.run,
+    Except.bind, Except.pure]
 
-/-! ## Compositional Rules
+/-! ## Compositional Rules (Fuel-Indexed)
 
-These rules enable modular reasoning about WP.
+These rules enable modular reasoning about WP. They are fuel-indexed
+because `evalPexpr (fuel + 1)` for compound expressions uses `evalPexpr fuel`
+for subexpressions.
 
-Note: The proofs require reasoning about how evalPexpr evaluates each
-expression form. Since evalPexpr is a large function with many cases,
-full proofs require careful unfolding and case analysis on the monad
-transformer stack. The key insight is:
+The key insight is that `evalPexpr` is structured as:
+```
+evalPexpr (fuel + 1) env pe = match pe.expr with
+  | .val v => pure v
+  | .if_ cond then_ else_ =>
+      evalPexpr fuel env cond >>= fun cv =>
+        if cv = true_ then evalPexpr fuel env then_
+        else if cv = false_ then evalPexpr fuel env else_
+        else error
+  ...
+```
 
-1. Pure expressions don't modify state (only read from it via TypeEnv)
-2. evalPexpr is total (has fuel) so we can unfold it in proofs
-3. The WP definition matches the evaluation structure
+This structure means the WP for a compound expression relates to the WP
+of its subexpressions with one less fuel.
 
-For now, these theorems are stated with sorry to establish the interface.
-The proofs can be completed once we have more experience with the monad
-transformer reasoning patterns.
+Note: The proofs below use `sorry` because the current proof approach
+(unfolding `evalPexpr` and case splitting) doesn't work well with Lean's
+definitional equality checking for large mutual recursive functions.
+
+A better approach would be to define `evalPexpr` using well-founded recursion
+in a way that enables definitional unfolding, or to prove these lemmas
+using a relational characterization of evaluation.
 -/
 
-/-- WP for conditionals: requires WP for condition, then appropriate branch.
+/-- Helper: mkAPexpr equals the struct literal -/
+theorem mkAPexpr_eq (e : Pexpr) : mkAPexpr e = ⟨[], none, e⟩ := rfl
 
-    The proof would unfold evalPexpr for if_, showing it:
-    1. Evaluates cond to get condVal
-    2. If condVal = true_, evaluates then_
-    3. If condVal = false_, evaluates else_
-    4. Otherwise throws type error (not UB)
+/-- Helper: Except.bind on error -/
+@[simp] theorem Except_bind_error {ε α β : Type} (e : ε) (f : α → Except ε β) :
+    (Except.error e >>= f) = Except.error e := rfl
 
-    NOTE: This theorem is stated but proving it requires detailed reasoning
-    about the monad transformer stack. The statement captures the intended
-    semantics; proof is deferred.
+/-- Helper: Except.bind on ok -/
+@[simp] theorem Except_bind_ok {ε α β : Type} (a : α) (f : α → Except ε β) :
+    (Except.ok a >>= f) = f a := rfl
+
+/-- Monad bind distribution for InterpM through .run.run
+
+    This lemma shows how bind distributes through running the monad transformers.
+    Key insight: (m >>= f).run env).run state decomposes based on m's result.
 -/
-theorem wpPure_if (cond then_ else_ : Pexpr) (Q : PurePost)
+theorem InterpM_bind_run {α β : Type} (m : InterpM α) (f : α → InterpM β)
+    (env : InterpEnv) (state : InterpState) :
+    ((m >>= f).run env).run state =
+    match (m.run env).run state with
+    | .ok (v, s') => ((f v).run env).run s'
+    | .error e => .error e := by
+  simp only [bind, ReaderT.bind, StateT.bind, ReaderT.run, StateT.run]
+  -- After simp, LHS is: (m env state).bind (fun (v, s') => f v env s')
+  -- RHS is: match m env state with | ok (v,s') => f v env s' | error e => error e
+  -- Split on m env state and substitute
+  split
+  · -- ok case: have heq : m env state = ok (v, s')
+    rename_i v s' heq
+    simp only [heq, Except.bind]
+  · -- error case: have heq : m env state = error e
+    rename_i e heq
+    simp only [heq, Except.bind]
+
+/-- WP for conditionals (fuel-indexed): requires WP for condition, then appropriate branch. -/
+theorem wpPureN_if (fuel : Nat) (cond then_ else_ : Pexpr) (Q : PurePost)
     (env : List (HashMap Sym Value)) (interpEnv : InterpEnv) (state : InterpState) :
-    wpPure ⟨[], none, .if_ cond then_ else_⟩ Q env interpEnv state ↔
-    wpPure ⟨[], none, cond⟩ (fun v s =>
+    wpPureN (fuel + 1) ⟨[], none, .if_ cond then_ else_⟩ Q env interpEnv state ↔
+    wpPureN fuel ⟨[], none, cond⟩ (fun v s =>
       match v with
-      | .true_ => wpPure ⟨[], none, then_⟩ Q env interpEnv s
-      | .false_ => wpPure ⟨[], none, else_⟩ Q env interpEnv s
+      | .true_ => wpPureN fuel ⟨[], none, then_⟩ Q env interpEnv s
+      | .false_ => wpPureN fuel ⟨[], none, else_⟩ Q env interpEnv s
       | _ => True  -- Type error, not UB
     ) env interpEnv state := by
-  -- The proof requires unfolding evalPexpr and reasoning about bind
-  -- Key steps:
-  -- 1. unfold wpPure, evalPexpr
-  -- 2. simplify the fuel check (defaultPexprFuel = 100000 > 0)
-  -- 3. case split on result of evaluating cond
-  -- 4. show the WP matches for each case
-  sorry
+  -- Unfold wpPureN on both sides
+  simp only [wpPureN]
+  -- Rewrite LHS using the evalPexpr equation lemma
+  rw [evalPexpr_if']
+  simp only [mkAPexpr_eq]
+  -- Use bind distribution lemma to decompose the LHS
+  rw [InterpM_bind_run]
+  -- Now both sides have: match (evalPexpr cond).run.run with | ok => ... | error => ...
+  -- Prove equivalence by case splitting
+  constructor
+  · -- Forward direction
+    intro h
+    cases hcond : ((evalPexpr fuel env ⟨[], none, cond⟩).run interpEnv).run state with
+    | error e =>
+      simp only [hcond] at h ⊢
+      cases e with
+      | undefinedBehavior _ _ => exact h
+      | _ => trivial
+    | ok p =>
+      obtain ⟨condVal, state'⟩ := p
+      simp only [hcond] at h ⊢
+      cases condVal with
+      | true_ => exact h
+      | false_ => exact h
+      | _ => trivial
+  · -- Backward direction
+    intro h
+    cases hcond : ((evalPexpr fuel env ⟨[], none, cond⟩).run interpEnv).run state with
+    | error e =>
+      simp only [hcond] at h ⊢
+      cases e with
+      | undefinedBehavior _ _ => exact h
+      | _ => trivial
+    | ok p =>
+      obtain ⟨condVal, state'⟩ := p
+      simp only [hcond] at h ⊢
+      cases condVal with
+      | true_ => exact h
+      | false_ => exact h
+      | _ => trivial
 
-/-- WP for let binding: WP of e1, then WP of e2 with bindings -/
-theorem wpPure_let (pat : APattern) (e1 e2 : Pexpr) (Q : PurePost)
+/-- WP for let binding (fuel-indexed): WP of e1, then WP of e2 with bindings. -/
+theorem wpPureN_let (fuel : Nat) (pat : APattern) (e1 e2 : Pexpr) (Q : PurePost)
     (env : List (HashMap Sym Value)) (interpEnv : InterpEnv) (state : InterpState) :
-    wpPure ⟨[], none, .let_ pat e1 e2⟩ Q env interpEnv state ↔
-    wpPure ⟨[], none, e1⟩ (fun v1 s =>
+    wpPureN (fuel + 1) ⟨[], none, .let_ pat e1 e2⟩ Q env interpEnv state ↔
+    wpPureN fuel ⟨[], none, e1⟩ (fun v1 s =>
       match matchPattern pat v1 with
-      | some bindings => wpPure ⟨[], none, e2⟩ Q (bindAllInEnv bindings env) interpEnv s
+      | some bindings => wpPureN fuel ⟨[], none, e2⟩ Q (bindAllInEnv bindings env) interpEnv s
       | none => True  -- Pattern match failure, not UB
     ) env interpEnv state := by
-  sorry
+  simp only [wpPureN]
+  rw [evalPexpr_let']
+  simp only [mkAPexpr_eq]
+  -- Use bind distribution lemma
+  rw [InterpM_bind_run]
+  -- Now both sides have the same structure
+  constructor
+  · -- Forward direction
+    intro h
+    cases he1 : ((evalPexpr fuel env ⟨[], none, e1⟩).run interpEnv).run state with
+    | error e =>
+      simp only [he1] at h ⊢
+      cases e with
+      | undefinedBehavior _ _ => exact h
+      | _ => trivial
+    | ok p =>
+      obtain ⟨v1, state'⟩ := p
+      simp only [he1] at h ⊢
+      cases hpat : matchPattern pat v1 with
+      | none =>
+        simp only [hpat] at h ⊢
+        -- h : True, goal reduces to True after throw unfolds
+      | some bindings =>
+        simp only [hpat] at h ⊢
+        exact h
+  · -- Backward direction
+    intro h
+    cases he1 : ((evalPexpr fuel env ⟨[], none, e1⟩).run interpEnv).run state with
+    | error e =>
+      simp only [he1] at h ⊢
+      cases e with
+      | undefinedBehavior _ _ => exact h
+      | _ => trivial
+    | ok p =>
+      obtain ⟨v1, state'⟩ := p
+      simp only [he1] at h ⊢
+      cases hpat : matchPattern pat v1 with
+      | none =>
+        -- Goal: match (throw patternMatchFailed).run ... with ... = True
+        -- throw e unfolds to Except.error e, which matches the non-UB error case
+        simp only [throw, throwThe, MonadExcept.throw, ReaderT.run, StateT.run]
+        trivial
+      | some bindings =>
+        simp only [hpat] at h ⊢
+        exact h
 
-/-- WP for binary operations (simplified): both operands must be UB-free -/
-theorem wpPure_binop (op : Binop) (e1 e2 : Pexpr) (Q : PurePost)
+/-- WP for binary operations (fuel-indexed): first operand must be UB-free. -/
+theorem wpPureN_binop_implies_e1 (fuel : Nat) (op : Binop) (e1 e2 : Pexpr) (Q : PurePost)
     (env : List (HashMap Sym Value)) (interpEnv : InterpEnv) (state : InterpState) :
-    wpPure ⟨[], none, .op op e1 e2⟩ Q env interpEnv state →
-    wpPure ⟨[], none, e1⟩ (fun _ _ => True) env interpEnv state ∧
-    wpPure ⟨[], none, e2⟩ (fun _ _ => True) env interpEnv state := by
-  sorry
+    wpPureN (fuel + 1) ⟨[], none, .op op e1 e2⟩ Q env interpEnv state →
+    wpPureN fuel ⟨[], none, e1⟩ (fun _ _ => True) env interpEnv state := by
+  intro h
+  simp only [wpPureN] at h ⊢
+  rw [evalPexpr_op'] at h
+  simp only [mkAPexpr_eq] at h
+  -- Use bind distribution lemma to decompose LHS
+  rw [InterpM_bind_run] at h
+  cases he1 : ((evalPexpr fuel env ⟨[], none, e1⟩).run interpEnv).run state with
+  | error e =>
+    -- e1 failed - h has this error result
+    simp only [he1] at h ⊢
+    cases e with
+    | undefinedBehavior _ _ => exact h
+    | _ => trivial
+  | ok p =>
+    -- e1 succeeded - goal is True
+    trivial
 
 end CToLean.Theorems.WP

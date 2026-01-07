@@ -1083,4 +1083,46 @@ def evalPexprStructMembers (fuel : Nat) (env : List (HashMap Sym Value))
   termination_by fuel
 end
 
+/-! ## Evaluation Equation Lemmas
+
+These lemmas characterize how `evalPexpr` behaves for specific expression
+constructors. They are proven by unfolding the definition and using
+the fact that `fuel + 1` matches the successor pattern.
+-/
+
+/-- evalPexpr for value literals returns the value -/
+theorem evalPexpr_val' (fuel : Nat) (env : List (HashMap Sym Value)) (v : Value) :
+    evalPexpr (fuel + 1) env ⟨[], none, .val v⟩ = pure v := by
+  simp only [evalPexpr]
+
+/-- evalPexpr for if expressions evaluates condition then branches -/
+theorem evalPexpr_if' (fuel : Nat) (env : List (HashMap Sym Value))
+    (cond then_ else_ : Pexpr) :
+    evalPexpr (fuel + 1) env ⟨[], none, .if_ cond then_ else_⟩ =
+    (evalPexpr fuel env (mkAPexpr cond) >>= fun condVal =>
+      match condVal with
+      | .true_ => evalPexpr fuel env (mkAPexpr then_)
+      | .false_ => evalPexpr fuel env (mkAPexpr else_)
+      | _ => InterpM.throwTypeError "if condition must be boolean") := by
+  simp only [evalPexpr]
+
+/-- evalPexpr for let bindings evaluates e1 then e2 with bindings -/
+theorem evalPexpr_let' (fuel : Nat) (env : List (HashMap Sym Value))
+    (pat : APattern) (e1 e2 : Pexpr) :
+    evalPexpr (fuel + 1) env ⟨[], none, .let_ pat e1 e2⟩ =
+    (evalPexpr fuel env (mkAPexpr e1) >>= fun v1 =>
+      match matchPattern pat v1 with
+      | some bindings => evalPexpr fuel (bindAllInEnv bindings env) (mkAPexpr e2)
+      | none => throw .patternMatchFailed) := by
+  simp only [evalPexpr]
+
+/-- evalPexpr for binary operations evaluates both operands then applies op -/
+theorem evalPexpr_op' (fuel : Nat) (env : List (HashMap Sym Value))
+    (binop : Binop) (e1 e2 : Pexpr) :
+    evalPexpr (fuel + 1) env ⟨[], none, .op binop e1 e2⟩ =
+    (evalPexpr fuel env (mkAPexpr e1) >>= fun v1 =>
+      evalPexpr fuel env (mkAPexpr e2) >>= fun v2 =>
+        evalBinop binop v1 v2) := by
+  simp only [evalPexpr]
+
 end CToLean.Semantics
