@@ -1,6 +1,6 @@
 # Full Test Suite Results
 
-**Date:** 2026-01-02
+**Date:** 2026-01-02 (Updated: 2026-01-06)
 **Test Suite:** cerberus/tests (excluding bmc/, cheri-ci/, pnvi_testsuite/)
 
 ## Summary
@@ -14,36 +14,26 @@
 | Lean failed | 828 |
 | **Match rate** | **95%** (616/648) |
 
-## Mismatches to Investigate
+## Update 2026-01-06
 
-### False Positive UB (14 tests)
+Many of the false positive UB cases have been fixed by recent interpreter improvements:
+- Unspecified memory initialization fix
+- Floating point binary operations
+- Pattern matching for Unspecified values
 
-Lean detects UB but Cerberus returns a value. These need investigation.
+### Re-tested False Positive UB Cases
 
-| Test | Lean UB | Cerberus |
-|------|---------|----------|
-| 20000910-1 | UB043_indirection_invalid_value | 0 |
-| 20020402-3 | UB043_indirection_invalid_value | 0 |
-| 20021118-1 | UB036_exceptional_condition | 0 |
-| 20030914-1 | UB036_exceptional_condition | 0 |
-| 20050826-2 | UB036_exceptional_condition | 0 |
-| 20060412-1 | UB_CERB002a_out_of_bound_load | 0 |
-| 20080604-1 | UB_CERB002a_out_of_bound_load | 0 |
-| 941014-1 | UB_internal_type_error | 0 |
-| 950607-2 | UB036_exceptional_condition | 0 |
-| 961223-1 | UB036_exceptional_condition | 0 |
-| pr36339 | UB025_misaligned_pointer_conversion | 0 |
-| pr38212 | UB043_indirection_invalid_value | 0 |
-| pr52129 | UB_CERB004_unspecified__equality_both_arith_or_ptr | 0 |
-| pr55875 | UB043_indirection_invalid_value | 0 |
+Of the 14 originally reported false positives, **12 now pass**:
+- ✅ 20000910-1, 20020402-3, 20021118-1, 20030914-1, 20050826-2
+- ✅ 20060412-1, 20080604-1, 950607-2, 961223-1
+- ✅ pr36339, pr38212, pr52129
 
-**By UB category:**
-- `UB043_indirection_invalid_value` (4 tests) - Invalid pointer dereference
-- `UB036_exceptional_condition` (5 tests) - Arithmetic exception
-- `UB_CERB002a_out_of_bound_load` (2 tests) - Out of bounds access
-- `UB025_misaligned_pointer_conversion` (1 test) - Alignment issue
-- `UB_CERB004_unspecified__equality` (1 test) - Pointer comparison
-- `UB_internal_type_error` (1 test) - Internal type mismatch
+**Still failing (2 tests):**
+
+| Test | Lean UB | Cerberus | Notes |
+|------|---------|----------|-------|
+| 941014-1 | UB_internal_type_error | 0 | Internal type mismatch |
+| pr55875 | UB043_indirection_invalid_value | 0 | Invalid pointer deref |
 
 ### False Negative UB (1 test)
 
@@ -51,13 +41,14 @@ Lean detects UB but Cerberus returns a value. These need investigation.
 |------|------|-------------|
 | function_vs_var | 4096 | UB024_out_of_range_pointer_to_integer_conversion |
 
-### Other Semantic Differences (3 tests)
+### Other Semantic Differences (2 tests)
 
-| Test | Lean | Cerberus |
-|------|------|----------|
-| 0046-jump_inside_lifetime | 0 | UNSPECIFIED |
-| b | 110 | 220 |
-| treiber | UB_CERB004_unspecified__equality_ptr_vs_NULL | 0 |
+| Test | Lean | Cerberus | Notes |
+|------|------|----------|-------|
+| b | 110 | 220 | Memory model difference |
+| treiber | FAIL (impl proc) | 0 | Uses unimplemented impl function |
+
+**Note:** 0046-jump_inside_lifetime now passes (fixed by unspecified memory init)
 
 ### Unsequenced Race (12 tests) - Out of Scope
 
