@@ -765,14 +765,24 @@ def ptrfromintImpl (_fromTy : IntegerType) (toTy : Ctype) (n : IntegerValue) : C
     pure { prov := n.prov, base := .concrete none n.val.toNat }
 
 /-- Pointer to integer conversion.
-    Corresponds to: intfromptr in impl_mem.ml
-    Audited: 2026-01-01
+    Corresponds to: intfromptr in impl_mem.ml:2249-2272
+    Audited: 2026-01-06
     Deviations: None -/
 def intfromPtrImpl (_fromTy : Ctype) (_toTy : IntegerType) (ptr : PointerValue) : ConcreteMemM IntegerValue := do
   match ptr.base with
-  | .null _ => pure (integerIvalWithProv 0 ptr.prov)
-  | .function _ => throw (.typeError "cannot convert function pointer to integer")
-  | .concrete _ addr => pure (integerIvalWithProv addr ptr.prov)
+  | .null _ =>
+    -- Corresponds to: impl_mem.ml:2252-2253
+    --   PVnull _ -> return (mk_ival prov Nat_big_num.zero)
+    pure (integerIvalWithProv 0 ptr.prov)
+  | .function sym =>
+    -- Corresponds to: impl_mem.ml:2254-2255
+    --   PVfunction (Symbol.Symbol (_, n, _)) -> return (mk_ival prov (Nat_big_num.of_int n))
+    -- Convert function symbol ID to integer
+    pure (integerIvalWithProv sym.id ptr.prov)
+  | .concrete _ addr =>
+    -- Corresponds to: impl_mem.ml:2256-2272
+    -- TODO: Add range check for _toTy (MerrIntFromPtr if out of range)
+    pure (integerIvalWithProv addr ptr.prov)
 
 /-- Check pointer validity for dereference.
     Corresponds to: validForDeref_ptrval in impl_mem.ml
