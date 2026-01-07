@@ -135,11 +135,6 @@ for c_file in $TEST_FILES; do
     filename=$(basename "$c_file" .c)
     file_num=$((file_num + 1))
 
-    # Show progress
-    if ! $VERBOSE; then
-        printf "\r[%d/%d] %s...                    " "$file_num" "$total_to_test" "$filename"
-    fi
-
     # Run Cerberus in batch mode to get return value (not shell exit code)
     cerberus_shell_exit=0
     cerberus_output=$(timeout ${TIMEOUT_SECS}s $CERBERUS --exec --batch "$c_file" 2>&1) || cerberus_shell_exit=$?
@@ -147,9 +142,7 @@ for c_file in $TEST_FILES; do
     # Check for timeout
     if [[ $cerberus_shell_exit -eq 124 ]]; then
         ((CERBERUS_FAIL++))
-        if $VERBOSE; then
-            echo "SKIP $filename (Cerberus timeout)"
-        fi
+        echo "[$file_num/$total_to_test] CERB_SKIP $filename (Cerberus timeout)"
         continue
     fi
     cerberus_has_ub=false
@@ -162,9 +155,7 @@ for c_file in $TEST_FILES; do
     if [[ $cerberus_shell_exit -eq 139 ]] || [[ $cerberus_shell_exit -eq 134 ]] || [[ $cerberus_shell_exit -eq 137 ]]; then
         # Cerberus crashed (SIGSEGV, SIGABRT, etc.) - skip
         ((CERBERUS_FAIL++))
-        if $VERBOSE; then
-            echo "SKIP $filename (Cerberus crashed with $cerberus_shell_exit)"
-        fi
+        echo "[$file_num/$total_to_test] CERB_SKIP $filename (Cerberus crashed: $cerberus_shell_exit)"
         continue
     fi
 
@@ -183,24 +174,18 @@ for c_file in $TEST_FILES; do
     elif echo "$cerberus_output" | grep -q '^Error {'; then
         # Cerberus reported an error (ill-formed program, unsupported feature, etc.)
         ((CERBERUS_FAIL++))
-        if $VERBOSE; then
-            error_msg=$(echo "$cerberus_output" | grep -o 'msg: "[^"]*"' | head -1 | sed 's/msg: "\([^"]*\)"/\1/')
-            echo "SKIP $filename (Cerberus error: $error_msg)"
-        fi
+        error_msg=$(echo "$cerberus_output" | grep -o 'msg: "[^"]*"' | head -1 | sed 's/msg: "\([^"]*\)"/\1/')
+        echo "[$file_num/$total_to_test] CERB_SKIP $filename (error: $error_msg)"
         continue
     elif [[ $cerberus_shell_exit -ne 0 ]]; then
         # Cerberus exited with error (constraint violation, etc.)
         ((CERBERUS_FAIL++))
-        if $VERBOSE; then
-            echo "SKIP $filename (Cerberus exit $cerberus_shell_exit)"
-        fi
+        echo "[$file_num/$total_to_test] CERB_SKIP $filename (exit $cerberus_shell_exit)"
         continue
     else
         # Could not extract return value - skip
         ((CERBERUS_FAIL++))
-        if $VERBOSE; then
-            echo "SKIP $filename (could not extract Cerberus return value)"
-        fi
+        echo "[$file_num/$total_to_test] CERB_SKIP $filename (could not extract return value)"
         continue
     fi
     ((CERBERUS_OK++))
@@ -208,9 +193,10 @@ for c_file in $TEST_FILES; do
     # Generate JSON for Lean
     json_file="$OUTPUT_DIR/$filename.json"
     if ! eval $CERBERUS --json_core_out="$json_file" "$c_file" >/dev/null 2>&1; then
-        if $VERBOSE; then
-            echo "SKIP $filename (JSON generation failed)"
-        fi
+        # JSON generation failed after Cerberus execution succeeded
+        # This is a Cerberus inconsistency (--exec is more lenient than --json_core_out)
+        ((CERBERUS_FAIL++))
+        echo "[$file_num/$total_to_test] CERB_INCONSISTENT $filename: exec succeeded but JSON failed"
         continue
     fi
 
@@ -221,12 +207,7 @@ for c_file in $TEST_FILES; do
     # Check for timeout (exit code 124)
     if [[ $lean_exit -eq 124 ]]; then
         ((LEAN_TIMEOUT_COUNT++))
-        if $VERBOSE; then
-            echo "TIMEOUT $filename (Lean >${TIMEOUT_SECS}s)"
-        else
-            echo ""
-            echo "TIMEOUT $filename (Lean >${TIMEOUT_SECS}s)"
-        fi
+        echo "[$file_num/$total_to_test] TIMEOUT $filename (Lean >${TIMEOUT_SECS}s)"
         continue
     fi
 
@@ -251,18 +232,12 @@ for c_file in $TEST_FILES; do
         error_msg=$(echo "$lean_output" | grep -o 'msg: "[^"]*"' | sed 's/msg: "\([^"]*\)"/\1/')
         lean_ret="ERROR"
         ((LEAN_FAIL++))
-        if ! $VERBOSE; then
-            echo ""
-        fi
-        echo "FAIL $filename: $error_msg"
+        echo "[$file_num/$total_to_test] FAIL $filename: $error_msg"
         continue
     else
         # Unexpected output format
         ((LEAN_FAIL++))
-        if ! $VERBOSE; then
-            echo ""
-        fi
-        echo "FAIL $filename: unexpected output: $lean_output"
+        echo "[$file_num/$total_to_test] FAIL $filename: unexpected output: $lean_output"
         continue
     fi
 
@@ -271,15 +246,11 @@ for c_file in $TEST_FILES; do
         ((LEAN_OK++))
         if [[ "$lean_ub_code" == "$cerberus_ub_code" ]]; then
             ((UB_MATCH++))
-            if $VERBOSE; then
-                echo "UB   $filename: $lean_ub_code"
-            fi
+            echo "[$file_num/$total_to_test] UB_MATCH $filename: $lean_ub_code"
         else
             # Both detected UB but with different codes - note but count as success
             ((UB_CODE_DIFF++))
-            if $VERBOSE; then
-                echo "UB~  $filename: Lean=$lean_ub_code Cerberus=$cerberus_ub_code"
-            fi
+            echo "[$file_num/$total_to_test] UB_DIFF $filename: Lean=$lean_ub_code Cerberus=$cerberus_ub_code"
         fi
         continue
     fi
@@ -288,13 +259,10 @@ for c_file in $TEST_FILES; do
     if $lean_has_ub || $cerberus_has_ub; then
         ((LEAN_OK++))
         ((MISMATCH++))
-        if ! $VERBOSE; then
-            echo ""
-        fi
         if $lean_has_ub; then
-            echo "DIFF $filename: Lean=UB($lean_ub_code) Cerberus=$cerberus_ret"
+            echo "[$file_num/$total_to_test] DIFF $filename: Lean=UB($lean_ub_code) Cerberus=$cerberus_ret"
         else
-            echo "DIFF $filename: Lean=$lean_ret Cerberus=UB($cerberus_ub_code)"
+            echo "[$file_num/$total_to_test] DIFF $filename: Lean=$lean_ret Cerberus=UB($cerberus_ub_code)"
         fi
         continue
     fi
@@ -304,22 +272,12 @@ for c_file in $TEST_FILES; do
     # Compare results
     if [[ "$lean_ret" == "$cerberus_ret" ]]; then
         ((MATCH++))
-        if $VERBOSE; then
-            echo "OK   $filename: $lean_ret"
-        fi
+        echo "[$file_num/$total_to_test] MATCH $filename: $lean_ret"
     else
         ((MISMATCH++))
-        if ! $VERBOSE; then
-            echo ""
-        fi
-        echo "DIFF $filename: Lean=$lean_ret Cerberus=$cerberus_ret"
+        echo "[$file_num/$total_to_test] MISMATCH $filename: Lean=$lean_ret Cerberus=$cerberus_ret"
     fi
 done
-
-# Clear progress line
-if ! $VERBOSE; then
-    printf "\r                                                            \r"
-fi
 
 echo ""
 echo "================================="

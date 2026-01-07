@@ -1,10 +1,16 @@
 #!/bin/bash
-# Fuzz testing with csmith - generates random tests and finds mismatches
+# Fuzz testing with csmith - generates random tests and finds bugs
 #
 # Usage: ./scripts/fuzz_csmith.sh [num_tests] [output_dir]
 #
 # Generates random csmith tests, runs them through test_interp.sh,
-# and saves any mismatches for investigation.
+# and saves any bugs for investigation.
+#
+# Output categories (all differences are BUGS):
+#   FAIL     = Lean interpreter error (BUG)
+#   MISMATCH = Different concrete values (BUG)
+#   DIFF     = One returned UB, other didn't (BUG)
+#   TIMEOUT  = Lean took too long (may need more fuel)
 
 set -e
 
@@ -13,10 +19,17 @@ OUTPUT_DIR="${2:-tests/csmith/fuzz_results}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
-# Ensure output directory exists
+# Ensure output directories exist
 mkdir -p "$OUTPUT_DIR"
+mkdir -p "$OUTPUT_DIR/bugs"      # FAIL, MISMATCH, DIFF - any difference is a BUG
+mkdir -p "$OUTPUT_DIR/timeouts"  # TIMEOUT cases (may need more fuel)
+
 TEMP_DIR=$(mktemp -d)
-trap "rm -rf $TEMP_DIR" EXIT
+# Don't auto-cleanup - we need to save interesting cases
+cleanup() {
+    # Only cleanup temp dir after we've saved interesting cases
+    rm -rf "$TEMP_DIR"
+}
 
 # Check dependencies
 if ! command -v csmith &> /dev/null; then
@@ -55,19 +68,52 @@ echo ""
 echo "Running interpreter comparison..."
 "$SCRIPT_DIR/test_interp.sh" "$TEMP_DIR" 2>&1 | tee "$OUTPUT_DIR/fuzz_log.txt"
 
-# Extract and save any failures or interesting differences
+# Extract and save interesting cases
 echo ""
 echo "Checking for failures and mismatches..."
-# FAIL = interpreter error, MISMATCH = different concrete values, DIFF = semantic difference (e.g., Unspecified)
-grep -E "^(FAIL|MISMATCH|DIFF)" "$OUTPUT_DIR/fuzz_log.txt" 2>/dev/null | while read line; do
-    # Extract filename from the failure line
-    testname=$(echo "$line" | awk '{print $2}' | sed 's/://')
-    if [ -f "$TEMP_DIR/${testname}.c" ]; then
-        cp "$TEMP_DIR/${testname}.c" "$OUTPUT_DIR/"
-        echo "Saved: $OUTPUT_DIR/${testname}.c"
+
+# Count saved cases
+BUGS_SAVED=0
+TIMEOUTS_SAVED=0
+
+# Process each line from the log
+# Format: [N/M] STATUS filename: details
+while IFS= read -r line; do
+    # Extract testname from format: [N/M] STATUS testname: details
+    if [[ "$line" =~ \[.*\]\ (FAIL|MISMATCH|DIFF)\ ([^:]+) ]]; then
+        # FAIL, MISMATCH, or DIFF = BUG (any difference from Cerberus is a bug)
+        testname="${BASH_REMATCH[2]}"
+        if [ -f "$TEMP_DIR/${testname}.c" ]; then
+            cp "$TEMP_DIR/${testname}.c" "$OUTPUT_DIR/bugs/"
+            echo "BUG FOUND: $OUTPUT_DIR/bugs/${testname}.c"
+            echo "  $line"
+            ((BUGS_SAVED++))
+        fi
+    elif [[ "$line" =~ \[.*\]\ TIMEOUT\ ([^\ ]+) ]]; then
+        # TIMEOUT
+        testname="${BASH_REMATCH[1]}"
+        if [ -f "$TEMP_DIR/${testname}.c" ]; then
+            cp "$TEMP_DIR/${testname}.c" "$OUTPUT_DIR/timeouts/"
+            echo "Timeout: $OUTPUT_DIR/timeouts/${testname}.c"
+            ((TIMEOUTS_SAVED++))
+        fi
     fi
-done
+done < "$OUTPUT_DIR/fuzz_log.txt"
+
+# Cleanup temp directory now that we've saved everything
+cleanup
 
 echo ""
-echo "Results saved to: $OUTPUT_DIR/"
+echo "================================="
+echo "Saved Cases Summary"
+echo "================================="
+echo "  Bugs (FAIL/MISMATCH/DIFF): $BUGS_SAVED  -> $OUTPUT_DIR/bugs/"
+echo "  Timeouts:                  $TIMEOUTS_SAVED  -> $OUTPUT_DIR/timeouts/"
+echo ""
 echo "Log file: $OUTPUT_DIR/fuzz_log.txt"
+
+if [ $BUGS_SAVED -gt 0 ]; then
+    echo ""
+    echo "*** BUGS FOUND! Check $OUTPUT_DIR/bugs/ ***"
+    exit 1
+fi
