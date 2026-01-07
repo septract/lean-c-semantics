@@ -156,7 +156,7 @@ To support `builtin_printf` and other I/O functions, we need:
 **Affected tests:** treiber + 13 other tests that use printf
 **Cerberus files:** `driver.lem`, `formatted.lem`, `core_run.lem:1062-1098`
 
-### Phase 6: UB-Freeness Theorems (In Progress)
+### Phase 6: UB-Freeness Theorems - Phase 1 Complete ✓
 
 **Completed (2026-01-06):**
 - [x] Define `UBFree` predicate (`CToLean/Theorems/UBFree.lean`)
@@ -164,15 +164,23 @@ To support `builtin_printf` and other I/O functions, we need:
 - [x] Define `SafeResult` type for classifying execution outcomes
 - [x] Define memory safety predicates (`ValidPointer`, `ValidInitializedPointer`)
 - [x] Define arithmetic safety predicates (`SafeDiv`, `SafeShift`, `inRangeForType`)
-- [x] Prove basic theorems (`UBFree_pure`, `UBFreeIn_safe_result`, etc.)
+- [x] Prove basic theorems (`UBFree_pure`, `UBFree_bind`, `UBFreeIn_safe_result`, etc.)
 - [x] Add decidability instances for automation
+- [x] **Remove all `partial` from interpreter** - enables unfolding in proofs!
+- [x] **Prove `UBFree_bind`** - compositional reasoning enabled
 
-**In Progress:**
-- [ ] Complete `UBFree_bind` theorem (currently uses `sorry`)
-- [ ] Define Weakest Precondition (WP) calculus
-- [ ] Integrate lean-smt for automated proof discharge
+### Phase 7: Weakest Precondition (WP) Calculus (Next)
 
-**Future:**
+**Tasks:**
+- [ ] Define `wp` transformer for expressions
+- [ ] Prove soundness: `wp e Q s → NoUB e ∧ (∀ v s', run e s = .ok (v, s') → Q v s')`
+- [ ] Prove compositional rules (seq, if, let, call)
+- [ ] Handle loops with explicit invariant parameter
+- [ ] Add lemmas for `evalPexpr` cases (what each constructor does)
+- [ ] Add lemmas for `evalBinop` safety (e.g., `evalBinop_add_safe`)
+
+**Future Phases:**
+- [ ] SMT integration (lean-smt) for automated proof discharge
 - [ ] Function specifications (pre/postconditions)
 - [ ] Memory ownership tracking (lightweight separation logic)
 - [ ] Example verified programs (abs, max, min)
