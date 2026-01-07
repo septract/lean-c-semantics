@@ -228,13 +228,16 @@ The script:
 1. Generates random csmith tests with `--no-argc --no-bitfields`
 2. Replaces csmith.h with our `csmith_cerberus.h` (uses exit() instead of printf)
 3. Runs `test_interp.sh` on all generated tests
-4. Saves any failures/mismatches to `tests/csmith/fuzz_results/`
+4. Saves bugs to `bugs/` subdirectory, timeouts to `timeouts/`
 
 Output categories in `fuzz_log.txt`:
-- **MATCH**: Both interpreters return the same value
-- **FAIL**: Interpreter error (e.g., fuel exhausted, not implemented)
-- **DIFF**: Semantic difference (e.g., Cerberus returns Unspecified, we return concrete)
-- **MISMATCH**: Different concrete values (potential bug!)
+- **MATCH**: Both interpreters return the same value (good!)
+- **FAIL**: **BUG** - Lean interpreter error when Cerberus succeeded
+- **MISMATCH**: **BUG** - Different concrete values between interpreters
+- **DIFF**: **BUG** - One detected UB, the other didn't
+- **TIMEOUT**: Lean took too long (may need more fuel)
+
+**IMPORTANT**: Any difference from Cerberus (FAIL, MISMATCH, DIFF) is a BUG! The script exits with code 1 if any bugs are found.
 
 Generate a single csmith test for debugging:
 ```bash
@@ -245,7 +248,7 @@ Generate a single csmith test for debugging:
 **Known csmith limitations**:
 - Many csmith tests fail Cerberus compilation due to pointer type strictness
 - Tests using unions may show DIFF (Unspecified vs concrete) - we don't track active union member
-- Large tests may exhaust interpreter fuel (not a semantic bug)
+- Large tests may exhaust interpreter fuel (TIMEOUT, not necessarily a bug)
 
 ### Differential Testing
 Compare Lean interpreter output against Cerberus:
