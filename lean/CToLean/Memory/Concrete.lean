@@ -403,6 +403,8 @@ partial def reconstructValue (env : TypeEnv) (ty : Ctype) (bytes : List AbsByte)
       pure (.unspecified ty)
 
   | .array elemTy (some n) =>
+    -- Corresponds to: abst in impl_mem.ml:986-994 (Array case)
+    -- Audited: 2026-01-06
     let elemCty : Ctype := { ty := elemTy }
     let elemSize := sizeof env elemCty
     let elems ← List.range n |>.mapM fun i => do
@@ -412,21 +414,94 @@ partial def reconstructValue (env : TypeEnv) (ty : Ctype) (bytes : List AbsByte)
     pure (.array elems)
 
   | .array _ none =>
-    panic! "reconstructValue: flexible array member (incomplete array type)"
+    throw (.typeError "reconstructValue: flexible array member (incomplete array type)")
   | .void =>
-    panic! "reconstructValue: void type"
+    throw (.typeError "reconstructValue: void type cannot be loaded")
   | .function .. =>
-    panic! "reconstructValue: function type"
+    throw (.typeError "reconstructValue: function type cannot be loaded")
   | .functionNoParams .. =>
-    panic! "reconstructValue: function type (no params)"
+    throw (.typeError "reconstructValue: function type cannot be loaded")
   | .struct_ tag =>
-    panic! s!"reconstructValue: struct reconstruction not implemented for {tag.name}"
+    -- Reconstruct struct by extracting and reconstructing each member
+    -- Corresponds to: abst in impl_mem.ml:1062-1072 (Struct case)
+    -- Algorithm:
+    --   1. Split bytes at sizeof(struct) to get bs1 (struct bytes) and bs2 (remaining)
+    --   2. Fold over offsetsof results: (memb_ident, memb_ty, memb_offset)
+    --   3. For each member: compute pad = memb_offset - previous_offset
+    --   4. Drop pad bytes, recursively reconstruct member
+    --   5. Track previous_offset = memb_offset + sizeof(memb_ty)
+    --   6. Return MVstruct with members list
+    -- Audited: 2026-01-06
+    match env.lookupTag tag with
+    | some (.struct_ fields _) =>
+      let structSize := structSize env fields
+      let structBytes := bytes.take structSize
+      let memberInfo := structMemberInfo env fields
+      -- Fold over members, tracking previous offset like Cerberus
+      let (_, revMembers) ← memberInfo.foldlM (init := (0, [])) fun (prevOffset, acc) (membIdent, membTy, membOffset) => do
+        -- Corresponds to: let pad = N.to_int (N.sub memb_offset previous_offset) in
+        let _pad := membOffset - prevOffset
+        -- Corresponds to: let (taint, mval, acc_bs') = self ~offset:pad memb_ty (L.drop pad acc_bs) in
+        let membSize := sizeof env membTy
+        let membBytes := structBytes.drop membOffset |>.take membSize
+        let membVal ← reconstructValue env membTy membBytes
+        -- Corresponds to: N.add memb_offset (sizeof memb_ty)
+        let newPrevOffset := membOffset + sizeof env membTy
+        pure (newPrevOffset, (membIdent, membTy, membVal) :: acc)
+      -- Corresponds to: MVstruct (tag_sym, List.rev rev_xs)
+      pure (.struct_ tag revMembers.reverse)
+    | some (.union_ _) =>
+      throw (.typeError s!"struct reconstruction: expected struct but found union for tag {tag.name}")
+    | none =>
+      throw (.typeError s!"struct reconstruction: undefined tag {tag.name}")
+
   | .union_ tag =>
-    panic! s!"reconstructValue: union reconstruction not implemented for {tag.name}"
-  | .atomic _ =>
-    panic! "reconstructValue: atomic type reconstruction not implemented"
+    -- Reconstruct union - use first member's type for reconstruction
+    -- Corresponds to: abst in impl_mem.ml:1073-1093 (Union case)
+    -- Algorithm:
+    --   1. Split bytes at sizeof(union) to get bs1, bs2
+    --   2. Look up union member from unionmap (we don't track this, so use first member)
+    --   3. Recursively reconstruct the member
+    --   4. Return MVunion (tag_sym, membr_ident, mval)
+    -- Note: Cerberus uses `last_used_union_members` map to track which member was stored.
+    --       We don't track this, so we always use the first member (matches line 1083).
+    -- Audited: 2026-01-06
+    match env.lookupTag tag with
+    | some (.union_ fields) =>
+      match fields.head? with
+      | some field =>
+        -- Corresponds to: let (taint, mval, _ ) = self membr_ty bs1 in
+        let memberVal ← reconstructValue env field.ty bytes
+        -- Corresponds to: MVunion (tag_sym, membr_ident, mval)
+        pure (.union_ tag field.name memberVal)
+      | none =>
+        throw (.typeError s!"union reconstruction: empty union {tag.name}")
+    | some (.struct_ _ _) =>
+      throw (.typeError s!"union reconstruction: expected union but found struct for tag {tag.name}")
+    | none =>
+      throw (.typeError s!"union reconstruction: undefined tag {tag.name}")
+
+  | .atomic innerTy =>
+    -- For atomic types, reconstruct the underlying type
+    -- Corresponds to: abst in impl_mem.ml:1059-1061 (Atomic case)
+    -- Cerberus: self atom_ty bs (just recurse on the inner type)
+    -- Audited: 2026-01-06
+    let innerCty : Ctype := { ty := innerTy }
+    reconstructValue env innerCty bytes
+
   | .byte =>
-    panic! "reconstructValue: byte type"
+    -- Byte type (std::byte in C++) is treated like unsigned char
+    -- Corresponds to: abst in impl_mem.ml:961-973 (Byte case)
+    -- Cerberus: MVinteger (Char, mk_ival prov (int_of_bytes false cs))
+    -- Audited: 2026-01-06
+    let (bs1, _) := bytes.splitAt 1
+    match bytesToInt bs1 false with
+    | some n =>
+      let prov := bytesProvenance bs1
+      -- Cerberus uses Char (which is char type), we use unsigned ichar
+      pure (.integer .char { val := n, prov := prov })
+    | none =>
+      pure (.unspecified ty)
 
 /-- Load value from memory.
     Corresponds to: load in impl_mem.ml:1552-1603

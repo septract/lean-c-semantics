@@ -315,8 +315,8 @@ Corresponds to: offsetsof in impl_mem.ml
 -/
 
 /-- Compute member offsets for a struct.
-    Corresponds to: offsetsof in impl_mem.ml
-    Audited: 2026-01-01
+    Corresponds to: offsetsof in impl_mem.ml:98-127
+    Audited: 2026-01-06
     Deviations: Returns list instead of (list, last_offset) -/
 def structOffsets (env : TypeEnv) (members : List FieldDef) : List (Identifier × Nat) :=
   let (_, offsets) := members.foldl (init := (0, [])) fun (offset, acc) m =>
@@ -325,6 +325,19 @@ def structOffsets (env : TypeEnv) (members : List FieldDef) : List (Identifier �
     let newOffset := alignedOffset + sizeof env m.ty
     (newOffset, acc ++ [(m.name, alignedOffset)])
   offsets
+
+/-- Compute member info (name, type, offset) for a struct.
+    Corresponds to: offsetsof in impl_mem.ml:98-127
+    Returns: [(memb_ident, memb_ty, memb_offset)] matching Cerberus exactly.
+    Audited: 2026-01-06
+    Deviations: None -/
+def structMemberInfo (env : TypeEnv) (members : List FieldDef) : List (Identifier × Ctype × Nat) :=
+  let (_, info) := members.foldl (init := (0, [])) fun (offset, acc) m =>
+    let memberAlign := alignof env m.ty
+    let alignedOffset := alignUp offset memberAlign
+    let newOffset := alignedOffset + sizeof env m.ty
+    (newOffset, acc ++ [(m.name, m.ty, alignedOffset)])
+  info
 
 /-- Get member offset from tag definition.
     Corresponds to: offsetof_ival in impl_mem.ml

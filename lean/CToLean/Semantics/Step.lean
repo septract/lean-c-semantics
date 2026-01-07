@@ -104,78 +104,10 @@ def mkValueExpr (annots : Annots) (v : Value) : AExpr :=
 
 /-! ## Value Conversion Helpers
 
-Corresponds to: memValueFromValue and valueFromMemValue in core_aux.lem:114-200
-These convert between Core Values and Memory MemValues for load/store operations.
+See Eval.lean for memValueFromValue and valueFromMemValue.
+These are defined there because they're needed for struct/union construction
+during pure expression evaluation (matching core_aux.lem:114-200).
 -/
-
-/-- Strip atomic qualifier from a Ctype_.
-    Corresponds to: unatomic_ in ctype.lem -/
-def unatomic_ : Ctype_ → Ctype_
-  | .atomic ty => unatomic_ ty
-  | ty => ty
-
-/-- Convert a Core Value to a MemValue for storing to memory.
-    Corresponds to: memValueFromValue in core_aux.lem:137-200
-    Audited: 2026-01-01
-    Deviations: Simplified - doesn't handle all cases -/
-partial def memValueFromValue (ty : Ctype) (v : Value) : Option MemValue :=
-  let ty' := unatomic_ ty.ty
-  match ty', v with
-  | _, .unit => none
-  | _, .true_ => none
-  | _, .false_ => none
-  | _, .list _ _ => none
-  | _, .tuple _ => none
-  | _, .ctype _ => none
-  | _, .loaded (.unspecified ty'') => some (.unspecified ty'')
-  | .basic (.integer ity), .object (.integer iv) => some (.integer ity iv)
-  | .basic (.integer ity), .loaded (.specified (.integer iv)) => some (.integer ity iv)
-  | .byte, .object (.integer iv) => some (.integer (.unsigned .ichar) iv)
-  | .byte, .loaded (.specified (.integer iv)) => some (.integer (.unsigned .ichar) iv)
-  | .basic (.floating fty), .object (.floating fv) => some (.floating fty fv)
-  | .basic (.floating fty), .loaded (.specified (.floating fv)) => some (.floating fty fv)
-  | .pointer _ refTy, .object (.pointer pv) =>
-    some (.pointer { annots := [], ty := refTy } pv)
-  | .pointer _ refTy, .loaded (.specified (.pointer pv)) =>
-    some (.pointer { annots := [], ty := refTy } pv)
-  | .array elemTy _, .loaded (.specified (.array lvs)) =>
-    let elemCty : Ctype := { annots := [], ty := elemTy }
-    let mvalsOpt := lvs.mapM fun lv =>
-      memValueFromValue elemCty (.loaded lv)
-    mvalsOpt.map MemValue.array
-  | .struct_ tag, .loaded (.specified (.struct_ tag' members)) =>
-    if tag == tag' then
-      -- Convert StructMember list to (Identifier × Ctype × MemValue) list
-      let memberList := members.map fun m => (m.name, m.ty, m.value)
-      some (.struct_ tag memberList)
-    else none
-  | .union_ tag, .loaded (.specified (.union_ tag' ident mv)) =>
-    if tag == tag' then some (.union_ tag ident mv) else none
-  | _, _ => none
-
-/-- Convert a MemValue to a Core Value after loading from memory.
-    Corresponds to: valueFromMemValue in core_aux.lem:114-135
-    Audited: 2026-01-01
-    Deviations: Returns just the value (not the object type) -/
-def valueFromMemValue (mv : MemValue) : Value :=
-  match mv with
-  | .unspecified ty => .loaded (.unspecified ty)
-  | .integer _ity iv => .loaded (.specified (.integer iv))
-  | .floating _fty fv => .loaded (.specified (.floating fv))
-  | .pointer _ty pv => .loaded (.specified (.pointer pv))
-  | .array elems =>
-    let lvs := elems.map fun mv' =>
-      match valueFromMemValue mv' with
-      | .loaded lv => lv
-      | .object ov => .specified ov
-      | _ => .unspecified .void
-    .loaded (.specified (.array lvs))
-  | .struct_ tag members =>
-    -- Convert (Identifier × Ctype × MemValue) list to StructMember list
-    let structMembers := members.map fun (name, ty, value) =>
-      { name, ty, value : StructMember }
-    .loaded (.specified (.struct_ tag structMembers))
-  | .union_ tag ident mv' => .loaded (.specified (.union_ tag ident mv'))
 
 /-! ## Single Step Execution
 

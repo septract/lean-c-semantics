@@ -1,9 +1,11 @@
 #!/bin/bash
 # Test the Lean interpreter against Cerberus execution
-# Usage: ./scripts/test_interp.sh [--verbose] [--max N] [test_dir]
+# Usage: ./scripts/test_interp.sh [--verbose] [--max N] [test_dir_or_file]
 #
-# If test_dir is the Cerberus CI directory, uses their tests.sh for the file list.
-# Otherwise, tests all *.c files in the directory.
+# Supports:
+#   - Single .c file: ./scripts/test_interp.sh path/to/test.c
+#   - Directory: tests all *.c files recursively
+#   - Cerberus CI directory: uses their tests.sh for the file list
 
 set -e
 
@@ -18,7 +20,7 @@ CERBERUS="$PROJECT_DIR/scripts/cerberus"
 
 # Configuration
 VERBOSE=false
-TEST_DIR=""
+TEST_PATH=""  # Can be a file or directory
 MAX_TESTS=0  # 0 = unlimited
 OUTPUT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/c-to-lean-interp-test.XXXXXXXXXX")
 
@@ -34,19 +36,28 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         *)
-            TEST_DIR="$1"
+            TEST_PATH="$1"
             shift
             ;;
     esac
 done
 
 # Default test directory
-if [[ -z "$TEST_DIR" ]]; then
-    TEST_DIR="$CERBERUS_DIR/tests/ci"
+if [[ -z "$TEST_PATH" ]]; then
+    TEST_PATH="$CERBERUS_DIR/tests/ci"
 fi
 
-# Resolve to absolute path
-TEST_DIR="$(cd "$TEST_DIR" && pwd)"
+# Check if it's a single file or a directory
+SINGLE_FILE=false
+if [[ -f "$TEST_PATH" ]]; then
+    SINGLE_FILE=true
+    # For single file, resolve to absolute path
+    TEST_PATH="$(cd "$(dirname "$TEST_PATH")" && pwd)/$(basename "$TEST_PATH")"
+    TEST_DIR="$(dirname "$TEST_PATH")"
+else
+    # Resolve directory to absolute path
+    TEST_DIR="$(cd "$TEST_PATH" && pwd)"
+fi
 
 # Build Lean interpreter
 echo "Building Lean interpreter..."
@@ -56,7 +67,11 @@ LEAN_INTERP="$LEAN_DIR/.lake/build/bin/ctolean_interp"
 
 # Get test files
 echo ""
-if [[ "$TEST_DIR" == "$CERBERUS_DIR/tests/ci" ]]; then
+if $SINGLE_FILE; then
+    # Single file mode
+    echo "Testing single file: $TEST_PATH"
+    TEST_FILES="$TEST_PATH"
+elif [[ "$TEST_DIR" == "$CERBERUS_DIR/tests/ci" ]]; then
     # Use Cerberus's tests.sh for the official CI test list
     echo "Loading test list from Cerberus tests.sh..."
     source "$CERBERUS_DIR/tests/tests.sh"
@@ -86,9 +101,11 @@ else
 fi
 
 TOTAL_FILES=$(echo $TEST_FILES | wc -w | tr -d ' ')
-echo "Found $TOTAL_FILES test files"
+if ! $SINGLE_FILE; then
+    echo "Found $TOTAL_FILES test files"
+fi
 
-if [[ $MAX_TESTS -gt 0 ]]; then
+if [[ $MAX_TESTS -gt 0 ]] && ! $SINGLE_FILE; then
     echo "Testing first $MAX_TESTS files"
     TEST_FILES=$(echo $TEST_FILES | tr ' ' '\n' | head -n $MAX_TESTS | tr '\n' ' ')
 fi
