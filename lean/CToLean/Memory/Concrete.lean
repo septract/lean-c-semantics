@@ -306,21 +306,38 @@ def registerFunPtrs (syms : List Sym) : MemM Unit := do
 Corresponds to: allocate_object, load, store, kill in impl_mem.ml:1288-1550
 -/
 
+/-- Align address down to alignment boundary. -/
+def alignDown (addr : Nat) (align : Nat) : Nat :=
+  addr - (addr % align)
+
 /-- Allocate memory and return pointer.
     Corresponds to: allocate_object in impl_mem.ml:1288-1347
-    Audited: 2026-01-01
+                   and allocator in impl_mem.ml:1247-1265
+    Audited: 2026-01-06
     Deviations:
-    - Address grows upward from 0x1000 (Cerberus grows downward from 0xFFFFFFFFFFFF)
     - No thread_id parameter (sequential only)
     - No Symbol.prefix (simplified to String)
-    - No cerb::with_address support yet -/
+    - No cerb::with_address support yet
+
+    Address allocation grows DOWNWARD from lastAddress (matching Cerberus):
+    - Cerberus: impl_mem.ml:1252-1254
+        let z = sub st.last_address size in
+        let (q,m) = quomod z align in
+        let z' = sub z (if less q zero then negate m else m)
+    - This subtracts size, then aligns down to alignment boundary -/
 def allocateImpl (name : String) (size : Nat) (ty : Option Ctype)
     (align : Nat) (readonly : ReadonlyStatus) (init : Option MemValue) : ConcreteMemM PointerValue := do
   let env ← read
   let st ← get
 
-  -- Compute aligned base address
-  let alignedAddr := alignUp st.nextAddr align
+  -- Compute aligned base address (growing downward)
+  -- Corresponds to: impl_mem.ml:1252-1254
+  let addrAfterSize := st.lastAddress - size
+  let alignedAddr := alignDown addrAfterSize align
+
+  -- Check for out of memory
+  if alignedAddr == 0 then
+    throw (.other "allocator: out of memory")
 
   -- Create allocation record
   let allocId := st.nextAllocId
@@ -336,7 +353,7 @@ def allocateImpl (name : String) (size : Nat) (ty : Option Ctype)
   set {
     st with
     nextAllocId := allocId + 1
-    nextAddr := alignedAddr + size
+    lastAddress := alignedAddr
     allocations := st.allocations.insert allocId alloc
   }
 
@@ -765,24 +782,36 @@ def ptrfromintImpl (_fromTy : IntegerType) (toTy : Ctype) (n : IntegerValue) : C
     pure { prov := n.prov, base := .concrete none n.val.toNat }
 
 /-- Pointer to integer conversion.
-    Corresponds to: intfromptr in impl_mem.ml:2249-2272
+    Corresponds to: intfromptr in impl_mem.ml:2439-2461
     Audited: 2026-01-06
-    Deviations: None -/
-def intfromPtrImpl (_fromTy : Ctype) (_toTy : IntegerType) (ptr : PointerValue) : ConcreteMemM IntegerValue := do
+
+    Range check: impl_mem.ml:2456-2459
+      let IV (_, ity_max) = max_ival ity in
+      let IV (_, ity_min) = min_ival ity in
+      if N.(less addr ity_min || less ity_max addr) then
+        fail ~loc MerrIntFromPtr -/
+def intfromPtrImpl (_fromTy : Ctype) (toTy : IntegerType) (ptr : PointerValue) : ConcreteMemM IntegerValue := do
   match ptr.base with
   | .null _ =>
-    -- Corresponds to: impl_mem.ml:2252-2253
+    -- Corresponds to: impl_mem.ml:2441-2442
     --   PVnull _ -> return (mk_ival prov Nat_big_num.zero)
     pure (integerIvalWithProv 0 ptr.prov)
   | .function sym =>
-    -- Corresponds to: impl_mem.ml:2254-2255
+    -- Corresponds to: impl_mem.ml:2443-2444
     --   PVfunction (Symbol.Symbol (_, n, _)) -> return (mk_ival prov (Nat_big_num.of_int n))
     -- Convert function symbol ID to integer
     pure (integerIvalWithProv sym.id ptr.prov)
   | .concrete _ addr =>
-    -- Corresponds to: impl_mem.ml:2256-2272
-    -- TODO: Add range check for _toTy (MerrIntFromPtr if out of range)
-    pure (integerIvalWithProv addr ptr.prov)
+    -- Corresponds to: impl_mem.ml:2445-2461
+    -- Range check: fail with MerrIntFromPtr if address out of range
+    let ityMax := integerTypeMax toTy
+    let ityMin := integerTypeMin toTy
+    let addrInt : Int := addr
+    if addrInt < ityMin || addrInt > ityMax then
+      -- UB024_out_of_range_pointer_to_integer_conversion
+      throw (.intFromPtr)
+    else
+      pure (integerIvalWithProv addr ptr.prov)
 
 /-- Check pointer alignment.
     Corresponds to: isWellAligned_ptrval in impl_mem.ml

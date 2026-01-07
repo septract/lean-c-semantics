@@ -29,6 +29,12 @@
   - Corresponds to: impl_mem.ml:2086-2123
 - **b.c pointer equality**: Fixed `eqPtrvalImpl` to use provenance-aware comparison
   - Corresponds to: defacto_memory.lem:1430-1479
+- **function_vs_var UB024**: Fixed pointer-to-integer range checking
+  - Bug: Was not checking if address fits in target integer type
+  - Fix: Changed memory allocation to use high addresses (downward from 0xFFFFFFFFFFFF)
+  - Added `integerTypeMax`/`integerTypeMin` helpers for range checking
+  - `intfromPtrImpl` now throws `MerrIntFromPtr` when address out of range
+  - Corresponds to: impl_mem.ml:2439-2461, impl_mem.ml:2367-2437
 
 ## Bugs Discovered (Investigation Needed)
 
@@ -55,11 +61,16 @@
 - ~~`reconstructValue` in `Memory/Concrete.lean:423` panics for structs~~
 - Fixed: Implemented struct/union reconstruction matching Cerberus impl_mem.ml
 
-### Remaining False Positive UB Issues
-All previously reported false positive UB issues have been fixed as of 2026-01-06.
+### Remaining UB Issues
+All previously reported UB detection issues (false positive and false negative) have been fixed as of 2026-01-06.
 
-### False Negative UB (1 test)
-- **function_vs_var**: Missing UB024_out_of_range_pointer_to_integer_conversion
+### Address Allocation Difference (needs investigation)
+Our memory addresses differ from Cerberus by ~4608 bytes for the first allocation.
+- Both use same initial address (0xFFFFFFFFFFFF) and same algorithm
+- Our calculation matches the expected math; Cerberus is 4608 bytes lower
+- Hypothesis: Cerberus allocates runtime structures before main()
+- See `docs/ADDRESS_DIFFERENCE_INVESTIGATION.md` for details
+- **Impact:** UB detection works correctly; only raw address values differ
 
 ### Other Semantic Differences (1 test)
 - **treiber**: Uses unimplemented impl function

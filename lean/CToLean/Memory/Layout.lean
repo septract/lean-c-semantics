@@ -83,6 +83,41 @@ def integerTypeSize : IntegerType → Nat
   | .ptrdiff_t => targetPtrSize
   | .ptraddr_t => targetPtrSize
 
+/-- Check if integer type is signed.
+    Corresponds to: checking signedness in impl_mem.ml:2379-2398
+    Audited: 2026-01-06 -/
+def isSignedIntegerType : IntegerType → Bool
+  | .char => true  -- Assuming signed char (implementation-defined)
+  | .bool => false
+  | .signed _ => true
+  | .unsigned _ => false
+  | .enum _ => true  -- Enums are signed int
+  | .size_t => false
+  | .wchar_t => false  -- Implementation-defined, assuming unsigned
+  | .wint_t => true
+  | .ptrdiff_t => true
+  | .ptraddr_t => false
+
+/-- Maximum value for an integer type.
+    Corresponds to: max_ival in impl_mem.ml:2367-2403
+    Audited: 2026-01-06 -/
+def integerTypeMax (ity : IntegerType) : Nat :=
+  let n := integerTypeSize ity
+  if isSignedIntegerType ity then
+    2 ^ (8 * n - 1) - 1  -- 2^(bits-1) - 1
+  else
+    2 ^ (8 * n) - 1      -- 2^bits - 1
+
+/-- Minimum value for an integer type.
+    Corresponds to: min_ival in impl_mem.ml:2405-2437
+    Audited: 2026-01-06 -/
+def integerTypeMin (ity : IntegerType) : Int :=
+  let n := integerTypeSize ity
+  if isSignedIntegerType ity then
+    -(2 ^ (8 * n - 1) : Int)  -- -2^(bits-1)
+  else
+    0
+
 /-- Size of real floating type in bytes.
     Corresponds to: sizeof_fty in ocaml_implementation.ml:206-212
     Audited: 2026-01-01
