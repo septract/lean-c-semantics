@@ -2,7 +2,7 @@
 
 This document outlines strategies for enabling formal verification of C programs in Lean, building on the existing interpreter infrastructure.
 
-## Current State
+## Current State (Updated 2026-01-06)
 
 **What We Have:**
 - Working Core IR parser (100% on 5500+ test files)
@@ -11,10 +11,39 @@ This document outlines strategies for enabling formal verification of C programs
 - `UndefinedBehavior` type covering all major UB categories
 - `InterpM` monad: `ReaderT InterpEnv (StateT InterpState (Except InterpError))`
 
-**What We Need:**
-- A way to state and prove that programs don't exhibit undefined behavior
-- Higher-level reasoning principles beyond step-by-step execution
-- Potential SMT integration for automated proof discharge
+**WP Calculus for Pure Expressions (DONE):**
+- `wpPureN`: Fuel-indexed WP transformer for `Pexpr` (pure expressions)
+- Compositional rules proven: `wpPureN_if`, `wpPureN_let`, `wpPureN_binop_implies_e1`
+- `wp_simp` macro for automated concrete proofs
+- Examples verified: literals, conditionals, nested conditionals
+- Symbolic theorems: `literal_wp`, `literal_ubfree`
+
+**The Gap - Real C Programs:**
+Even the simplest C program `int main() { return 42; }` produces effectful Core IR:
+```
+proc main (): eff loaded integer :=
+  let strong a_506: loaded integer = bound(pure(Specified(42))) in
+  run ret_505(conv_loaded_int('signed int', a_506)) ;
+  pure(Unit) ;
+  save ret_505: loaded integer (a_507: loaded integer:= Specified(0)) in
+    pure(a_507)
+```
+
+This requires constructs we don't yet handle:
+| Construct | What it does | Status |
+|-----------|--------------|--------|
+| `Expr.pure` | Lift pure expr to effectful | Not yet |
+| `Expr.sseq` | Strong sequencing (let) | Not yet |
+| `Expr.bound` | Bounds checking wrapper | Not yet |
+| `Expr.run`/`Expr.save` | Continuation control flow | Not yet |
+| `Pexpr.call` | Function calls | Not yet |
+
+See `lean/CToLean/Test/RealAST.lean` for the full hand-constructed AST.
+
+**What We Need Next:**
+1. Extend WP to effectful expressions (`wpExprN`)
+2. Handle continuations for function returns
+3. Integrate stdlib semantics (`conv_loaded_int`, etc.)
 
 ## Goal: UB-Freeness Reasoning
 
@@ -181,6 +210,84 @@ theorem frame_rule : hoare P e Q → hoare (P ∗ R) e (fun v => Q v ∗ R) := .
 - Need to instantiate CMRA for our memory model
 
 **Recommendation:** Monitor for future adoption, but too heavyweight for initial implementation.
+
+## Immediate Roadmap: Extending WP to Effectful Expressions
+
+The current WP calculus handles pure expressions (`Pexpr`). To verify real C programs,
+we need to extend it to effectful expressions (`Expr`). Here's the incremental plan:
+
+### Step 1: `wpExprN` with `Expr.pure` (Easy)
+
+`Expr.pure` lifts a pure expression to an effectful one. The WP rule is trivial:
+```lean
+def wpExprN (fuel : Nat) (e : AExpr) (Q : Value → InterpState → Prop)
+    (env : List (HashMap Sym Value)) (interpEnv : InterpEnv) (state : InterpState) : Prop :=
+  match e.expr with
+  | .pure pe => wpPureN fuel pe Q env interpEnv state
+  | ...
+```
+
+### Step 2: `Expr.sseq` - Strong Sequencing (Medium)
+
+Strong sequencing is like an effectful let binding:
+```
+sseq pat e1 e2  ≡  let pat = e1 in e2
+```
+
+The WP rule composes the two expressions:
+```lean
+| .sseq pat e1 e2 =>
+    wpExprN fuel e1 (fun v s' =>
+      -- bind v to pattern, then verify e2
+      wpExprN fuel (substPattern pat v e2) Q env interpEnv s')
+    env interpEnv state
+```
+
+### Step 3: `Expr.bound` - Bounds Checking (Easy)
+
+`Ebound` is a bounds-checking wrapper. For UB-freeness, it's essentially transparent:
+```lean
+| .bound e => wpExprN fuel e Q env interpEnv state
+```
+
+(The bounds checking happens in the memory operations, not in `bound` itself.)
+
+### Step 4: `Expr.save`/`Expr.run` - Continuations (Hard)
+
+This is where function returns are handled. `save` defines a continuation point,
+`run` jumps to it. This requires tracking continuation contexts:
+```lean
+-- Continuation context: maps labels to (params, body)
+structure ContCtx where
+  conts : HashMap Sym (List (Sym × BaseType) × AExpr)
+
+| .save label retTy args body =>
+    -- Add continuation to context, then verify body
+    let cont := (args.map (·.1, ·.2.1), ... )
+    wpExprN fuel body Q env (addCont label cont interpEnv) state
+
+| .run label args =>
+    -- Look up continuation, verify it with provided args
+    match interpEnv.conts.find? label with
+    | some (params, body) => wpExprN fuel body Q (bindArgs params args env) interpEnv state
+    | none => False  -- invalid continuation
+```
+
+### Step 5: `Pexpr.call` - Function Calls (Medium)
+
+Function calls require looking up the function definition or specification:
+```lean
+| .call name args =>
+    match interpEnv.funs.find? name with
+    | some fn => wpExprN fuel fn.body Q (bindParams fn.params args env) interpEnv state
+    | none => -- Check for builtin/stdlib
+```
+
+### Files to Modify
+
+1. `lean/CToLean/Theorems/WP.lean` - Add `wpExprN` definition and rules
+2. `lean/CToLean/Semantics/Eval.lean` - Add `evalExpr` equation lemmas (if needed)
+3. `lean/CToLean/Theorems/Examples.lean` - Add effectful examples
 
 ## Recommended Phased Approach
 
