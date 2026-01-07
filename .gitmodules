@@ -1,3 +1,4 @@
 [submodule "cerberus"]
 	path = cerberus
 	url = git@github.com:septract/cerberus-json-private.git
+	branch = json-export
