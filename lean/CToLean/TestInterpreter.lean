@@ -94,6 +94,9 @@ def memErrorToUBCode : MemError → String
   | .ptrArithOverflow => "UB046_array_pointer_outside"
   | .alignmentError _ _ => "UB025_misaligned_pointer_conversion"
   | .ptrdiff => "UB050_pointers_subtraction_not_representable"
+  | .intFromPtr => "UB024_out_of_range_pointer_to_integer_conversion"
+  | .arrayShift => "UB046_array_pointer_outside"
+  | .other msg => s!"UB_other({msg})"
 
 /-- Parse JSON file and run interpreter -/
 def runFile (jsonPath : String) (batch : Bool) : IO Unit := do

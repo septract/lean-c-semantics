@@ -171,12 +171,12 @@ type mem_state = {
     - next_iota, iota_map: Deferred (PNVI-ae-udi only)
     - varargs, next_varargs_id: Deferred (variadic functions)
     - last_used: Deferred (PNVI-ae only)
-    - requested: Deferred (cerb::with_address extension)
-    - Address allocation grows upward from 0x1000 instead of downward from 0xFFFFFFFFFFFF -/
+    - requested: Deferred (cerb::with_address extension) -/
 structure MemState where
   /-- Next allocation ID to assign.
-      Corresponds to: next_alloc_id field -/
-  nextAllocId : Nat := 1
+      Corresponds to: next_alloc_id field in impl_mem.ml:504
+      Cerberus starts at 0. -/
+  nextAllocId : Nat := 0
   /-- Active allocations: allocId -> Allocation.
       Corresponds to: allocations field -/
   allocations : Std.HashMap Nat Allocation := {}
@@ -195,9 +195,11 @@ structure MemState where
   /-- Last used union members for union semantics.
       Corresponds to: last_used_union_members field -/
   lastUsedUnionMembers : Std.HashMap Nat Identifier := {}
-  /-- Next address to use for allocations.
-      Corresponds to: last_address field (but grows upward) -/
-  nextAddr : Nat := 0x1000
+  /-- Last (highest) address available for allocations.
+      Corresponds to: last_address field in impl_mem.ml:508
+      Cerberus uses 0xFFFFFFFFFFFF (48-bit address space).
+      Allocations grow DOWNWARD from this address. -/
+  lastAddress : Nat := 0xFFFFFFFFFFFF
   deriving Inhabited
 
 /-! ## Footprint Tracking
@@ -313,6 +315,15 @@ inductive MemError where
   /-- Pointer difference error.
       Corresponds to: MerrPtrdiff -/
   | ptrdiff
+  /-- Pointer to integer conversion out of range.
+      Corresponds to: MerrIntFromPtr -/
+  | intFromPtr
+  /-- Array shift error.
+      Corresponds to: MerrArrayShift -/
+  | arrayShift
+  /-- Other error.
+      Corresponds to: MerrOther of string -/
+  | other (msg : String)
   deriving Repr, Inhabited
 
 instance : ToString MemError where
@@ -341,6 +352,9 @@ instance : ToString MemError where
     | .ptrArithOverflow => "pointer arithmetic overflow"
     | .alignmentError req actual => s!"alignment error: required {req}, got {actual}"
     | .ptrdiff => "pointer difference error"
+    | .intFromPtr => "pointer to integer conversion: value out of range"
+    | .arrayShift => "array shift error"
+    | .other msg => s!"memory error: {msg}"
 
 /-! ## Memory Monad -/
 
