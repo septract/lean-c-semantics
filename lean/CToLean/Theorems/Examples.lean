@@ -1,191 +1,174 @@
-/-
-  Examples of applying UBFree to simple Core expressions
+import CToLean.Theorems.WP
+import Std.Data.HashMap
 
-  This file demonstrates the verification approach by showing how to:
-  1. Construct simple Core AST expressions
-  2. State that evaluating them is UB-free
-  3. (Eventually) prove the UB-freeness
+/-!
+# Verification Examples
+
+This module demonstrates verifying Core IR ASTs for UB-freeness using the
+WP calculus. These examples show what kinds of programs we can verify.
+
+## Verification Capabilities
+
+Currently we can verify:
+1. **Pure expressions with literals**: Values, booleans, integers
+2. **Conditionals**: `if-then-else` with concrete or symbolic conditions
+3. **Nested expressions**: Arbitrary nesting of the above
+4. **Symbolic reasoning**: Properties that hold for all inputs
+
+## Limitations
+
+Not yet supported:
+- Let bindings with symbol lookup (require proper environment setup)
+- Binary operations beyond literals (need `evalBinop` lemmas)
+- Memory operations (need memory model integration)
+- Loops (need invariant infrastructure)
+
+## Proof Techniques
+
+1. **Concrete verification**: Use `simp` with monad reduction lemmas and small fuel
+2. **Symbolic verification**: Use compositional rules (`wpPureN_if`, etc.)
 -/
-
-import CToLean.Theorems.UBFree
-import CToLean.Semantics.Eval
 
 namespace CToLean.Theorems.Examples
 
 open CToLean.Core
 open CToLean.Semantics
 open CToLean.Memory
+open CToLean.Theorems.WP
+open Std (HashMap)
 
-/-! ## Helper: Constructing Core Expressions
-
-These helpers make it easier to construct Core AST nodes for examples.
--/
-
-/-- Create an annotated pure expression with no annotations -/
-def mkPexpr (e : Pexpr) : APexpr :=
-  { annots := [], ty := none, expr := e }
+/-! ## Helper Definitions -/
 
 /-- Create an integer value -/
-def intVal (n : Int) : Value :=
+def mkInt (n : Int) : Value :=
   .object (.integer ⟨n, .none⟩)
 
-/-- Create a pure expression that is just an integer literal -/
-def intLit (n : Int) : APexpr :=
-  mkPexpr (.val (intVal n))
+/-- Standard simp set for concrete WP proofs -/
+macro "wp_simp" : tactic =>
+  `(tactic| simp only [wpPureN, evalPexpr, mkAPexpr, bind, pure,
+    ReaderT.bind, ReaderT.pure, ReaderT.run,
+    StateT.bind, StateT.pure, StateT.run,
+    Except.bind, Except.pure])
 
-/-- Create an addition expression -/
-def addExpr (e1 e2 : APexpr) : APexpr :=
-  mkPexpr (.op .add e1.expr e2.expr)
+/-! ## Concrete Verification Examples
 
-/-! ## Example 1: A Simple Integer Literal
-
-The simplest possible Core expression: just a literal value like `5`.
-
-In Core IR, this looks like:
-```
-PEval (Vinteger 5)
-```
-
-Evaluating a literal should always be UB-free.
+These examples verify specific Core ASTs by running the interpreter
+with small fuel and checking the result.
 -/
 
-/-- The expression `5` as Core AST -/
-def expr_five : APexpr := intLit 5
+section ConcreteExamples
 
-/-- Evaluating a literal in an empty environment -/
-def eval_five : InterpM Value := evalPexpr [] expr_five
+/-- Literal integer 42 is UB-free -/
+example : wpPureN 10 ⟨[], none, .val (mkInt 42)⟩
+    (fun _ _ => True) [] default default := by
+  wp_simp
 
-/-- Theorem: Evaluating the literal `5` is UB-free.
+/-- Literal true is UB-free -/
+example : wpPureN 10 ⟨[], none, .val .true_⟩
+    (fun _ _ => True) [] default default := by
+  wp_simp
 
-    This is trivially true because evaluating a value literal
-    just returns that value - no operations that could cause UB.
+/-- Literal false is UB-free -/
+example : wpPureN 10 ⟨[], none, .val .false_⟩
+    (fun _ _ => True) [] default default := by
+  wp_simp
 
-    NOTE: evalPexpr is `partial`, so we can't unfold it directly.
-    We need either:
-    1. A relational semantics (inductive predicate for evaluation)
-    2. Axioms about evalPexpr's behavior
-    3. A termination proof for evalPexpr
+/-- Unit value is UB-free -/
+example : wpPureN 10 ⟨[], none, .val .unit⟩
+    (fun _ _ => True) [] default default := by
+  wp_simp
 
-    For now, we state the theorem and mark it sorry.
--/
-theorem eval_five_ubfree : UBFree eval_five := by
-  unfold UBFree eval_five
-  intro env state
-  -- evalPexpr is partial, so we can't unfold it in proofs
-  -- This would require either:
-  -- 1. Relational semantics: `Eval env pe v` instead of `evalPexpr env pe = v`
-  -- 2. Axioms: `axiom evalPexpr_val : evalPexpr env (mkPexpr (.val v)) = pure v`
-  sorry
+/-- Simple conditional: if true then 1 else 2 -/
+example : wpPureN 10 ⟨[], none, .if_ (.val .true_) (.val (mkInt 1)) (.val (mkInt 2))⟩
+    (fun _ _ => True) [] default default := by
+  wp_simp
 
-/-! ## Example 2: Simple Addition
+/-- Simple conditional: if false then 1 else 2 -/
+example : wpPureN 10 ⟨[], none, .if_ (.val .false_) (.val (mkInt 1)) (.val (mkInt 2))⟩
+    (fun _ _ => True) [] default default := by
+  wp_simp
 
-The expression `5 + 3` in Core IR.
+/-- Nested conditional: if true then (if false then 1 else 2) else 3 -/
+example : wpPureN 10 ⟨[], none,
+    .if_ (.val .true_)
+         (.if_ (.val .false_) (.val (mkInt 1)) (.val (mkInt 2)))
+         (.val (mkInt 3))⟩
+    (fun _ _ => True) [] default default := by
+  wp_simp
 
-This involves the binary operator, which COULD cause UB if:
-- The operands overflow (for signed integers)
-- The types are incompatible
+/-- Deeply nested: if true then (if true then (if false then 1 else 2) else 3) else 4 -/
+example : wpPureN 10 ⟨[], none,
+    .if_ (.val .true_)
+         (.if_ (.val .true_)
+               (.if_ (.val .false_) (.val (mkInt 1)) (.val (mkInt 2)))
+               (.val (mkInt 3)))
+         (.val (mkInt 4))⟩
+    (fun _ _ => True) [] default default := by
+  wp_simp
 
-But `5 + 3 = 8` is well within Int32 range, so it should be UB-free.
--/
+end ConcreteExamples
 
-/-- The expression `5 + 3` as Core AST -/
-def expr_five_plus_three : APexpr := addExpr (intLit 5) (intLit 3)
+/-! ## Symbolic Verification Examples
 
-/-- Evaluating `5 + 3` -/
-def eval_five_plus_three : InterpM Value := evalPexpr [] expr_five_plus_three
-
-/-- The result of `5 + 3` is `8` -/
-def expected_eight : Value := intVal 8
-
-/-! ## Example 3: Statement of UB-Freeness for Addition
-
-For more complex expressions, we need to reason about the semantics.
-The general pattern is:
-
-1. Construct the Core AST for the expression
-2. State that `evalPexpr env expr` is UB-free (possibly with preconditions)
-3. Prove by unfolding definitions and applying lemmas
--/
-
-/-- Statement: `5 + 3` is UB-free.
-
-    This should be provable because:
-    - 5 and 3 are small integers (well within Int32 range)
-    - Their sum 8 is also within range
-    - No memory operations involved
--/
-theorem eval_five_plus_three_ubfree : UBFree eval_five_plus_three := by
-  unfold UBFree eval_five_plus_three
-  intro env state
-  -- Requires relational semantics or axioms about evalPexpr
-  sorry
-
-/-! ## Example 4: Division (Conditional UB-Freeness)
-
-Division `a / b` is UB-free only if `b ≠ 0`.
-This demonstrates conditional UB-freeness with preconditions.
+These examples use the compositional rules to prove properties that
+hold for ALL possible subexpressions, not just concrete ones.
 -/
 
-/-- Create a division expression -/
-def divExpr (e1 e2 : APexpr) : APexpr :=
-  mkPexpr (.op .div e1.expr e2.expr)
+section SymbolicExamples
 
-/-- The expression `10 / 2` -/
-def expr_ten_div_two : APexpr := divExpr (intLit 10) (intLit 2)
+/-- WP for literals just checks the postcondition on the value.
+    This holds for ANY value v and postcondition Q. -/
+theorem literal_wp (fuel : Nat) (v : Value) (Q : PurePost)
+    (env : List (HashMap Sym Value)) (interpEnv : InterpEnv) (state : InterpState) :
+    wpPureN (fuel + 1) ⟨[], none, .val v⟩ Q env interpEnv state ↔ Q v state := by
+  simp only [wpPureN, evalPexpr, pure, ReaderT.pure, ReaderT.run,
+    StateT.pure, StateT.run, Except.pure]
 
-/-- Evaluating `10 / 2` -/
-def eval_ten_div_two : InterpM Value := evalPexpr [] expr_ten_div_two
+/-- Any literal is UB-free (with trivial postcondition). -/
+theorem literal_ubfree (fuel : Nat) (v : Value)
+    (env : List (HashMap Sym Value)) (interpEnv : InterpEnv) (state : InterpState) :
+    wpPureN (fuel + 1) ⟨[], none, .val v⟩ (fun _ _ => True) env interpEnv state := by
+  rw [literal_wp]
+  trivial
 
-/-- Statement: `10 / 2` is UB-free because 2 ≠ 0 -/
-theorem eval_ten_div_two_ubfree : UBFree eval_ten_div_two := by
-  unfold UBFree eval_ten_div_two
-  intro env state
-  -- Requires relational semantics or axioms about evalPexpr
-  sorry
+end SymbolicExamples
 
-/-! ## The General Pattern
+/-! ### Compositional Rules
 
-For any Core expression `e`, stating UB-freeness follows this pattern:
+The compositional rules from `WP.lean` allow symbolic reasoning about
+expressions. Key rules include:
 
-```lean
--- 1. Define the expression
-def my_expr : APexpr := ...
+- `wpPureN_if`: WP for conditionals decomposes into condition + branches
+- `wpPureN_let`: WP for let bindings decomposes into bound expression + body
+- `wpPureN_binop_implies_e1`: Binary ops require first operand to be UB-free
 
--- 2. Define the evaluation
-def eval_my_expr : InterpM Value := evalPexpr env my_expr
-
--- 3. State UB-freeness (possibly with preconditions)
-theorem my_expr_ubfree (preconditions...) : UBFree eval_my_expr := by
-  ...
-
--- Or with specific env/state:
-theorem my_expr_ubfree_in (env : InterpEnv) (state : InterpState)
-    (preconditions...) : UBFreeIn eval_my_expr env state := by
-  ...
-```
-
-The proofs require:
-- Lemmas about `evalBinop` for arithmetic operations
-- Lemmas about memory operations for loads/stores
-- Range checking for integer overflow
-- Null/bounds checking for pointer operations
+These rules enable proving properties that hold for ALL possible
+subexpressions, not just concrete ones.
 -/
 
-/-! ## What's Needed for Real Proofs
+/-! ## Postcondition Verification
 
-To complete the proofs marked `sorry`, we need:
-
-1. **Lemmas about evalBinop**: e.g., `evalBinop_add_safe` showing that
-   addition of in-range integers is UB-free.
-
-2. **Lemmas about evalPexpr cases**: Breaking down how each Pexpr
-   constructor evaluates and when it can UB.
-
-3. **Connection to SafeDiv, SafeShift, etc.**: The predicates we defined
-   should connect to the actual interpreter operations.
-
-This is the work of Phase 2 (Weakest Precondition calculus) in the
-verification plan.
+These examples show verifying not just UB-freeness but also
+functional correctness (the result satisfies some property).
 -/
+
+section PostconditionExamples
+
+/-- Literal 42 evaluates to exactly 42 -/
+example : wpPureN 10 ⟨[], none, .val (mkInt 42)⟩
+    (fun v _ => v = mkInt 42) [] default default := by
+  wp_simp
+
+/-- if true then 1 else 2 evaluates to 1 -/
+example : wpPureN 10 ⟨[], none, .if_ (.val .true_) (.val (mkInt 1)) (.val (mkInt 2))⟩
+    (fun v _ => v = mkInt 1) [] default default := by
+  wp_simp
+
+/-- if false then 1 else 2 evaluates to 2 -/
+example : wpPureN 10 ⟨[], none, .if_ (.val .false_) (.val (mkInt 1)) (.val (mkInt 2))⟩
+    (fun v _ => v = mkInt 2) [] default default := by
+  wp_simp
+
+end PostconditionExamples
 
 end CToLean.Theorems.Examples
