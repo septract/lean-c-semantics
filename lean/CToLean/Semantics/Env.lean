@@ -57,72 +57,78 @@ let rec collect_labeled_continuations (Expr annot expr_) =
 ```
 -/
 
+mutual
 /-- Collect all labeled continuations from an expression.
     Corresponds to: collect_labeled_continuations in core_aux.lem:1880-1931
     Audited: 2025-01-01
     Deviations: None - matches Cerberus exactly -/
-partial def collectLabeledContinuations (e : AExpr) : LabeledConts :=
-  go e.annots e.expr
-where
-  /-- Helper that processes the expression, carrying the outer annotation -/
-  go (annots : Annots) (expr : Expr) : LabeledConts :=
-    match expr with
-    | .pure _ => {}
-    | .memop _ _ => {}
-    | .action _ => {}
-    | .ccall _ _ _ => {}
-    | .proc _ _ => {}
-    | .run _ _ => {}
-    | .par _ => {}
-    | .wait _ => {}
-    | .bound _ => {}  -- Cerberus returns Map.empty for Ebound
-    | .nd _ => {}  -- Cerberus returns Map.empty for End
-    | .unseq _ => {}  -- Cerberus returns Map.empty for Eunseq
+def collectLabeledContinuations (e : AExpr) : LabeledConts :=
+  match e with
+  | ⟨annots, expr⟩ =>
+  match expr with
+  | .pure _ => {}
+  | .memop _ _ => {}
+  | .action _ => {}
+  | .ccall _ _ _ => {}
+  | .proc _ _ => {}
+  | .run _ _ => {}
+  | .par _ => {}
+  | .wait _ => {}
+  | .bound _ => {}  -- Cerberus returns Map.empty for Ebound
+  | .nd _ => {}  -- Cerberus returns Map.empty for End
+  | .unseq _ => {}  -- Cerberus returns Map.empty for Eunseq
 
-    | .let_ _pat _e1 e2 =>
-      -- Elet _ _ e2 -> collect_labeled_continuations e2
-      collectLabeledContinuations e2
+  | .let_ _pat _e1 e2 =>
+    -- Elet _ _ e2 -> collect_labeled_continuations e2
+    collectLabeledContinuations e2
 
-    | .if_ _cond then_ else_ =>
-      -- Map.(union) (collect_labeled_continuations e2) (collect_labeled_continuations e3)
-      (collectLabeledContinuations then_).union (collectLabeledContinuations else_)
+  | .if_ _cond then_ else_ =>
+    -- Map.(union) (collect_labeled_continuations e2) (collect_labeled_continuations e3)
+    (collectLabeledContinuations then_).union (collectLabeledContinuations else_)
 
-    | .case_ _ branches =>
-      -- Collect from all case branches
-      -- Corresponds to: collect_saves_aux case in core_aux.lem:2196-2199
-      -- Cerberus's old collect_labeled_continuations was wrong here, but collect_saves fixes it
-      -- Audited: 2026-01-02
-      branches.foldl (init := ({}:LabeledConts)) fun acc (_, body) =>
-        acc.union (collectLabeledContinuations body)
+  | .case_ _ branches =>
+    -- Collect from all case branches
+    -- Corresponds to: collect_saves_aux case in core_aux.lem:2196-2199
+    -- Cerberus's old collect_labeled_continuations was wrong here, but collect_saves fixes it
+    -- Audited: 2026-01-02
+    collectLabeledContinuationsBranches branches
 
-    | .wseq pat e1 e2 =>
-      -- Map.(union) (Map.map (fun (a_tys, e) -> (a_tys, Expr annot (Ewseq _as e e2))) $ collect_labeled_continuations e1)
-      --             (collect_labeled_continuations e2)
-      let fromE1 := collectLabeledContinuations e1
-      let emptyMap : LabeledConts := {}
-      let wrappedE1 : LabeledConts := fromE1.fold (init := emptyMap) fun acc sym cont =>
-        let wrappedBody : AExpr := { annots, expr := .wseq pat cont.body e2 }
-        acc.insert sym { cont with body := wrappedBody }
-      let fromE2 := collectLabeledContinuations e2
-      wrappedE1.union fromE2
+  | .wseq pat e1 e2 =>
+    -- Map.(union) (Map.map (fun (a_tys, e) -> (a_tys, Expr annot (Ewseq _as e e2))) $ collect_labeled_continuations e1)
+    --             (collect_labeled_continuations e2)
+    let fromE1 := collectLabeledContinuations e1
+    -- Note: fold over HashMap result (not AST) is not recursive
+    let wrappedE1 : LabeledConts := fromE1.fold (init := {}) fun acc sym cont =>
+      let wrappedBody : AExpr := { annots, expr := .wseq pat cont.body e2 }
+      acc.insert sym { cont with body := wrappedBody }
+    let fromE2 := collectLabeledContinuations e2
+    wrappedE1.union fromE2
 
-    | .sseq pat e1 e2 =>
-      -- Map.(union) (Map.map (fun (a_tys, e) -> (a_tys, Expr annot (Esseq _as e e2))) $ collect_labeled_continuations e1)
-      --             (collect_labeled_continuations e2)
-      let fromE1 := collectLabeledContinuations e1
-      let emptyMap : LabeledConts := {}
-      let wrappedE1 : LabeledConts := fromE1.fold (init := emptyMap) fun acc sym cont =>
-        let wrappedBody : AExpr := { annots, expr := .sseq pat cont.body e2 }
-        acc.insert sym { cont with body := wrappedBody }
-      let fromE2 := collectLabeledContinuations e2
-      wrappedE1.union fromE2
+  | .sseq pat e1 e2 =>
+    -- Map.(union) (Map.map (fun (a_tys, e) -> (a_tys, Expr annot (Esseq _as e e2))) $ collect_labeled_continuations e1)
+    --             (collect_labeled_continuations e2)
+    let fromE1 := collectLabeledContinuations e1
+    -- Note: fold over HashMap result (not AST) is not recursive
+    let wrappedE1 : LabeledConts := fromE1.fold (init := {}) fun acc sym cont =>
+      let wrappedBody : AExpr := { annots, expr := .sseq pat cont.body e2 }
+      acc.insert sym { cont with body := wrappedBody }
+    let fromE2 := collectLabeledContinuations e2
+    wrappedE1.union fromE2
 
-    | .save symLab _retTy params body =>
-      -- Map.insert sym_lab (List.map fst sym_bTys, e) $ collect_labeled_continuations e
-      let paramSyms := params.map fun (sym, _, _) => sym
-      let cont : LabeledCont := { params := paramSyms, body }
-      let inner := collectLabeledContinuations body
-      inner.insert symLab cont
+  | .save symLab _retTy params body =>
+    -- Map.insert sym_lab (List.map fst sym_bTys, e) $ collect_labeled_continuations e
+    let paramSyms := params.map fun (sym, _, _) => sym
+    let cont : LabeledCont := { params := paramSyms, body }
+    let inner := collectLabeledContinuations body
+    inner.insert symLab cont
+
+/-- Helper for processing case branches - explicit recursion for termination -/
+def collectLabeledContinuationsBranches (branches : List (APattern × AExpr)) : LabeledConts :=
+  match branches with
+  | [] => {}
+  | (_, body) :: rest =>
+    (collectLabeledContinuations body).union (collectLabeledContinuationsBranches rest)
+end
 
 /-- Collect labeled continuations for all procedures in a file.
     Corresponds to: collect_labeled_continuations_NEW in core_aux.lem:2379-2393

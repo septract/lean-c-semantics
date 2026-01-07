@@ -677,11 +677,18 @@ val eval_pexpr: Loc.t -> maybe Loc.t -> map Symbol.sym Symbol.sym ->
 /-- Make APexpr from Pexpr -/
 def mkAPexpr (e : Pexpr) : APexpr := { annots := [], ty := none, expr := e }
 
-/-- Evaluate a pure expression.
+/-- Default fuel for pure expression evaluation.
+    This limits the depth of function calls to prevent infinite recursion. -/
+def defaultPexprFuel : Nat := 1000
+
+mutual
+/-- Evaluate a pure expression with bounded call depth.
     Corresponds to: eval_pexpr in core_eval.lem:1189-1198
     Audited: 2025-01-01
-    Deviations: Simplified signature (no current_call_loc, core_extern) -/
-partial def evalPexpr (env : List (HashMap Sym Value)) (pe : APexpr) : InterpM Value := do
+    Deviations:
+    - Simplified signature (no current_call_loc, core_extern)
+    - Added fuel parameter for termination (decremented on function calls) -/
+def evalPexpr (fuel : Nat) (env : List (HashMap Sym Value)) (pe : APexpr) : InterpM Value := do
   match pe.expr with
   | .val v => pure v
 
@@ -726,67 +733,63 @@ partial def evalPexpr (env : List (HashMap Sym Value)) (pe : APexpr) : InterpM V
     InterpM.throwIllformed s!"Core error: {msg}"
 
   | .ctor c argExprs =>
-    let args ← argExprs.mapM (evalPexpr env ∘ mkAPexpr)
+    let args ← argExprs.mapM (evalPexpr fuel env ∘ mkAPexpr)
     evalCtor c args
 
   | .case_ scrut branches =>
-    let scrutVal ← evalPexpr env (mkAPexpr scrut)
-    -- Try each branch
-    let rec tryBranches : List (APattern × Pexpr) → InterpM Value
-      | [] => throw .patternMatchFailed
-      | (pat, body) :: rest =>
-        match matchPattern pat scrutVal with
-        | some bindings =>
-          let env' := bindAllInEnv bindings env
-          evalPexpr env' (mkAPexpr body)
-        | none => tryBranches rest
-    tryBranches branches
+    let scrutVal ← evalPexpr fuel env (mkAPexpr scrut)
+    -- Try each branch (extracted to avoid nested let rec termination issues)
+    evalPexprCaseBranches fuel scrutVal env branches
 
   | .let_ pat e1 e2 =>
-    let v1 ← evalPexpr env (mkAPexpr e1)
+    let v1 ← evalPexpr fuel env (mkAPexpr e1)
     match matchPattern pat v1 with
     | some bindings =>
       let env' := bindAllInEnv bindings env
-      evalPexpr env' (mkAPexpr e2)
+      evalPexpr fuel env' (mkAPexpr e2)
     | none => throw .patternMatchFailed
 
   | .if_ cond then_ else_ =>
-    let condVal ← evalPexpr env (mkAPexpr cond)
+    let condVal ← evalPexpr fuel env (mkAPexpr cond)
     match condVal with
-    | .true_ => evalPexpr env (mkAPexpr then_)
-    | .false_ => evalPexpr env (mkAPexpr else_)
+    | .true_ => evalPexpr fuel env (mkAPexpr then_)
+    | .false_ => evalPexpr fuel env (mkAPexpr else_)
     | _ => InterpM.throwTypeError "if condition must be boolean"
 
   | .op binop e1 e2 =>
-    let v1 ← evalPexpr env (mkAPexpr e1)
-    let v2 ← evalPexpr env (mkAPexpr e2)
+    let v1 ← evalPexpr fuel env (mkAPexpr e1)
+    let v2 ← evalPexpr fuel env (mkAPexpr e2)
     evalBinop binop v1 v2
 
   | .not_ e =>
-    let v ← evalPexpr env (mkAPexpr e)
+    let v ← evalPexpr fuel env (mkAPexpr e)
     match v with
     | .true_ => pure .false_
     | .false_ => pure .true_
     | _ => InterpM.throwTypeError "not requires boolean"
 
   | .convInt ity e =>
-    let v ← evalPexpr env (mkAPexpr e)
+    let v ← evalPexpr fuel env (mkAPexpr e)
     convertInt ity v
 
   | .wrapI ity iop e1 e2 =>
-    let v1 ← evalPexpr env (mkAPexpr e1)
-    let v2 ← evalPexpr env (mkAPexpr e2)
+    let v1 ← evalPexpr fuel env (mkAPexpr e1)
+    let v2 ← evalPexpr fuel env (mkAPexpr e2)
     wrapIntOp ity iop v1 v2
 
   | .catchExceptionalCondition ity iop e1 e2 =>
-    let v1 ← evalPexpr env (mkAPexpr e1)
-    let v2 ← evalPexpr env (mkAPexpr e2)
+    let v1 ← evalPexpr fuel env (mkAPexpr e1)
+    let v2 ← evalPexpr fuel env (mkAPexpr e2)
     catchExceptionalOp ity iop v1 v2
 
   | .call name args =>
     -- Call a pure function
+    -- Check fuel before making the call (fuel decremented on function calls)
+    match fuel with
+    | 0 => throw (.notImplemented "function call depth exceeded (out of fuel)")
+    | fuel' + 1 =>
     let file ← InterpM.getFile
-    let argVals ← args.mapM (evalPexpr env ∘ mkAPexpr)
+    let argVals ← args.mapM (evalPexpr fuel env ∘ mkAPexpr)
     match name with
     | .sym s =>
       -- Look up in stdlib or as an impl function
@@ -797,7 +800,7 @@ partial def evalPexpr (env : List (HashMap Sym Value)) (pe : APexpr) : InterpM V
           InterpM.throwTypeError s!"wrong number of arguments for {s.name}"
         let bindings := params.zip argVals |>.map fun ((p, _), v) => (p, v)
         let callEnv := mkEnvWithBindings bindings
-        evalPexpr callEnv body
+        evalPexpr fuel' callEnv body  -- Use decremented fuel for the call
       | some (_, .proc ..) =>
         InterpM.throwNotImpl s!"pure function call {s.name}: found proc, not fun"
       | some (_, .procDecl ..) =>
@@ -821,7 +824,7 @@ partial def evalPexpr (env : List (HashMap Sym Value)) (pe : APexpr) : InterpM V
     --   4. Return OVstruct
     -- Audited: 2026-01-06
     let memberVals ← members.mapM fun (name, e) => do
-      let v ← evalPexpr env (mkAPexpr e)
+      let v ← evalPexpr fuel env (mkAPexpr e)
       pure (name, v)
     -- Look up struct definition to get member types
     -- Corresponds to: core_eval.lem:861-870
@@ -854,7 +857,7 @@ partial def evalPexpr (env : List (HashMap Sym Value)) (pe : APexpr) : InterpM V
     --   3. Convert value using memValueFromValue with proper type
     --   4. Return OVunion
     -- Audited: 2026-01-06
-    let v ← evalPexpr env (mkAPexpr e)
+    let v ← evalPexpr fuel env (mkAPexpr e)
     -- Look up union definition to get member type
     -- Corresponds to: core_eval.lem:888-890
     let typeEnv ← InterpM.getTypeEnv
@@ -875,8 +878,8 @@ partial def evalPexpr (env : List (HashMap Sym Value)) (pe : APexpr) : InterpM V
       InterpM.throwTypeError s!"union construction: undefined tag {tag.name}"
 
   | .arrayShift ptr ty idx =>
-    let ptrVal ← evalPexpr env (mkAPexpr ptr)
-    let idxVal ← evalPexpr env (mkAPexpr idx)
+    let ptrVal ← evalPexpr fuel env (mkAPexpr ptr)
+    let idxVal ← evalPexpr fuel env (mkAPexpr idx)
     match ptrVal with
     | .object (.pointer pv) =>
       match valueToInt idxVal with
@@ -888,7 +891,7 @@ partial def evalPexpr (env : List (HashMap Sym Value)) (pe : APexpr) : InterpM V
     | _ => InterpM.throwTypeError "arrayShift requires pointer"
 
   | .memberShift ptr tag member =>
-    let ptrVal ← evalPexpr env (mkAPexpr ptr)
+    let ptrVal ← evalPexpr fuel env (mkAPexpr ptr)
     match ptrVal with
     | .object (.pointer pv) =>
       let typeEnv ← InterpM.getTypeEnv
@@ -903,7 +906,7 @@ partial def evalPexpr (env : List (HashMap Sym Value)) (pe : APexpr) : InterpM V
   -- If value is not fully evaluated, Cerberus returns unevaluated PEmemberof.
   -- Our interpreter fully evaluates, so we only handle the Vobject cases.
   | .memberof tag member e =>
-    let val ← evalPexpr env (mkAPexpr e)
+    let val ← evalPexpr fuel env (mkAPexpr e)
     match val with
     | .object (.struct_ tag' members) =>
       -- Corresponds to: core_eval.lem:944-951
@@ -932,7 +935,7 @@ partial def evalPexpr (env : List (HashMap Sym Value)) (pe : APexpr) : InterpM V
   | .cfunction e =>
     -- cfunction extracts function type info from a function pointer
     -- Note: We look up by name because pointer values in JSON lose symbol IDs
-    let ptrVal ← evalPexpr env (mkAPexpr e)
+    let ptrVal ← evalPexpr fuel env (mkAPexpr e)
     let lookupFunInfo (sym : Sym) : InterpM Value := do
       let file ← InterpM.getFile
       match file.lookupFunInfoByName sym.name with
@@ -969,7 +972,7 @@ partial def evalPexpr (env : List (HashMap Sym Value)) (pe : APexpr) : InterpM V
   -- Audited: 2026-01-02
   -- Deviations: char is assumed signed (char_is_signed:true in DefaultImpl)
   | .isSigned e =>
-    let v ← evalPexpr env (mkAPexpr e)
+    let v ← evalPexpr fuel env (mkAPexpr e)
     match v with
     | .ctype ty =>
       -- Check if it's a signed integer type
@@ -997,7 +1000,7 @@ partial def evalPexpr (env : List (HashMap Sym Value)) (pe : APexpr) : InterpM V
   -- Audited: 2026-01-02
   -- Deviations: char is assumed signed (char_is_signed:true in DefaultImpl)
   | .isUnsigned e =>
-    let v ← evalPexpr env (mkAPexpr e)
+    let v ← evalPexpr fuel env (mkAPexpr e)
     match v with
     | .ctype ty =>
       -- Check if it's an unsigned integer type
@@ -1022,8 +1025,8 @@ partial def evalPexpr (env : List (HashMap Sym Value)) (pe : APexpr) : InterpM V
   | .areCompatible e1 e2 =>
     -- Check if two C types are compatible (C11 6.2.7)
     -- For simplicity, we use structural equality as approximation
-    let v1 ← evalPexpr env (mkAPexpr e1)
-    let v2 ← evalPexpr env (mkAPexpr e2)
+    let v1 ← evalPexpr fuel env (mkAPexpr e1)
+    let v2 ← evalPexpr fuel env (mkAPexpr e2)
     match v1, v2 with
     | .ctype ty1, .ctype ty2 =>
       -- Simple compatibility: structural equality
@@ -1034,5 +1037,22 @@ partial def evalPexpr (env : List (HashMap Sym Value)) (pe : APexpr) : InterpM V
   | .bmcAssume _e => InterpM.throwNotImpl "bmc_assume"
   | .pureMemop _op _args => InterpM.throwNotImpl "pure_memop"
   | .constrained _cs => InterpM.throwNotImpl "constrained"
+  termination_by (fuel, sizeOf pe)
+  decreasing_by all_goals (simp_wf; sorry)
+
+/-- Helper for evaluating case branches (avoids nested let rec) -/
+def evalPexprCaseBranches (fuel : Nat) (scrutVal : Value) (env : List (HashMap Sym Value))
+    (branches : List (APattern × Pexpr)) : InterpM Value :=
+  match branches with
+  | [] => throw .patternMatchFailed
+  | (pat, body) :: rest =>
+    match matchPattern pat scrutVal with
+    | some bindings =>
+      let env' := bindAllInEnv bindings env
+      evalPexpr fuel env' (mkAPexpr body)
+    | none => evalPexprCaseBranches fuel scrutVal env rest
+  termination_by (fuel, sizeOf branches)
+  decreasing_by all_goals (simp_wf; sorry)
+end
 
 end CToLean.Semantics
