@@ -16,10 +16,18 @@
 
 ## Bugs Discovered (Investigation Needed)
 
-### Struct Reconstruction Not Implemented
-- `reconstructValue` in `Memory/Concrete.lean:423` panics for structs
-- Affects tests: 20021118-1, 950607-2, 20030914-1, and others using struct loads
-- Need to implement struct field-by-field reconstruction from bytes
+### ARCHITECTURAL: evalPexpr Returns Values, Not Pexprs
+- **Cerberus behavior**: `step_eval_pexpr` returns `pexpr` (partially or fully evaluated)
+  - `valueFromPexpr` extracts value only if pexpr is `PEval cval`, else returns `Nothing`
+  - Unevaluated subexpressions are returned as-is (e.g., `PEmemberof tag member pe'`)
+- **Our behavior**: `evalPexpr` returns `Value` directly (always fully evaluated)
+- **Impact**: We can't return partially evaluated expressions
+- **Status**: This may be acceptable for sequential execution but needs audit
+- **Location**: `Semantics/Eval.lean:evalPexpr`
+
+### Struct Reconstruction Not Implemented - FIXED 2026-01-06
+- ~~`reconstructValue` in `Memory/Concrete.lean:423` panics for structs~~
+- Fixed: Implemented struct/union reconstruction matching Cerberus impl_mem.ml
 
 ### False Positive UB Issues (from full test suite)
 See `docs/FULL_TEST_RESULTS_2026-01-02.md` for test names.
