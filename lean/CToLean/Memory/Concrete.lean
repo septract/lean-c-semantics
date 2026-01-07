@@ -639,21 +639,48 @@ Corresponds to: eq_ptrval, diff_ptrval, eff_array_shift_ptrval, etc. in impl_mem
 -/
 
 /-- Pointer equality.
-    Corresponds to: eq_ptrval in impl_mem.ml
-    Audited: 2026-01-01
-    Deviations: Simplified - just compares addresses for concrete pointers -/
+    Corresponds to: impl_eq_ptrval in defacto_memory.lem:1418-1503
+    Audited: 2026-01-06
+    Deviations: We use provenance-based comparison (matches Cerberus standard mode) -/
 def eqPtrvalImpl (p1 p2 : PointerValue) : ConcreteMemM Bool := do
   match p1.base, p2.base with
+  -- STD §6.5.9#6: null pointers compare equal
   | .null _, .null _ => pure true
   | .null _, _ => pure false
   | _, .null _ => pure false
+  -- Function pointers compare by symbol
   | .function s1, .function s2 => pure (s1 == s2)
   | .function _, _ => pure false
   | _, .function _ => pure false
   | .concrete _ a1, .concrete _ a2 =>
-    -- For concrete pointers, compare addresses
-    -- Note: comparing pointers from different allocations is implementation-defined
-    pure (a1 == a2)
+    -- For concrete pointers, check provenance
+    -- Corresponds to: defacto_memory.lem:1430-1479 (impl_eq_ptrval)
+    match p1.prov, p2.prov with
+    | .some alloc1, .some alloc2 =>
+      -- Both have provenance
+      -- Corresponds to: defacto_memory.lem:1431-1472
+      if alloc1 == alloc2 then
+        -- Same allocation: compare addresses ("honest equality")
+        pure (a1 == a2)
+      else
+        -- Different allocations: always false (STD conforming behavior)
+        -- Corresponds to: defacto_memory.lem:1438 ("using provenance", return false)
+        -- Note: Cerberus uses nondeterminism here with Allow_disjoint_alloc_tests flag,
+        -- but in --exec mode it picks the "using provenance" path which returns false
+        pure false
+    | .some _, _ =>
+      -- One has provenance, other doesn't: do "honest equality" (address comparison)
+      -- Corresponds to: defacto_memory.lem:1473-1474
+      pure (a1 == a2)
+    | _, .some _ =>
+      -- One has provenance, other doesn't: do "honest equality" (address comparison)
+      -- Corresponds to: defacto_memory.lem:1475-1476
+      pure (a1 == a2)
+    | _, _ =>
+      -- Neither has Prov_some - Cerberus throws error
+      -- Corresponds to: defacto_memory.lem:1477-1478
+      --   error "WIP: Mem.eq_ptrval, not (Just alloc_id1, Just alloc_id2)"
+      panic! s!"eqPtrvalImpl: neither pointer has allocation provenance (addr1={a1}, addr2={a2})"
 
 /-- Pointer difference.
     Corresponds to: diff_ptrval in impl_mem.ml
