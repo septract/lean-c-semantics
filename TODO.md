@@ -9,6 +9,13 @@
 
 ## Recent Fixes (2026-01-06)
 
+- **Floating point binary operations**: Added `evalFloatOp` for +, -, *, /, comparisons
+  - Corresponds to: core_eval.lem:443-452 and defacto_memory.lem:1097-1110
+- **Unspecified memory initialization**: Fixed `allocateImpl` to write unspecified bytes
+  - Bug: Was zero-initializing instead of writing `value := none` bytes
+  - Corresponds to: impl_mem.ml:1317-1322
+- **Unspecified pattern matching**: Fixed to match `Unspecified [inner]` with 1 subpattern
+  - Corresponds to: core_aux.lem:1121-1122
 - **exit()/abort() builtins**: Implemented early termination support
 - **Negative pointer arithmetic**: Fixed `arrayShiftPtrval` to handle negative offsets
   - Bug: `n.val.toNat` converted -1 to 0, breaking `p--` and `p - 1`
@@ -39,21 +46,18 @@
 - ~~`reconstructValue` in `Memory/Concrete.lean:423` panics for structs~~
 - Fixed: Implemented struct/union reconstruction matching Cerberus impl_mem.ml
 
-### False Positive UB Issues (from full test suite)
-See `docs/FULL_TEST_RESULTS_2026-01-02.md` for test names.
+### Remaining False Positive UB Issues (2 tests)
+Most false positives fixed as of 2026-01-06. See `docs/FULL_TEST_RESULTS_2026-01-02.md`.
 
-- **UB036_exceptional_condition** (5 tests): Need investigation - may be struct reconstruction issue
-- **UB_CERB002a_out_of_bound_load** (2 tests): 20060412-1, 20080604-1
-- **UB025_misaligned_pointer_conversion** (1 test): pr36339
-- **UB_CERB004_unspecified__equality** (1 test): pr52129
-- **UB_internal_type_error** (1 test): 941014-1
+- **941014-1**: UB_internal_type_error - Internal type mismatch (needs investigation)
+- **pr55875**: UB043_indirection_invalid_value - Invalid pointer deref (needs investigation)
 
-### False Negative UB
+### False Negative UB (1 test)
 - **function_vs_var**: Missing UB024_out_of_range_pointer_to_integer_conversion
 
-### Other Semantic Differences
-- **0046-jump_inside_lifetime**: Lean returns 0, Cerberus returns UNSPECIFIED
-- **treiber**: Lean returns UB_CERB004_unspecified__equality_ptr_vs_NULL, Cerberus returns 0
+### Other Semantic Differences (2 tests)
+- **b**: Lean returns 110, Cerberus returns 220 (memory model difference)
+- **treiber**: Uses unimplemented impl function
 
 ## Completed Phases
 

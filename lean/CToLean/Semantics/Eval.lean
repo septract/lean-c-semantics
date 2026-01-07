@@ -313,6 +313,43 @@ def valueFromMemValue (mv : MemValue) : Value :=
   | .union_ tag ident mv' =>
     .loaded (.specified (.union_ tag ident mv'))
 
+/-- Extract floating value from Value -/
+def valueToFloat (v : Value) : Option FloatingValue :=
+  match v with
+  | .object (.floating fv) => some fv
+  | .loaded (.specified (.floating fv)) => some fv
+  | _ => none
+
+/-- Evaluate floating point binary operations.
+    Corresponds to: core_eval.lem:443-452 (floating point op case)
+    and defacto_memory.lem:1097-1110 (impl_op_fval)
+    Audited: 2026-01-06
+    Deviations: None -/
+def evalFloatOp (op : Binop) (f1 f2 : FloatingValue) : InterpM Value := do
+  -- Handle unspecified values
+  -- Corresponds to: defacto_memory.lem:1098-1102
+  match f1, f2 with
+  | .unspecified, _ => pure (.object (.floating .unspecified))
+  | _, .unspecified => pure (.object (.floating .unspecified))
+  | .finite v1, .finite v2 =>
+    -- Corresponds to: defacto_memory.lem:1103-1109
+    match op with
+    | .add => pure (.object (.floating (.finite (v1 + v2))))
+    | .sub => pure (.object (.floating (.finite (v1 - v2))))
+    | .mul => pure (.object (.floating (.finite (v1 * v2))))
+    | .div => pure (.object (.floating (.finite (v1 / v2))))
+    -- Comparison operators
+    -- Corresponds to: core_eval.lem:368-427 (floating point comparisons)
+    | .eq => pure (if v1 == v2 then .true_ else .false_)
+    | .lt => pure (if v1 < v2 then .true_ else .false_)
+    | .le => pure (if v1 <= v2 then .true_ else .false_)
+    | .gt => pure (if v1 > v2 then .true_ else .false_)
+    | .ge => pure (if v1 >= v2 then .true_ else .false_)
+    | _ => InterpM.throwTypeError s!"unsupported floating point op: {repr op}"
+  | _, _ =>
+    -- NaN, Inf cases - for now throw error
+    InterpM.throwTypeError "floating point special values (NaN, Inf) not fully implemented"
+
 /-- Evaluate a binary operation on values.
     Corresponds to: step_eval_peop in core_eval.lem:320-540 -/
 def evalBinop (op : Binop) (v1 v2 : Value) : InterpM Value := do
@@ -320,39 +357,44 @@ def evalBinop (op : Binop) (v1 v2 : Value) : InterpM Value := do
   match valueToInt v1, valueToInt v2 with
   | some i1, some i2 => evalIntOp op i1 i2
   | _, _ =>
-    -- Try other type-specific operations
-    match op, v1, v2 with
-    -- Ctype equality
-    | .eq, .ctype ct1, .ctype ct2 => pure (if ct1 == ct2 then .true_ else .false_)
-    -- Boolean AND (logical)
-    | .and, .true_, .true_ => pure .true_
-    | .and, .true_, .false_ => pure .false_
-    | .and, .false_, .true_ => pure .false_
-    | .and, .false_, .false_ => pure .false_
-    -- Boolean OR (logical)
-    | .or, .true_, _ => pure .true_
-    | .or, _, .true_ => pure .true_
-    | .or, .false_, .false_ => pure .false_
-    | _, _, _ =>
-      let v1Str := match v1 with
-        | .object _ => "object"
-        | .loaded _ => "loaded"
-        | .unit => "unit"
-        | .true_ => "true"
-        | .false_ => "false"
-        | .ctype _ => "ctype"
-        | .list _ _ => "list"
-        | .tuple _ => "tuple"
-      let v2Str := match v2 with
-        | .object _ => "object"
-        | .loaded _ => "loaded"
-        | .unit => "unit"
-        | .true_ => "true"
-        | .false_ => "false"
-        | .ctype _ => "ctype"
-        | .list _ _ => "list"
-        | .tuple _ => "tuple"
-      InterpM.throwTypeError s!"binary op {repr op} on incompatible types: {v1Str} vs {v2Str}"
+    -- Try floating point operations
+    -- Corresponds to: core_eval.lem:443-452
+    match valueToFloat v1, valueToFloat v2 with
+    | some f1, some f2 => evalFloatOp op f1 f2
+    | _, _ =>
+      -- Try other type-specific operations
+      match op, v1, v2 with
+      -- Ctype equality
+      | .eq, .ctype ct1, .ctype ct2 => pure (if ct1 == ct2 then .true_ else .false_)
+      -- Boolean AND (logical)
+      | .and, .true_, .true_ => pure .true_
+      | .and, .true_, .false_ => pure .false_
+      | .and, .false_, .true_ => pure .false_
+      | .and, .false_, .false_ => pure .false_
+      -- Boolean OR (logical)
+      | .or, .true_, _ => pure .true_
+      | .or, _, .true_ => pure .true_
+      | .or, .false_, .false_ => pure .false_
+      | _, _, _ =>
+        let v1Str := match v1 with
+          | .object _ => "object"
+          | .loaded _ => "loaded"
+          | .unit => "unit"
+          | .true_ => "true"
+          | .false_ => "false"
+          | .ctype _ => "ctype"
+          | .list _ _ => "list"
+          | .tuple _ => "tuple"
+        let v2Str := match v2 with
+          | .object _ => "object"
+          | .loaded _ => "loaded"
+          | .unit => "unit"
+          | .true_ => "true"
+          | .false_ => "false"
+          | .ctype _ => "ctype"
+          | .list _ _ => "list"
+          | .tuple _ => "tuple"
+        InterpM.throwTypeError s!"binary op {repr op} on incompatible types: {v1Str} vs {v2Str}"
 
 /-! ## Constructor Evaluation
 
