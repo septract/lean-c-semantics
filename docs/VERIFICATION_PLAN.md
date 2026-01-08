@@ -67,6 +67,31 @@ We control the interpreter completely. Every UB case is explicit in `InterpError
 
 **SOUND WP for Effectful Expressions:**
 - `wpExpr`: Defined via `runExprToValue` result (interpreter-grounded)
+- `wpExpr_noUB`, `wpExpr_post`: Soundness theorems (proven)
+- Compositional theorems established (proofs use `sorry` as TODOs):
+  - `wpExpr_bound`: Bounds wrapper is transparent
+  - `wpExpr_pure_val`: Pure value evaluation
+  - `wpExpr_pure`: Relates effectful WP to pure WP
+  - `wpExpr_let`: Pure let bindings
+  - `wpExpr_if`: Conditional evaluation
+  - `wpExpr_sseq`: Strong sequencing (effectful let)
+  - `wpExpr_wseq`: Weak sequencing
+  - `wpExpr_nd_first`: Nondeterministic choice (first element)
+  - `wpExpr_save`: Continuation definition
+  - `wpExpr_case`: Pattern matching
+- Memory action theorems (implications, proofs use `sorry`):
+  - `wpExpr_action_store_implies_valid`: Store requires valid pointer
+  - `wpExpr_action_load_implies_valid`: Load requires valid initialized pointer
+  - `wpExpr_action_kill_implies_valid`: Kill requires valid pointer
+- `wpExpr_proc`: Procedure call (placeholder)
+
+**Proof Obligations (using `sorry`):**
+The theorems above establish the correct compositional reasoning principles. Their proofs
+require showing that `runExprToValue` (the small-step interpreter) behaves as expected
+for each expression constructor. These are substantial proofs that involve:
+1. Unfolding `runExprToValue` → `runUntilDone` → `step`
+2. Showing how `step` transforms each expression form
+3. Proving the equivalence to the compositional WP
 
 **The Gap - Real C Programs:**
 Even the simplest C program `int main() { return 42; }` produces effectful Core IR:
@@ -79,20 +104,22 @@ proc main (): eff loaded integer :=
     pure(a_507)
 ```
 
-To verify this soundly, we need compositional **theorems** (not definitions) for:
+To verify this, we now have theorem statements for all constructs. The remaining work
+is discharging the `sorry` proofs:
 | Construct | What it does | Status |
 |-----------|--------------|--------|
-| `Expr.pure` | Lift pure expr to effectful | Need theorem |
-| `Expr.sseq` | Strong sequencing (let) | Need theorem |
-| `Expr.bound` | Bounds checking wrapper | Need theorem |
-| `Expr.run`/`Expr.save` | Continuation control flow | Need theorem |
-| `Pexpr.call` | Function calls | Need theorem |
+| `Expr.pure` | Lift pure expr to effectful | ✅ Theorem stated, proof TODO |
+| `Expr.sseq` | Strong sequencing (let) | ✅ Theorem stated, proof TODO |
+| `Expr.bound` | Bounds checking wrapper | ✅ Theorem stated, proof TODO |
+| `Expr.save` | Continuation definition | ✅ Theorem stated (simplified), proof TODO |
+| `Pexpr.call` | Function calls | Needs more work |
+| `Expr.run` | Continuation jump | Needs theorem (complex: tracks continuation context) |
 
 See `lean/CToLean/Test/RealAST.lean` for the full hand-constructed AST.
 
 **What We Need Next:**
-1. Prove compositional theorems about `wpExpr` by unfolding to `runExprToValue`
-2. Handle continuations soundly (prove behavior matches small-step semantics)
+1. Discharge `sorry` proofs for the compositional theorems
+2. Add theorem for `Expr.run` (requires continuation context tracking)
 3. Prove specific stdlib functions are UB-free (via interpreter execution)
 
 ## Goal: UB-Freeness Reasoning
