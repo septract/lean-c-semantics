@@ -65,6 +65,45 @@ See `docs/INTERPRETER_REFACTOR.md` for the audit checklist and correspondence do
 
 See `docs/MEMORY_AUDIT.md` for the memory model audit plan and Cerberus correspondence mapping.
 
+### 0.5. CRITICAL: Verification Must Be Sound (True Theorems of the Interpreter)
+
+**EVERY verification theorem MUST be a TRUE THEOREM about the interpreter.**
+
+- Verification predicates (WP, UB-freeness, etc.) MUST be defined in terms of the interpreter's actual execution
+- Syntactic definitions on the AST that are not connected to interpreter semantics are WORTHLESS
+- NO assumptions about "safe functions" or "UB-free operations" without PROVING them against the interpreter
+- Compositional rules MUST be THEOREMS proven sound, not DEFINITIONS asserted to be true
+
+**What is SOUND:**
+```lean
+-- GOOD: WP defined via interpreter result
+def wpPure (pe : APexpr) (Q : PurePost) ... : Prop :=
+  match ((evalPexpr fuel env pe).run interpEnv).run state with
+  | .ok (v, s') => Q v s'
+  | .error (.undefinedBehavior _ _) => False
+  | .error _ => True
+
+-- GOOD: Compositional rule proven as theorem
+theorem wpPureN_if : wpPureN (fuel+1) (if cond then_ else_) Q ... ↔ ... := by
+  simp only [wpPureN, evalPexpr]  -- Actually unfolds to interpreter
+  ...
+```
+
+**What is UNSOUND (FORBIDDEN):**
+```lean
+-- BAD: Structural definition not connected to interpreter
+def wpExprN (e : AExpr) ... : Prop :=
+  match e.expr with
+  | .pure pe => wpPureN pe ...  -- This LOOKS compositional
+  | .sseq _ e1 e2 => wpExprN e1 ... ∧ wpExprN e2 ...  -- But is NOT proven sound
+
+-- BAD: Ungrounded assertion
+def isKnownSafeFunction (name : String) : Bool :=
+  name ∈ ["conv_loaded_int", ...]  -- Says nothing about interpreter!
+```
+
+We control the interpreter completely. Every UB case is explicit. There are NO excuses for ungrounded assumptions.
+
 ### 1. Manual Translation (not Lem/Ott backends)
 We manually translate Cerberus Core semantics to Lean rather than creating automated backends because:
 - Allows idiomatic Lean 4 code

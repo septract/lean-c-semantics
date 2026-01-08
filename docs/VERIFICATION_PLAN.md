@@ -2,7 +2,53 @@
 
 This document outlines strategies for enabling formal verification of C programs in Lean, building on the existing interpreter infrastructure.
 
-## Current State (Updated 2026-01-06)
+## CRITICAL: Soundness Requirement
+
+**Every verification theorem MUST be a TRUE THEOREM about the interpreter.**
+
+This is non-negotiable. The interpreter defines the semantics. Any verification predicate that is not defined in terms of interpreter execution is worthless.
+
+### What is SOUND:
+
+1. **Interpreter-grounded definitions** - WP defined via interpreter result:
+```lean
+def wpPureN (fuel : Nat) (pe : APexpr) (Q : PurePost) ... : Prop :=
+  match ((evalPexpr fuel env pe).run interpEnv).run state with
+  | .ok (v, s') => Q v s'
+  | .error (.undefinedBehavior _ _) => False
+  | .error _ => True
+```
+
+2. **Compositional rules as THEOREMS** - proven by unfolding to interpreter:
+```lean
+theorem wpPureN_if (fuel : Nat) (cond then_ else_ : Pexpr) ... :
+    wpPureN (fuel + 1) ⟨[], none, .if_ cond then_ else_⟩ Q env interpEnv state ↔
+    wpPureN fuel ⟨[], none, cond⟩ (fun v s => ...) env interpEnv state := by
+  simp only [wpPureN, evalPexpr]  -- Unfolds to actual interpreter semantics
+  ...
+```
+
+### What is UNSOUND (FORBIDDEN):
+
+1. **Structural definitions without soundness proofs**:
+```lean
+-- BAD: Looks compositional but NOT connected to interpreter
+def wpExprN (e : AExpr) ... : Prop :=
+  match e.expr with
+  | .pure pe => wpPureN pe ...
+  | .sseq _ e1 e2 => wpExprN e1 ... ∧ wpExprN e2 ...
+```
+
+2. **Ungrounded assertions about safety**:
+```lean
+-- BAD: Says nothing about what interpreter actually does
+def isKnownSafeFunction (name : String) : Bool :=
+  name ∈ ["conv_loaded_int", ...]
+```
+
+We control the interpreter completely. Every UB case is explicit in `InterpError.undefinedBehavior`. There are NO excuses for assumptions not backed by proofs.
+
+## Current State (Updated 2026-01-07)
 
 **What We Have:**
 - Working Core IR parser (100% on 5500+ test files)
@@ -11,12 +57,16 @@ This document outlines strategies for enabling formal verification of C programs
 - `UndefinedBehavior` type covering all major UB categories
 - `InterpM` monad: `ReaderT InterpEnv (StateT InterpState (Except InterpError))`
 
-**WP Calculus for Pure Expressions (DONE):**
-- `wpPureN`: Fuel-indexed WP transformer for `Pexpr` (pure expressions)
-- Compositional rules proven: `wpPureN_if`, `wpPureN_let`, `wpPureN_binop_implies_e1`
-- `wp_simp` macro for automated concrete proofs
-- Examples verified: literals, conditionals, nested conditionals
-- Symbolic theorems: `literal_wp`, `literal_ubfree`
+**SOUND WP Calculus for Pure Expressions:**
+- `wpPureN`: Fuel-indexed WP defined via `evalPexpr` result (interpreter-grounded)
+- `wpPure`: Same with default fuel
+- `wpPureN_noUB`, `wpPure_noUB`: Soundness theorems - WP implies no UB
+- `wpPureN_post`, `wpPure_post`: Postcondition theorems
+- Compositional rules **proven as theorems**: `wpPureN_if`, `wpPureN_let`, `wpPureN_binop_implies_e1`
+- `wpPureN_val`, `wpPure_val`: WP for value literals
+
+**SOUND WP for Effectful Expressions:**
+- `wpExpr`: Defined via `runExprToValue` result (interpreter-grounded)
 
 **The Gap - Real C Programs:**
 Even the simplest C program `int main() { return 42; }` produces effectful Core IR:
@@ -29,21 +79,21 @@ proc main (): eff loaded integer :=
     pure(a_507)
 ```
 
-This requires constructs we don't yet handle:
+To verify this soundly, we need compositional **theorems** (not definitions) for:
 | Construct | What it does | Status |
 |-----------|--------------|--------|
-| `Expr.pure` | Lift pure expr to effectful | Not yet |
-| `Expr.sseq` | Strong sequencing (let) | Not yet |
-| `Expr.bound` | Bounds checking wrapper | Not yet |
-| `Expr.run`/`Expr.save` | Continuation control flow | Not yet |
-| `Pexpr.call` | Function calls | Not yet |
+| `Expr.pure` | Lift pure expr to effectful | Need theorem |
+| `Expr.sseq` | Strong sequencing (let) | Need theorem |
+| `Expr.bound` | Bounds checking wrapper | Need theorem |
+| `Expr.run`/`Expr.save` | Continuation control flow | Need theorem |
+| `Pexpr.call` | Function calls | Need theorem |
 
 See `lean/CToLean/Test/RealAST.lean` for the full hand-constructed AST.
 
 **What We Need Next:**
-1. Extend WP to effectful expressions (`wpExprN`)
-2. Handle continuations for function returns
-3. Integrate stdlib semantics (`conv_loaded_int`, etc.)
+1. Prove compositional theorems about `wpExpr` by unfolding to `runExprToValue`
+2. Handle continuations soundly (prove behavior matches small-step semantics)
+3. Prove specific stdlib functions are UB-free (via interpreter execution)
 
 ## Goal: UB-Freeness Reasoning
 
