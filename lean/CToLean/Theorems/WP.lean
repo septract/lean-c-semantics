@@ -210,173 +210,271 @@ Effectful expressions (Expr) can modify memory state. Their WP must account
 for state changes.
 
 The evaluation of effectful expressions uses small-step semantics (`step` in Step.lean).
-For compositional reasoning, we define `wpExprN` structurally and prove it
-corresponds to the small-step evaluation.
-
-### Design
-
-We define WP compositionally by case analysis on the expression structure:
-- `Expr.pure pe`: Lift `wpPureN` for the inner pure expression
-- `Expr.sseq pat e1 e2`: Compose WPs - verify e1, bind result, verify e2
-- `Expr.bound e`: Pass through (bounds checking is semantic, not a separate WP concern)
-
-Note: Full compositional WP for continuations (`save`/`run`) and memory operations
-requires more infrastructure and will be added incrementally.
+The SOUND approach is to define WP in terms of the interpreter result.
 -/
 
-/-- Weakest precondition for effectful expression evaluation (full small-step).
+/-- SOUND: Weakest precondition for effectful expression evaluation.
 
-    This uses `runExprToValue` which runs the small-step interpreter.
-    Primarily useful for concrete examples; compositional rules below
-    are more useful for symbolic reasoning.
+    This is defined via `runExprToValue` which runs the small-step interpreter.
+    Like `wpPureN`, this is interpreter-grounded and therefore sound.
+
+    To prove compositional rules for this, we need to prove theorems showing
+    how `runExprToValue` behaves for each expression constructor.
+
+    Parameters:
+    - `e`: The effectful expression to evaluate
+    - `Q`: Postcondition relating final value to final state
+    - `file`: The Core IR file (needed for function lookups)
+    - `env`: The variable environment
+    - `interpEnv`: Interpreter environment (type info, etc.)
+    - `state`: Initial interpreter state (memory, etc.)
 -/
-def wpExpr (e : AExpr) (Q : ExprPost) (file : File) (interpEnv : InterpEnv)
-    (state : InterpState) : Prop :=
-  match ((runExprToValue e [] file).run interpEnv).run state with
+def wpExpr (e : AExpr) (Q : ExprPost) (file : File) (env : List (HashMap Sym Value))
+    (interpEnv : InterpEnv) (state : InterpState) : Prop :=
+  match ((runExprToValue e env file).run interpEnv).run state with
   | .ok (v, state') => Q v state'
   | .error (.undefinedBehavior _ _) => False
   | .error _ => True
 
-/-! ### Compositional WP for Effectful Expressions
+/-- SOUND: Weakest precondition for effectful expression evaluation WITH continuations.
 
-These definitions enable compositional reasoning about effectful expressions
-without running the full small-step interpreter.
+    This is the proper definition for programs that use save/run for control flow.
+    Unlike `wpExpr`, this takes `allLabeledConts` and `currentProc` as parameters,
+    allowing `Erun` to find its target continuation.
+
+    **IMPORTANT**: `wpExpr` (without continuations) is NOT suitable for verifying
+    programs with save/run! It passes empty `allLabeledConts`, so `Erun` always
+    fails with `illformedProgram`. Since that's not UB, wpExpr returns True
+    vacuously.
+
+    Use this definition for real C programs that use return statements, loops,
+    or other control flow that compiles to save/run.
+
+    Parameters:
+    - `e`: The effectful expression to evaluate
+    - `Q`: Postcondition relating final value to final state
+    - `file`: The Core IR file
+    - `allLabeledConts`: Pre-computed labeled continuations (from extractLabeledConts)
+    - `currentProc`: The current procedure symbol (continuations are per-procedure)
+    - `env`: The variable environment
+    - `interpEnv`: Interpreter environment
+    - `state`: Initial interpreter state
+
+    The continuation map is indexed by procedure, then by label:
+    `allLabeledConts[currentProc][label] = { params, body }`
 -/
-
-/-- Fuel-indexed WP for effectful expressions (compositional).
-
-    `wpExprN fuel e Q env interpEnv state` holds iff evaluating `e` with at most
-    `fuel` steps doesn't produce UB and satisfies postcondition Q.
-
-    This is defined compositionally by structural recursion on the expression,
-    NOT by running the interpreter. This enables compositional proof rules.
--/
-def wpExprN (fuel : Nat) (e : AExpr) (Q : ExprPost) (env : List (HashMap Sym Value))
+def wpExprWithConts (e : AExpr) (Q : ExprPost) (file : File)
+    (allLabeledConts : HashMap Sym LabeledConts)
+    (currentProc : Sym)
+    (env : List (HashMap Sym Value))
     (interpEnv : InterpEnv) (state : InterpState) : Prop :=
-  match fuel with
-  | 0 => True  -- Out of fuel is not UB
-  | fuel' + 1 =>
-    match e.expr with
-    -- Epure: lift the pure expression WP
-    | .pure pe => wpPureN fuel' pe Q env interpEnv state
+  let st : ThreadState := {
+    arena := e
+    stack := .cons (some currentProc) [] .empty
+    env := env
+    currentProc := some currentProc
+  }
+  match ((runUntilDone st file allLabeledConts).run interpEnv).run state with
+  | .ok (v, state') => Q v state'
+  | .error (.undefinedBehavior _ _) => False
+  | .error _ => True
 
-    -- Esseq: strong sequencing (let binding for effects)
-    -- Corresponds to: let pat = e1 in e2
-    | .sseq pat e1 e2 =>
-        wpExprN fuel' e1 (fun v1 s1 =>
-          match matchPattern pat v1 with
-          | some bindings => wpExprN fuel' e2 Q (bindAllInEnv bindings env) interpEnv s1
-          | none => True  -- Pattern match failure is not UB
-        ) env interpEnv state
+/-! ## WP Soundness for Effectful Expressions -/
 
-    -- Ewseq: weak sequencing (similar to sseq for sequential fragment)
-    | .wseq pat e1 e2 =>
-        wpExprN fuel' e1 (fun v1 s1 =>
-          match matchPattern pat v1 with
-          | some bindings => wpExprN fuel' e2 Q (bindAllInEnv bindings env) interpEnv s1
-          | none => True
-        ) env interpEnv state
+/-- If wpExpr holds, then evaluation doesn't produce UB -/
+theorem wpExpr_noUB (e : AExpr) (Q : ExprPost) (file : File) (env : List (HashMap Sym Value))
+    (interpEnv : InterpEnv) (state : InterpState)
+    (h : wpExpr e Q file env interpEnv state) :
+    isUBResult (((runExprToValue e env file).run interpEnv).run state) = false := by
+  unfold wpExpr at h
+  unfold isUBResult
+  cases hres : ((runExprToValue e env file).run interpEnv).run state with
+  | ok p => rfl
+  | error e =>
+    simp only [hres] at h
+    cases e with
+    | undefinedBehavior ub loc => exact absurd h (by simp)
+    | _ => rfl
 
-    -- Ebound: bounds checking wrapper (transparent for WP)
-    | .bound e' => wpExprN fuel' e' Q env interpEnv state
+/-- If wpExpr holds and evaluation succeeds, postcondition holds -/
+theorem wpExpr_post (e : AExpr) (Q : ExprPost) (file : File) (env : List (HashMap Sym Value))
+    (interpEnv : InterpEnv) (state : InterpState)
+    (h : wpExpr e Q file env interpEnv state)
+    (result : Value × InterpState)
+    (heval : ((runExprToValue e env file).run interpEnv).run state = Except.ok result) :
+    Q result.1 result.2 := by
+  unfold wpExpr at h
+  rw [heval] at h
+  exact h
 
-    -- Eif: conditional
-    | .if_ cond e1 e2 =>
-        wpPureN fuel' cond (fun v s =>
-          match v with
-          | .true_ => wpExprN fuel' e1 Q env interpEnv s
-          | .false_ => wpExprN fuel' e2 Q env interpEnv s
-          | _ => True  -- Type error, not UB
-        ) env interpEnv state
+/-! ## Compositional Rules for Effectful Expressions
 
-    -- Elet: let binding (pure expression bound to pattern)
-    | .let_ pat pe body =>
-        wpPureN fuel' pe (fun v s =>
-          match matchPattern pat v with
-          | some bindings => wpExprN fuel' body Q (bindAllInEnv bindings env) interpEnv s
-          | none => True
-        ) env interpEnv state
+These theorems establish compositional reasoning principles for `wpExpr`.
+They are SOUND because they are proven theorems about the interpreter-grounded
+definition, not structural definitions on the AST.
 
-    -- Not yet implemented - conservatively return True (not UB)
-    | .memop _ _ => True
-    | .action _ => True
-    | .case_ _ _ => True
-    | .ccall _ _ _ => True
-    | .proc _ _ => True
-    | .unseq _ => True
-    | .nd _ => True
-    | .save _ _ _ _ => True
-    | .run _ _ => True
-    | .par _ => True
-    | .wait _ => True
-
-/-! ### WP Rules for Effectful Expressions
-
-Compositional rules for reasoning about `wpExprN`.
+The proofs use `sorry` where substantial proof work is needed. These establish
+the proof obligations that need to be discharged for full soundness.
 -/
 
-/-- WP for Expr.pure: just lifts the pure expression WP -/
-theorem wpExprN_pure (fuel : Nat) (pe : APexpr) (Q : ExprPost)
-    (env : List (HashMap Sym Value)) (interpEnv : InterpEnv) (state : InterpState) :
-    wpExprN (fuel + 1) ⟨[], .pure pe⟩ Q env interpEnv state ↔
-    wpPureN fuel pe Q env interpEnv state := by
-  simp only [wpExprN]
+/-- WP for Expr.bound: bounds wrapper is transparent for WP.
 
-/-- WP for Expr.bound: transparent wrapper -/
-theorem wpExprN_bound (fuel : Nat) (e : AExpr) (Q : ExprPost)
-    (env : List (HashMap Sym Value)) (interpEnv : InterpEnv) (state : InterpState) :
-    wpExprN (fuel + 1) ⟨[], .bound e⟩ Q env interpEnv state ↔
-    wpExprN fuel e Q env interpEnv state := by
-  simp only [wpExprN]
+    `Ebound e` evaluates to the same result as `e` - it's just a marker
+    for bounds checking that doesn't affect execution.
 
-/-- WP for Expr.sseq: compose WPs with pattern binding -/
-theorem wpExprN_sseq (fuel : Nat) (pat : APattern) (e1 e2 : AExpr) (Q : ExprPost)
-    (env : List (HashMap Sym Value)) (interpEnv : InterpEnv) (state : InterpState) :
-    wpExprN (fuel + 1) ⟨[], .sseq pat e1 e2⟩ Q env interpEnv state ↔
-    wpExprN fuel e1 (fun v1 s1 =>
+    Corresponds to: core_run.lem:1643-1649
+    ```lem
+    | Ebound (_, e) -> Return (TSrunning (st with arena = e))
+    ```
+-/
+theorem wpExpr_bound (e : AExpr) (Q : ExprPost) (file : File) (env : List (HashMap Sym Value))
+    (interpEnv : InterpEnv) (state : InterpState) :
+    wpExpr ⟨[], .bound e⟩ Q file env interpEnv state ↔
+    wpExpr e Q file env interpEnv state := by
+  -- The step function simply unwraps Ebound:
+  -- | .bound e, _ => pure (.continue_ { st with arena := e })
+  -- So execution of (Ebound e) is identical to execution of e
+  sorry
+
+/-- WP for Expr.pure with a value: just check postcondition.
+
+    `Epure (PEval v)` immediately evaluates to `v` without modifying state.
+
+    Corresponds to: core_run.lem:1540-1542 and 1556-1616
+-/
+theorem wpExpr_pure_val (v : Value) (Q : ExprPost) (file : File) (env : List (HashMap Sym Value))
+    (interpEnv : InterpEnv) (state : InterpState) :
+    wpExpr ⟨[], .pure ⟨[], none, .val v⟩⟩ Q file env interpEnv state ↔
+    Q v state := by
+  -- When arena is Epure(PEval v) and stack is empty, step returns .done v
+  -- The state is unchanged
+  sorry
+
+/-- WP for Expr.pure with general pexpr: relates to wpPureN.
+
+    `Epure pe` evaluates `pe` as a pure expression and returns the result.
+    State may be modified by pure evaluation (though typically not).
+
+    This connects wpExpr (effectful) to wpPureN (pure).
+-/
+theorem wpExpr_pure (pe : APexpr) (Q : ExprPost) (file : File) (env : List (HashMap Sym Value))
+    (interpEnv : InterpEnv) (state : InterpState) :
+    wpExpr ⟨[], .pure pe⟩ Q file env interpEnv state ↔
+    wpPureN defaultPexprFuel pe (fun v s => Q v s) env interpEnv state := by
+  -- The step function calls evalPexpr for pure expressions:
+  -- | .pure pe, .empty =>
+  --     let cval ← evalPexpr defaultPexprFuel st.env pe
+  --     pure (.continue_ { st with arena := mkValueExpr arenaAnnots cval })
+  sorry
+
+/-- WP for Expr.let_: evaluate bound expression, then body with bindings.
+
+    `Elet pat pe1 e2` evaluates `pe1` (pure), binds the result according to `pat`,
+    then evaluates `e2` with the extended environment.
+
+    Corresponds to: core_run.lem:837-865
+-/
+theorem wpExpr_let (pat : APattern) (pe1 : APexpr) (e2 : AExpr) (Q : ExprPost)
+    (file : File) (env : List (HashMap Sym Value))
+    (interpEnv : InterpEnv) (state : InterpState) :
+    wpExpr ⟨[], .let_ pat pe1 e2⟩ Q file env interpEnv state ↔
+    wpPureN defaultPexprFuel pe1 (fun v1 s1 =>
       match matchPattern pat v1 with
-      | some bindings => wpExprN fuel e2 Q (bindAllInEnv bindings env) interpEnv s1
-      | none => True
+      | some bindings => wpExpr e2 Q file (bindAllInEnv bindings env) interpEnv s1
+      | none => True  -- Pattern match failure is not UB
     ) env interpEnv state := by
-  simp only [wpExprN]
+  -- The step function for Elet:
+  -- | .let_ pat pe1 e2, _ =>
+  --     let cval ← evalPexpr defaultPexprFuel st.env pe1
+  --     match st.updateEnv pat cval with
+  --     | some st' => pure (.continue_ { st' with arena := e2 })
+  --     | none => throw .patternMatchFailed
+  sorry
 
-/-- WP for Expr.if_: condition determines branch -/
-theorem wpExprN_if (fuel : Nat) (cond : APexpr) (e1 e2 : AExpr) (Q : ExprPost)
-    (env : List (HashMap Sym Value)) (interpEnv : InterpEnv) (state : InterpState) :
-    wpExprN (fuel + 1) ⟨[], .if_ cond e1 e2⟩ Q env interpEnv state ↔
-    wpPureN fuel cond (fun v s =>
-      match v with
-      | .true_ => wpExprN fuel e1 Q env interpEnv s
-      | .false_ => wpExprN fuel e2 Q env interpEnv s
-      | _ => True
-    ) env interpEnv state := by
-  simp only [wpExprN]
+/-- WP for Expr.if_: evaluate condition, then appropriate branch.
 
-/-! ### Symbolic Examples for Effectful WP
+    `Eif cond then_ else_` evaluates `cond` (pure), then evaluates
+    `then_` if true or `else_` if false.
 
-These theorems show how to use the compositional rules.
-Note: Concrete evaluation examples are in Examples.lean.
+    Corresponds to: core_run.lem:870-924
 -/
+theorem wpExpr_if (cond : APexpr) (then_ else_ : AExpr) (Q : ExprPost)
+    (file : File) (env : List (HashMap Sym Value))
+    (interpEnv : InterpEnv) (state : InterpState) :
+    wpExpr ⟨[], .if_ cond then_ else_⟩ Q file env interpEnv state ↔
+    wpPureN defaultPexprFuel cond (fun v s =>
+      match v with
+      | .true_ => wpExpr then_ Q file env interpEnv s
+      | .false_ => wpExpr else_ Q file env interpEnv s
+      | _ => True  -- Type error, not UB
+    ) env interpEnv state := by
+  -- The step function for Eif:
+  -- | .if_ cond then_ else_, .cons _ _ _ =>
+  --     let condVal ← evalPexpr defaultPexprFuel st.env cond
+  --     match condVal with
+  --     | .true_ => pure (.continue_ { st with arena := then_ })
+  --     | .false_ => pure (.continue_ { st with arena := else_ })
+  --     | _ => throw (.typeError "if condition must be boolean")
+  sorry
 
-/-- Helper: create an AExpr with no annotations -/
-def mkAExpr' (e : Expr) : AExpr := ⟨[], e⟩
+/-- WP for Expr.sseq: strong sequencing (effectful let).
 
-/-- For any value v, pure(v) satisfies Q iff Q v holds -/
-theorem wpExprN_pure_val (fuel : Nat) (v : Value) (Q : ExprPost)
-    (env : List (HashMap Sym Value)) (interpEnv : InterpEnv) (state : InterpState) :
-    wpExprN (fuel + 2) ⟨[], .pure ⟨[], none, .val v⟩⟩ Q env interpEnv state ↔ Q v state := by
-  rw [wpExprN_pure]
-  simp only [wpPureN, evalPexpr, pure, ReaderT.pure, ReaderT.run,
-    StateT.pure, StateT.run, Except.pure]
+    `Esseq pat e1 e2` evaluates `e1`, binds result to `pat`, then evaluates `e2`.
+    Unlike `Elet`, `e1` can be an arbitrary effectful expression.
 
-/-- Bound is transparent for verification -/
-theorem wpExprN_bound_pure_val (fuel : Nat) (v : Value) (Q : ExprPost)
-    (env : List (HashMap Sym Value)) (interpEnv : InterpEnv) (state : InterpState) :
-    wpExprN (fuel + 3) ⟨[], .bound ⟨[], .pure ⟨[], none, .val v⟩⟩⟩ Q env interpEnv state ↔ Q v state := by
-  rw [wpExprN_bound]
-  rw [wpExprN_pure]
-  simp only [wpPureN, evalPexpr, pure, ReaderT.pure, ReaderT.run,
-    StateT.pure, StateT.run, Except.pure]
+    Corresponds to: core_run.lem:1450-1489
+-/
+theorem wpExpr_sseq (pat : APattern) (e1 e2 : AExpr) (Q : ExprPost)
+    (file : File) (env : List (HashMap Sym Value))
+    (interpEnv : InterpEnv) (state : InterpState) :
+    wpExpr ⟨[], .sseq pat e1 e2⟩ Q file env interpEnv state ↔
+    wpExpr e1 (fun v1 s1 =>
+      match matchPattern pat v1 with
+      | some bindings => wpExpr e2 Q file (bindAllInEnv bindings env) interpEnv s1
+      | none => True  -- Pattern match failure is not UB
+    ) file env interpEnv state := by
+  -- The step function handles sseq by:
+  -- 1. If e1 is already a value, bind and continue with e2
+  -- 2. Otherwise, push continuation and focus on e1
+  -- The overall effect is sequential composition
+  sorry
+
+/-- WP for Expr.wseq: weak sequencing.
+
+    `Ewseq pat e1 e2` is similar to `Esseq` but allows interleaving in
+    concurrent contexts. In sequential execution (which we use), it's
+    equivalent to `Esseq`.
+
+    Corresponds to: core_run.lem:1408-1445
+-/
+theorem wpExpr_wseq (pat : APattern) (e1 e2 : AExpr) (Q : ExprPost)
+    (file : File) (env : List (HashMap Sym Value))
+    (interpEnv : InterpEnv) (state : InterpState) :
+    wpExpr ⟨[], .wseq pat e1 e2⟩ Q file env interpEnv state ↔
+    wpExpr e1 (fun v1 s1 =>
+      match matchPattern pat v1 with
+      | some bindings => wpExpr e2 Q file (bindAllInEnv bindings env) interpEnv s1
+      | none => True
+    ) file env interpEnv state := by
+  -- Similar to sseq - in sequential execution they're equivalent
+  sorry
+
+/-- WP for Expr.nd: nondeterministic choice.
+
+    `End es` nondeterministically chooses one of the expressions.
+    For UB-freeness, ALL choices must be UB-free. For our deterministic
+    interpreter (which picks the first), we only need the first to be safe.
+
+    Corresponds to: core_run.lem:1618-1623
+-/
+theorem wpExpr_nd_first (e : AExpr) (es : List AExpr) (Q : ExprPost)
+    (file : File) (env : List (HashMap Sym Value))
+    (interpEnv : InterpEnv) (state : InterpState) :
+    wpExpr ⟨[], .nd (e :: es)⟩ Q file env interpEnv state ↔
+    wpExpr e Q file env interpEnv state := by
+  -- Our interpreter picks the first element:
+  -- | .nd es, _ => match es with | e :: _ => ...
+  sorry
 
 /-! ## Memory Operation WP
 
@@ -392,6 +490,448 @@ def wpStore (ptr : PointerValue) (state : InterpState) : Prop :=
 def wpLoad (ptr : PointerValue) (state : InterpState) : Prop :=
   ValidInitializedPointer ptr state.memory
   -- The loaded value would need to satisfy Q
+
+/-! ## Continuation WP Rules
+
+Rules for save/run which implement control flow in Core IR.
+These are used for return statements, loops, etc.
+-/
+
+/-- Helper: WP for evaluating default arguments in a save expression.
+
+    All default argument expressions must evaluate without UB.
+-/
+def wpSaveDefaults (params : List (Sym × BaseType × APexpr))
+    (env : List (HashMap Sym Value))
+    (interpEnv : InterpEnv) (state : InterpState) : Prop :=
+  ∀ (param : Sym × BaseType × APexpr), param ∈ params →
+    wpPureN defaultPexprFuel param.2.2 (fun _ _ => True) env interpEnv state
+
+/-- WP for Expr.save: define a labeled continuation.
+
+    `Esave sym retTy [(p1, ty1, default1), ...] body` defines a continuation
+    point that can be jumped to with `Erun sym args`. The default values
+    are evaluated and bound to the parameters.
+
+    **IMPORTANT**: This theorem has two parts:
+    1. All default argument expressions must evaluate without UB
+    2. The body must satisfy the postcondition
+
+    Note: The body may contain `Erun` that jumps to THIS continuation or
+    others. In such cases, execution may not follow the body linearly.
+    However, for UB-freeness, we still need the body's WP to hold because
+    that's what will execute if/when control reaches this save.
+
+    For programs with complex control flow (run jumping elsewhere), use
+    `wpExprWithConts` which properly tracks all continuations.
+
+    Corresponds to: core_run.lem:1494-1501
+-/
+theorem wpExpr_save (sym : Sym) (retTy : BaseType) (params : List (Sym × BaseType × APexpr))
+    (body : AExpr) (Q : ExprPost)
+    (file : File) (env : List (HashMap Sym Value))
+    (interpEnv : InterpEnv) (state : InterpState) :
+    wpExpr ⟨[], .save sym retTy params body⟩ Q file env interpEnv state ↔
+    -- Default args must evaluate without UB
+    wpSaveDefaults params env interpEnv state ∧
+    -- Body must satisfy Q (with defaults bound to parameters)
+    wpExpr body Q file env interpEnv state := by
+  -- The step function:
+  -- 1. Evaluates all default expressions
+  -- 2. Binds results to parameter symbols
+  -- 3. Registers the continuation
+  -- 4. Continues with body
+  sorry
+
+/-- WP for Expr.run: jump to a labeled continuation.
+
+    `Erun sym args` evaluates the arguments and jumps to the continuation
+    labeled `sym`, passing the argument values.
+
+    **CRITICAL LIMITATION**: `wpExpr` passes empty `allLabeledConts` to the
+    interpreter, so `Erun` ALWAYS fails with `illformedProgram` (not UB).
+    This means `wpExpr` returns `True` vacuously for any Erun expression!
+
+    This theorem is therefore trivially correct for `wpExpr`, but USELESS
+    for verification. For programs with save/run, use `wpExprWithConts`.
+
+    Corresponds to: core_run.lem:1509-1530
+-/
+theorem wpExpr_run (sym : Sym) (args : List APexpr) (Q : ExprPost)
+    (file : File) (env : List (HashMap Sym Value))
+    (interpEnv : InterpEnv) (state : InterpState) :
+    wpExpr ⟨[], .run sym args⟩ Q file env interpEnv state ↔
+    -- With wpExpr (no continuations), run always fails with illformedProgram
+    -- Since that's not UB, the WP is vacuously True
+    -- Arguments still need to evaluate without UB (executed before lookup)
+    (∀ argPe ∈ args, wpPureN defaultPexprFuel argPe (fun _ _ => True) env interpEnv state) ∧
+    True  -- Vacuously true because run fails with non-UB error
+    := by
+  -- The step function tries to look up the continuation in allLabeledConts
+  -- Since wpExpr passes {}, lookup fails → illformedProgram → True
+  sorry
+
+/-- WP for Expr.run WITH continuation context.
+
+    This is the PROPER version for programs that use save/run.
+    It requires the continuation to exist in `allLabeledConts` and
+    includes the WP of the continuation body.
+
+    Parameters:
+    - `sym`: The continuation label to jump to
+    - `args`: Arguments to pass to the continuation
+    - `allLabeledConts`: The continuation context (from extractLabeledConts or Esave)
+    - `currentProc`: The current procedure symbol (continuations are per-procedure)
+-/
+theorem wpExprWithConts_run (sym : Sym) (args : List APexpr) (Q : ExprPost)
+    (file : File) (allLabeledConts : HashMap Sym LabeledConts)
+    (currentProc : Sym) (procConts : LabeledConts)
+    (cont : LabeledCont)
+    (env : List (HashMap Sym Value))
+    (interpEnv : InterpEnv) (state : InterpState)
+    -- The continuation must exist in allLabeledConts[currentProc]
+    (h_proc : allLabeledConts[currentProc]? = some procConts)
+    (h_cont : procConts[sym]? = some cont) :
+    wpExprWithConts ⟨[], .run sym args⟩ Q file allLabeledConts currentProc env interpEnv state ↔
+    -- Arguments must evaluate without UB
+    (∀ argPe ∈ args, wpPureN defaultPexprFuel argPe (fun _ _ => True) env interpEnv state) ∧
+    -- Continuation body must satisfy Q (with args bound to params)
+    -- (Simplified: full version would bind evaluated args to cont.params)
+    wpExprWithConts cont.body Q file allLabeledConts currentProc env interpEnv state := by
+  -- The step function:
+  -- 1. Evaluates args
+  -- 2. Looks up continuation by sym in allLabeledConts[currentProc]
+  -- 3. Binds args to continuation params
+  -- 4. Continues with continuation body
+  sorry
+
+/-- Helper: WP for case branches with FIRST-MATCH semantics.
+
+    Processes branches in order: first matching pattern wins.
+    If no pattern matches, we get patternMatchFailed (not UB, so True).
+
+    This is the correct semantics - the existential version was WRONG because
+    if branch 1 matches and is unsafe, but branch 2 matches and is safe,
+    the existential holds but execution follows the unsafe branch 1.
+-/
+def wpCaseBranches (v : Value) (branches : List (APattern × AExpr))
+    (Q : ExprPost) (file : File) (env : List (HashMap Sym Value))
+    (interpEnv : InterpEnv) (state : InterpState) : Prop :=
+  match branches with
+  | [] => True  -- No match = patternMatchFailed, not UB
+  | (pat, body) :: rest =>
+    match matchPattern pat v with
+    | some bindings => wpExpr body Q file (bindAllInEnv bindings env) interpEnv state
+    | none => wpCaseBranches v rest Q file env interpEnv state
+
+/-- WP for Expr.case: pattern matching with FIRST-MATCH semantics.
+
+    `Ecase scrut branches` evaluates the scrutinee, then matches against
+    branches to find the FIRST matching pattern and executes that branch.
+
+    **IMPORTANT**: We use first-match semantics, not existential. The previous
+    version using ∃ was WRONG because execution always takes the first
+    matching branch, regardless of whether later branches might also match.
+
+    Corresponds to: core_run.lem:785-835
+-/
+theorem wpExpr_case (scrut : APexpr) (branches : List (APattern × AExpr)) (Q : ExprPost)
+    (file : File) (env : List (HashMap Sym Value))
+    (interpEnv : InterpEnv) (state : InterpState) :
+    wpExpr ⟨[], .case_ scrut branches⟩ Q file env interpEnv state ↔
+    wpPureN defaultPexprFuel scrut (fun v s =>
+      wpCaseBranches v branches Q file env interpEnv s
+    ) env interpEnv state := by
+  -- Pattern matching finds first match and executes that branch
+  -- Pattern matching failure throws patternMatchFailed, not UB
+  sorry
+
+/-! ## Action Expression WP Rules
+
+Rules for memory actions (Eaction) which can cause UB.
+These are the critical rules for memory safety verification.
+
+Note: Memory actions are wrapped in Paction (polarity + AAction) and AAction (loc + Action).
+The theorems below describe what the WP of an action expression implies.
+-/
+
+/-- WP for store action: validates memory store operation.
+
+    Store can cause UB if:
+    - Pointer is null
+    - Pointer is invalid (use after free, out of bounds)
+    - Type mismatch
+    - Writing to read-only memory
+
+    This theorem shows: if store doesn't cause UB, then the pointer must be valid.
+-/
+theorem wpExpr_action_store_implies_valid (pol : Polarity) (loc : Loc)
+    (isLocking : Bool) (tyPe ptrPe valPe : APexpr) (order : MemoryOrder) (Q : ExprPost)
+    (file : File) (env : List (HashMap Sym Value))
+    (interpEnv : InterpEnv) (state : InterpState)
+    (h : wpExpr ⟨[], .action ⟨pol, ⟨loc, .store isLocking tyPe ptrPe valPe order⟩⟩⟩ Q
+        file env interpEnv state) :
+    -- If the WP holds, then the store doesn't cause UB
+    -- This implies: pointer evaluates to something valid
+    wpPureN defaultPexprFuel ptrPe (fun ptrVal _ =>
+      match ptrVal with
+      | .object (.pointer ptr) => ValidPointer ptr state.memory
+      | .loaded (.specified (.pointer ptr)) => ValidPointer ptr state.memory
+      | _ => True  -- Non-pointer causes type error, not necessarily UB
+    ) env interpEnv state := by
+  sorry
+
+/-- WP for load action: validates memory load operation.
+
+    Load can cause UB if:
+    - Pointer is null
+    - Pointer is invalid (use after free, out of bounds)
+    - Reading uninitialized memory (in some models)
+-/
+theorem wpExpr_action_load_implies_valid (pol : Polarity) (loc : Loc)
+    (tyPe ptrPe : APexpr) (order : MemoryOrder) (Q : ExprPost)
+    (file : File) (env : List (HashMap Sym Value))
+    (interpEnv : InterpEnv) (state : InterpState)
+    (h : wpExpr ⟨[], .action ⟨pol, ⟨loc, .load tyPe ptrPe order⟩⟩⟩ Q
+        file env interpEnv state) :
+    wpPureN defaultPexprFuel ptrPe (fun ptrVal _ =>
+      match ptrVal with
+      | .object (.pointer ptr) => ValidInitializedPointer ptr state.memory
+      | .loaded (.specified (.pointer ptr)) => ValidInitializedPointer ptr state.memory
+      | _ => True
+    ) env interpEnv state := by
+  sorry
+
+/-- WP for kill action: validates memory deallocation.
+
+    Kill (free) can cause UB if:
+    - Pointer is null (depending on kill kind)
+    - Pointer was already freed (double free)
+    - Pointer points to wrong allocation
+-/
+theorem wpExpr_action_kill_implies_valid (pol : Polarity) (loc : Loc)
+    (kind : KillKind) (ptrPe : APexpr) (Q : ExprPost)
+    (file : File) (env : List (HashMap Sym Value))
+    (interpEnv : InterpEnv) (state : InterpState)
+    (h : wpExpr ⟨[], .action ⟨pol, ⟨loc, .kill kind ptrPe⟩⟩⟩ Q file env interpEnv state) :
+    wpPureN defaultPexprFuel ptrPe (fun ptrVal _ =>
+      match ptrVal with
+      | .object (.pointer ptr) => ValidPointer ptr state.memory
+      | .loaded (.specified (.pointer ptr)) => ValidPointer ptr state.memory
+      | _ => True
+    ) env interpEnv state := by
+  sorry
+
+/-! ## Procedure Call WP Rules -/
+
+/-- Helper: Look up a function declaration by name in the file.
+
+    Functions are stored in file.funs (user-defined) or file.stdlib.
+    Returns the FunDecl if found.
+-/
+def lookupFunDecl (name : Name) (file : File) : Option FunDecl :=
+  match name with
+  | .sym sym =>
+    -- Look in user functions, then stdlib
+    -- Compare by symbol's name field
+    let findByName (funs : FunMap) : Option FunDecl :=
+      funs.find? (fun entry => entry.1.name == sym.name) |>.map Prod.snd
+    findByName file.funs <|> findByName file.stdlib
+  | .impl _ => none  -- Implementation-defined functions handled separately
+
+/-- Helper: Bind argument values to parameter symbols in environment -/
+def bindProcArgs (params : List (Sym × BaseType)) (argVals : List Value)
+    (env : List (HashMap Sym Value)) : List (HashMap Sym Value) :=
+  let bindings := params.zip argVals |>.map fun ((sym, _), v) => (sym, v)
+  bindAllInEnv bindings env
+
+/-- WP for procedure call (Eproc): calls a defined procedure.
+
+    `Eproc name args` evaluates arguments and calls the named procedure.
+
+    **Structure**:
+    1. All argument expressions must evaluate without UB
+    2. If procedure is found, its body must satisfy Q (with args bound)
+    3. If procedure is not found, it's an error but not necessarily UB
+       (depends on whether it's a missing user function vs unimplemented stdlib)
+
+    Note: This is a simplified version. The full version would need to:
+    - Handle stdlib functions specially (some may cause UB on invalid inputs)
+    - Track recursive calls properly
+    - Handle the continuation context for the procedure body
+-/
+theorem wpExpr_proc (name : Name) (args : List APexpr) (Q : ExprPost)
+    (file : File) (env : List (HashMap Sym Value))
+    (interpEnv : InterpEnv) (state : InterpState) :
+    wpExpr ⟨[], .proc name args⟩ Q file env interpEnv state ↔
+    -- All arguments must evaluate without UB
+    (∀ argPe ∈ args, wpPureN defaultPexprFuel argPe (fun _ _ => True) env interpEnv state) ∧
+    -- If procedure exists and args evaluate to values, body WP must hold
+    match lookupFunDecl name file with
+    | some (.proc _ _ _ params body) =>
+      -- Body must satisfy Q with args bound to params
+      -- Simplified: assumes args.length = params.length
+      True  -- Full version: wpExpr body Q file (bindProcArgs ...) interpEnv state'
+    | some (.fun_ _ params bodyPe) =>
+      -- Pure function - body is a Pexpr
+      True  -- Full version: wpPureN ... bodyPe (fun v s => Q v s) (bindProcArgs ...)
+    | some _ => True  -- Forward declaration, no body to check
+    | none => True  -- Missing function is error, not UB
+    := by
+  -- The step function:
+  -- 1. Evaluates all arguments
+  -- 2. Looks up procedure by name
+  -- 3. Creates new frame with args bound to params
+  -- 4. Evaluates procedure body
+  sorry
+
+/-! ## Pure Expression Function Calls
+
+WP rules for pure function calls (Pexpr.call). These are calls to stdlib
+functions like conv_loaded_int, is_signed, etc.
+-/
+
+/-! ## Symbol Lookup WP Rules -/
+
+/-- WP for Pexpr.sym: symbol lookup in environment.
+
+    `PEsym sym` looks up the symbol in the environment and returns its value.
+    This never causes UB - if the symbol is not found, it's an error but not UB.
+-/
+theorem wpPureN_sym (fuel : Nat) (sym : Sym) (Q : PurePost)
+    (env : List (HashMap Sym Value)) (interpEnv : InterpEnv) (state : InterpState)
+    (v : Value) (h_bound : lookupEnv sym env = some v) :
+    wpPureN fuel ⟨[], none, .sym sym⟩ Q env interpEnv state ↔ Q v state := by
+  -- Symbol lookup returns the bound value
+  -- If found, check Q on that value
+  sorry
+
+/-- Helper: If a symbol is in the bindings from pattern match, it's in the extended env -/
+theorem lookupEnv_bindAllInEnv (sym : Sym) (v : Value) (bindings : List (Sym × Value))
+    (env : List (HashMap Sym Value))
+    (h_in : (sym, v) ∈ bindings) :
+    lookupEnv sym (bindAllInEnv bindings env) = some v := by
+  sorry
+
+/-- WP for Pexpr.call: call a pure function.
+
+    `PEcall name args` evaluates the arguments, looks up the function,
+    and calls it. For stdlib functions, the result depends on the function
+    implementation.
+
+    **Structure**:
+    1. All argument expressions must evaluate without UB
+    2. The function application to the evaluated args must not cause UB
+    3. The result must satisfy Q
+
+    Note: Pexpr.call takes `List Pexpr` not `List APexpr`.
+
+    This theorem decomposes function calls: args must be safe, then we
+    need to know the function is safe for those arg values. The second
+    part depends on the specific function - see `isPureStdlibFunction`
+    and `conv_loaded_int_ubfree_*` for specific cases.
+-/
+theorem wpPureN_call_args (fuel : Nat) (name : Name) (args : List Pexpr) (Q : PurePost)
+    (env : List (HashMap Sym Value)) (interpEnv : InterpEnv) (state : InterpState) :
+    wpPureN (fuel + 1) ⟨[], none, .call name args⟩ Q env interpEnv state →
+    -- All arguments must evaluate without UB
+    (∀ arg ∈ args, wpPureN fuel ⟨[], none, arg⟩ (fun _ _ => True) env interpEnv state) := by
+  -- evalPexpr for call first evaluates all args via mapM
+  -- If any arg causes UB, the whole call is UB
+  intro h
+  sorry
+
+/-- Theorem: conv_loaded_int is UB-free for any integer argument (literal values).
+
+    conv_loaded_int('signed int', val) converts a loaded integer value.
+    It never causes UB - it's a pure conversion function.
+
+    This is a key lemma for verifying real C programs.
+
+    NOTE: We only prove UB-freeness (postcondition is trivially True), not
+    functional correctness. The actual return value depends on the stdlib impl.
+-/
+theorem conv_loaded_int_ubfree_literal (ctype_val : Ctype) (int_val : IntegerValue)
+    (env : List (HashMap Sym Value)) (interpEnv : InterpEnv) (state : InterpState) :
+    wpPureN defaultPexprFuel
+      ⟨[], none, .call (.sym ⟨"", 6, .id "conv_loaded_int", some "conv_loaded_int"⟩)
+        [.val (.ctype ctype_val), .val (.loaded (.specified (.integer int_val)))]⟩
+      (fun _ _ => True)  -- Only claim UB-freeness
+      env interpEnv state := by
+  -- conv_loaded_int just extracts/converts the integer value
+  -- It never triggers UB
+  sorry
+
+/-- Theorem: conv_loaded_int is UB-free when second arg is a symbol bound to an integer.
+
+    This handles the common case where we have:
+    conv_loaded_int('signed int', sym) where sym is bound to an integer value.
+-/
+theorem conv_loaded_int_ubfree_sym (conv_sym : Sym) (ctype_val : Ctype) (arg_sym : Sym)
+    (int_val : IntegerValue)
+    (env : List (HashMap Sym Value)) (interpEnv : InterpEnv) (state : InterpState)
+    (h_conv_name : conv_sym.name = some "conv_loaded_int")
+    (h_bound : lookupEnv arg_sym env = some (Value.loaded (LoadedValue.specified (ObjectValue.integer int_val)))) :
+    wpPureN defaultPexprFuel
+      ⟨[], none, .call (.sym conv_sym) [.val (.ctype ctype_val), .sym arg_sym]⟩
+      (fun _ _ => True)  -- Only claim UB-freeness
+      env interpEnv state := by
+  -- 1. Evaluate first arg: .val (.ctype ctype_val) → ctype_val (no UB)
+  -- 2. Evaluate second arg: .sym arg_sym → lookup succeeds by h_bound
+  -- 3. Call conv_loaded_int(ctype_val, int_val) → pure conversion, no UB
+  sorry
+
+/-- Most general: conv_loaded_int call with any arguments that evaluate to valid types.
+
+    If the arguments evaluate successfully to a ctype and a loaded integer,
+    the call succeeds without UB.
+-/
+theorem conv_loaded_int_ubfree (conv_sym : Sym) (arg1 arg2 : Pexpr)
+    (env : List (HashMap Sym Value)) (interpEnv : InterpEnv) (state : InterpState)
+    (h_conv_name : conv_sym.name = some "conv_loaded_int")
+    (h_arg1_ok : wpPureN defaultPexprFuel ⟨[], none, arg1⟩ (fun v _ => ∃ ct, v = .ctype ct) env interpEnv state)
+    (h_arg2_ok : wpPureN defaultPexprFuel ⟨[], none, arg2⟩
+      (fun v _ => ∃ iv, v = .loaded (.specified (.integer iv))) env interpEnv state) :
+    wpPureN defaultPexprFuel ⟨[], none, .call (.sym conv_sym) [arg1, arg2]⟩
+      (fun _ _ => True)  -- Only claim UB-freeness
+      env interpEnv state := by
+  -- If both args evaluate to expected types, conv_loaded_int succeeds
+  sorry
+
+/-- More general: any stdlib function that doesn't access memory is UB-free.
+
+    This covers: conv_loaded_int, conv_int, wrapI, is_signed, is_unsigned,
+    is_representable_integer, etc.
+-/
+def isPureStdlibFunction (name : String) : Bool :=
+  name ∈ [
+    "conv_loaded_int",
+    "conv_int",
+    "wrapI",
+    "is_signed",
+    "is_unsigned",
+    "is_representable_integer",
+    "ivmin",
+    "ivmax",
+    "sizeof",
+    "alignof"
+  ]
+
+/-- Theorem: Pure stdlib functions don't cause UB.
+
+    These functions only perform pure computations on values - they never
+    access memory or trigger undefined behavior.
+-/
+theorem wpPureN_stdlib_pure (fuel : Nat) (sym : Sym) (args : List Pexpr) (Q : PurePost)
+    (env : List (HashMap Sym Value)) (interpEnv : InterpEnv) (state : InterpState)
+    (h_pure : isPureStdlibFunction (sym.name.getD "") = true) :
+    wpPureN fuel ⟨[], none, .call (.sym sym) args⟩ Q env interpEnv state ↔
+    -- For pure stdlib functions, we just need args to evaluate successfully
+    -- and the result to satisfy Q
+    (∀ arg ∈ args, wpPureN fuel ⟨[], none, arg⟩ (fun _ _ => True) env interpEnv state) ∧
+    (∃ v, Q v state) := by
+  -- These functions never trigger UB, only compute values
+  sorry
 
 /-! ## Example: Proving Simple Properties
 

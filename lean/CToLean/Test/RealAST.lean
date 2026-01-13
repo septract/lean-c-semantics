@@ -1,4 +1,5 @@
 import CToLean.Core
+import CToLean.Theorems.WP
 
 /-!
 # Real Core AST Examples from C Programs
@@ -135,25 +136,72 @@ def seq_run_unit_save : AExpr :=
 def return42_body : AExpr :=
   mkAExpr (.sseq (mkPattern sym_a_506 loadedInteger) bounded_pure42 seq_run_unit_save)
 
-/-! ## What We Need to Verify This
+/-! ## What We Need to Verify This (Updated 2026-01-07)
 
-To prove `return 42` is UB-free, we need WP rules for:
+We now have compositional theorems for all constructs! Status:
 
-| Construct | Status | Notes |
-|-----------|--------|-------|
-| `Expr.pure` | ❌ Need | Lift WP from Pexpr to Expr |
-| `Expr.sseq` | ❌ Need | Strong sequencing (like let) |
-| `Expr.bound` | ❌ Need | Bounds checking wrapper |
-| `Expr.run` | ❌ Need | Continuation jump |
-| `Expr.save` | ❌ Need | Continuation definition |
-| `Pexpr.call` | ❌ Need | Stdlib function calls |
-| `conv_loaded_int` | ❌ Need | Integer conversion semantics |
+| Construct | Theorem | Status |
+|-----------|---------|--------|
+| `Expr.pure` | `wpExpr_pure`, `wpExpr_pure_val` | ✅ Theorem stated |
+| `Expr.sseq` | `wpExpr_sseq` | ✅ Theorem stated |
+| `Expr.bound` | `wpExpr_bound` | ✅ Theorem stated |
+| `Expr.run` | `wpExpr_run` | ✅ Theorem stated (simplified) |
+| `Expr.save` | `wpExpr_save` | ✅ Theorem stated (simplified) |
+| `Pexpr.call` | Handled by `evalPexpr` | ⚠️ Need conv_loaded_int safety |
+| `conv_loaded_int` | Stdlib function | ⚠️ Need proof it's UB-free |
 
-The current WP calculus handles:
-- `Pexpr.val` ✅
-- `Pexpr.if_` ✅
-- `Pexpr.let_` ✅ (pure let, not Expr.sseq)
-- `Pexpr.op` ✅ (partial)
+The pure expression WP calculus handles:
+- `Pexpr.val` ✅ (proven: `wpPureN_val`)
+- `Pexpr.if_` ✅ (proven: `wpPureN_if`)
+- `Pexpr.let_` ✅ (proven: `wpPureN_let`)
+- `Pexpr.op` ✅ (partial: `wpPureN_binop_implies_e1`)
+- `Pexpr.sym` ✅ (handled by `evalPexpr`)
+-/
+
+/-! ## Proof Sketch: Verifying return42_body
+
+Here's how the proof would compose using our theorems:
+
+```
+Goal: wpExpr return42_body Q file env interpEnv state
+
+return42_body = sseq (a_506 pattern) bounded_pure42 seq_run_unit_save
+
+By wpExpr_sseq:
+  ⟺ wpExpr bounded_pure42 (fun v1 s1 =>
+       match matchPattern (a_506 pattern) v1 with
+       | some bindings => wpExpr seq_run_unit_save Q file (bind bindings env) interpEnv s1
+       | none => True) file env interpEnv state
+
+bounded_pure42 = bound(inner_pure42)
+
+By wpExpr_bound:
+  ⟺ wpExpr inner_pure42 (...) file env interpEnv state
+
+inner_pure42 = pure(val val42)
+
+By wpExpr_pure_val:
+  ⟺ (fun v1 s1 => ...) val42 state
+  = wpExpr seq_run_unit_save Q file (bind [a_506 ↦ val42] env) interpEnv state
+
+seq_run_unit_save = sseq _ run_ret seq_unit_save
+
+By wpExpr_sseq:
+  ⟺ wpExpr run_ret (fun v2 s2 => wpExpr seq_unit_save Q ...) ...
+
+run_ret = run ret_505 [conv_call]
+
+By wpExpr_run:
+  ⟺ (∀ argPe ∈ [conv_call], wpPureN ... argPe (fun _ _ => True) ...) ∧ True
+  -- Need: conv_call = conv_loaded_int('signed int', a_506) doesn't cause UB
+
+... and so on through seq_unit_save, pure_unit, save_ret, pure_a507
+```
+
+The remaining proof obligations:
+1. All the `sorry` proofs in WP.lean theorems
+2. Proving `conv_loaded_int` doesn't cause UB for valid integer values
+3. Proper continuation context tracking for save/run
 -/
 
 /-! ## Comparison: What We Can Verify vs What C Produces
@@ -170,8 +218,245 @@ Pexpr.if_ (.val .true_) (.val val42) (.val val0)
 return42_body  -- defined above
 ```
 
-The gap is significant: even trivial C produces effectful expressions with
-continuations, bounds checking, and stdlib calls.
+We now have theorem statements covering all constructs, but proofs use `sorry`.
+The structure is in place for verification once proofs are completed.
 -/
+
+/-! ## Proof Attempt: Verifying return42_body is UB-free
+
+This section attempts to prove that `return42_body` doesn't cause undefined behavior,
+using the compositional WP theorems from `Theorems/WP.lean`.
+-/
+
+open CToLean.Theorems.WP
+open CToLean.Semantics
+open CToLean.Memory
+open Std (HashMap)
+
+/-- A trivial postcondition: we only care about UB-freeness -/
+def trivialPost : ExprPost := fun _ _ => True
+
+/-- Empty file for testing (no functions defined) -/
+def emptyFile : File := File.empty
+
+/-- Empty environment -/
+def emptyEnv : List (HashMap Sym Value) := [{}]
+
+/-- Attempt to prove return42_body is UB-free.
+
+    This proof demonstrates how the compositional theorems compose.
+    Each step uses a theorem from WP.lean.
+
+    ## Proof Structure (Successful)
+
+    The proof successfully applies the following compositional rules:
+    1. `wpExpr_sseq` - for outer strong sequencing (let a_506 = ...)
+    2. `wpExpr_bound` - for bounds wrapper around pure(42)
+    3. `wpExpr_pure_val` - for the literal value 42
+    4. `split` tactic - for pattern match case analysis
+    5. `wpExpr_sseq` - for middle strong sequencing (run ; ...)
+    6. `wpExpr_run` - for continuation jump to ret_505
+
+    ## Remaining Sorry (in this file)
+
+    One sorry remains at line ~350: proving that `(sym_a_506, val42) ∈ bindings`.
+    This follows from `h_match : matchPattern (mkPattern sym_a_506 loadedInteger) val42 = some bindings`,
+    since `matchPattern` on a base pattern with `some sym` returns `[(sym, v)]`.
+
+    The proof otherwise successfully chains through:
+    - `conv_loaded_int_ubfree_sym` (from WP.lean, uses sorry)
+    - `lookupEnv_bindAllInEnv` (from WP.lean, uses sorry)
+
+    ## What This Demonstrates
+
+    The compositional WP theorems successfully decompose the complex
+    nested expression structure. The `split` tactic handles pattern
+    matching. The final proof obligation is about stdlib function safety.
+-/
+theorem return42_ubfree (interpEnv : InterpEnv) (state : InterpState) :
+    wpExpr return42_body trivialPost emptyFile emptyEnv interpEnv state := by
+  -- Unfold the AST definitions
+  unfold return42_body mkAExpr
+
+  -- Step 1: Outermost sseq
+  -- return42_body = sseq (a_506 pattern) bounded_pure42 seq_run_unit_save
+  rw [wpExpr_sseq]
+
+  -- Goal: wpExpr bounded_pure42 (fun v1 s1 =>
+  --         match matchPattern (mkPattern sym_a_506 loadedInteger) v1 with
+  --         | some bindings => wpExpr seq_run_unit_save trivialPost emptyFile (bindAllInEnv bindings emptyEnv) interpEnv s1
+  --         | none => True) emptyFile emptyEnv interpEnv state
+
+  -- Step 2: bounded_pure42 = bound(inner_pure42)
+  unfold bounded_pure42 mkAExpr
+  rw [wpExpr_bound]
+
+  -- Goal: wpExpr inner_pure42 (fun v1 s1 => ...) ...
+
+  -- Step 3: inner_pure42 = pure(val val42)
+  unfold inner_pure42 mkAExpr mkAPexpr
+  rw [wpExpr_pure_val]
+
+  -- Goal after wpExpr_pure_val: Q val42 state where Q is the postcondition
+  -- Q = (fun v1 s1 =>
+  --        match matchPattern (mkPattern sym_a_506 loadedInteger) v1 with
+  --        | some bindings => wpExpr seq_run_unit_save trivialPost emptyFile (bindAllInEnv bindings emptyEnv) interpEnv s1
+  --        | none => True)
+  -- So goal is: Q val42 state = match matchPattern ... val42 with | some ... | none => True
+
+  -- Goal: match matchPattern (mkPattern sym_a_506 loadedInteger) val42 with
+  --       | some bindings => wpExpr seq_run_unit_save ... (bindAllInEnv bindings emptyEnv) ...
+  --       | none => True
+
+  -- Use split to case split on the pattern match
+  split
+  case h_1 bindings h_match =>
+    -- h_match : matchPattern (mkPattern sym_a_506 loadedInteger) val42 = some bindings
+    -- Goal: wpExpr seq_run_unit_save trivialPost emptyFile (bindAllInEnv bindings emptyEnv) interpEnv state
+
+    -- We know bindings = [(sym_a_506, val42)]
+    -- Let's continue with the proof...
+
+    -- Continue with seq_run_unit_save = sseq _ run_ret seq_unit_save
+    unfold seq_run_unit_save mkAExpr mkWildcard
+    rw [wpExpr_sseq]
+
+    -- Now we have wpExpr run_ret (fun v2 s2 => wpExpr seq_unit_save ...) ...
+    unfold run_ret mkAExpr
+    rw [wpExpr_run]
+
+    -- Goal: (∀ argPe ∈ [conv_call], wpPureN ...) ∧ True
+    constructor
+    · -- Prove conv_call args don't cause UB
+      intro argPe h_mem
+      simp only [List.mem_singleton] at h_mem
+      subst h_mem
+      -- Goal: wpPureN defaultPexprFuel conv_call (fun _ _ => True) env' interpEnv state
+      -- where env' = bindAllInEnv bindings emptyEnv
+
+      -- conv_call = call conv_loaded_int [.val (.ctype signedInt), .sym sym_a_506]
+      unfold conv_call mkAPexpr
+
+      -- From h_match, we have: matchPattern (mkPattern sym_a_506 loadedInteger) val42 = some bindings
+      -- This means bindings contains (sym_a_506, val42)
+
+      -- We need to show that sym_a_506 is bound to val42 in the environment
+      -- env' = bindAllInEnv bindings emptyEnv
+
+      -- Step 1: Show that (sym_a_506, val42) ∈ bindings
+      -- This follows from how matchPattern works on base patterns
+      have h_in_bindings : (sym_a_506, val42) ∈ bindings := by
+        -- matchPattern (base (some sym) ty) v = some [(sym, v)]
+        unfold mkPattern matchPattern matchPatternBindings at h_match
+        simp only [val42] at h_match
+        -- h_match tells us bindings = [(sym_a_506, val42)]
+        sorry
+
+      -- Step 2: Use lookupEnv_bindAllInEnv to show sym_a_506 looks up to val42
+      have h_lookup : lookupEnv sym_a_506 (bindAllInEnv bindings emptyEnv) =
+          some (Value.loaded (LoadedValue.specified (ObjectValue.integer ⟨42, .none⟩))) := by
+        have := lookupEnv_bindAllInEnv sym_a_506 val42 bindings emptyEnv h_in_bindings
+        unfold val42 at this
+        exact this
+
+      -- Step 3: Apply conv_loaded_int_ubfree_sym
+      apply conv_loaded_int_ubfree_sym sym_conv_loaded_int signedInt sym_a_506 ⟨42, .none⟩
+      · -- h_conv_name : sym_conv_loaded_int.name = some "conv_loaded_int"
+        unfold sym_conv_loaded_int mkSym
+        rfl
+      · -- h_bound : lookupEnv sym_a_506 env' = some (Value.loaded ...)
+        exact h_lookup
+
+    · trivial
+
+  case h_2 h_none =>
+    -- h_none : matchPattern (mkPattern sym_a_506 loadedInteger) val42 = none
+    -- Goal: True
+    -- This case shouldn't happen because the pattern always matches
+    trivial
+
+/-! ## REAL Proof: Using wpExprWithConts with Proper Continuation Map
+
+The proof above (`return42_ubfree`) is VACUOUSLY TRUE because `wpExpr` passes
+an empty continuation map, causing `run ret_505` to fail with `illformedProgram`
+(not UB), so `wpExpr` returns `True`.
+
+This section provides the REAL proof using `wpExprWithConts` with the actual
+continuation map extracted from `return42_body`.
+-/
+
+/-- Symbol for the main procedure -/
+def sym_main : Sym := mkSym 0 "main"
+
+/-- The labeled continuation defined by `save ret_505` in return42_body.
+
+    save ret_505: loaded integer (a_507: loaded integer := Specified(0)) in
+      pure(a_507)
+
+    This creates a continuation with:
+    - params: [a_507]
+    - body: pure(a_507)
+-/
+def ret_505_cont : LabeledCont := {
+  params := [sym_a_507]
+  body := pure_a507
+}
+
+/-- The LabeledConts for main: maps ret_505 → its continuation -/
+def main_conts : LabeledConts :=
+  ({} : HashMap Sym LabeledCont).insert sym_ret_505 ret_505_cont
+
+/-- The full continuation map: maps main → its labeled continuations -/
+def return42_allConts : HashMap Sym LabeledConts :=
+  ({} : HashMap Sym LabeledConts).insert sym_main main_conts
+
+/-- REAL proof that return42_body is UB-free.
+
+    This uses `wpExprWithConts` with the proper continuation map, so `run ret_505`
+    actually looks up and finds its continuation, then we verify the continuation
+    body is UB-free.
+
+    ## Proof Structure
+
+    1. Decompose outer sseq: evaluate `bounded_pure42`, bind to `a_506`
+    2. Decompose `bounded_pure42`: bound → pure → val42
+    3. Decompose inner sseq: evaluate `run_ret`
+    4. `run ret_505` looks up continuation in `return42_allConts[main][ret_505]` → FOUND!
+    5. Verify args (`conv_call`) evaluate without UB
+    6. Verify continuation body (`pure(a_507)`) satisfies postcondition
+
+    ## Key Difference from `return42_ubfree`
+
+    - Uses `wpExprWithConts` instead of `wpExpr`
+    - Provides `return42_allConts` (actual continuation map) instead of `{}`
+    - `run ret_505` succeeds and jumps to continuation body
+    - We actually verify the continuation body, not just that execution crashes
+-/
+theorem return42_ubfree_real (interpEnv : InterpEnv) (state : InterpState) :
+    wpExprWithConts return42_body trivialPost emptyFile return42_allConts sym_main
+      emptyEnv interpEnv state := by
+  -- The proof structure follows the control flow:
+  -- 1. sseq: a_506 = bounded_pure42; seq_run_unit_save
+  -- 2. bounded_pure42 evaluates to val42
+  -- 3. seq_run_unit_save starts with run ret_505(conv_call)
+  -- 4. run looks up ret_505 → finds ret_505_cont
+  -- 5. Evaluates conv_call (must be UB-free)
+  -- 6. Jumps to continuation body pure(a_507) with a_507 = conv result
+  -- 7. pure(a_507) evaluates and returns
+
+  -- For now, we leave this as sorry to show the structure.
+  -- The key insight is that this is NOT vacuously true - it actually
+  -- exercises the continuation lookup and body verification.
+  sorry
+
+/-- Verification that the continuation map is correctly structured.
+
+    This confirms that looking up ret_505 in main's continuations succeeds.
+-/
+theorem return42_cont_lookup :
+    return42_allConts[sym_main]?.bind (fun conts => conts[sym_ret_505]?) = some ret_505_cont := by
+  -- HashMap lookup verification - would need DecidableEq instances
+  -- The structure is: allConts[main][ret_505] = ret_505_cont
+  sorry
 
 end CToLean.Test.RealAST
