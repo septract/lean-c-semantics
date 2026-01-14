@@ -156,50 +156,6 @@ To support `builtin_printf` and other I/O functions, we need:
 **Affected tests:** treiber + 13 other tests that use printf
 **Cerberus files:** `driver.lem`, `formatted.lem`, `core_run.lem:1062-1098`
 
-### Phase 6: UB-Freeness Theorems - Phase 1 Complete ✓
-
-**Completed (2026-01-06):**
-- [x] Define `UBFree` predicate (`CToLean/Theorems/UBFree.lean`)
-- [x] Define `UBFreeIn`, `UBFreeWith`, `UBFreeIf` predicates
-- [x] Define `SafeResult` type for classifying execution outcomes
-- [x] Define memory safety predicates (`ValidPointer`, `ValidInitializedPointer`)
-- [x] Define arithmetic safety predicates (`SafeDiv`, `SafeShift`, `inRangeForType`)
-- [x] Prove basic theorems (`UBFree_pure`, `UBFree_bind`, `UBFreeIn_safe_result`, etc.)
-- [x] Add decidability instances for automation
-- [x] **Remove all `partial` from interpreter** - enables unfolding in proofs!
-- [x] **Prove `UBFree_bind`** - compositional reasoning enabled
-
-### Phase 7: Weakest Precondition (WP) Calculus - Core Complete ✓
-
-**Completed (2026-01-06):**
-- [x] Define `wpPureN` fuel-indexed WP transformer (`CToLean/Theorems/WP.lean`)
-- [x] Define `wpPure` with default fuel
-- [x] Prove `wpPureN_noUB`: WP implies no undefined behavior
-- [x] Prove `wpPureN_post`: WP implies postcondition holds on success
-- [x] Prove `wpPureN_val`: WP for value literals
-- [x] Prove `InterpM_bind_run`: Monad bind distribution through `.run.run`
-- [x] Prove `wpPureN_if`: Compositional rule for conditionals
-- [x] Prove `wpPureN_let`: Compositional rule for let bindings
-- [x] Prove `wpPureN_binop_implies_e1`: First operand of binop must be UB-free
-
-**Key Insights:**
-- `simp only [evalPexpr]` uses auto-generated equation lemmas
-- `InterpM_bind_run` distributes bind through ReaderT/StateT/Except
-- Changed `wpPureN` to use result state in postcondition (enables compositionality)
-- All compositional proofs follow same pattern: equation lemma → bind distribution → case split
-
-**Remaining Tasks:**
-- [ ] Handle loops with explicit invariant parameter
-- [ ] Add lemmas for `evalBinop` safety (e.g., `evalBinop_add_safe`)
-
-**Future Phases:**
-- [ ] SMT integration (lean-smt) for automated proof discharge
-- [ ] Function specifications (pre/postconditions)
-- [ ] Memory ownership tracking (lightweight separation logic)
-- [ ] Example verified programs (abs, max, min)
-
-See `docs/VERIFICATION_PLAN.md` for the full verification strategy.
-
 ### Out of Scope
 - Concurrent semantics (`Epar`, `Eunseq`)
 - PNVI/CHERI memory models
@@ -227,5 +183,3 @@ make test
 - `docs/INTERPRETER_STATUS.md` - Current test results and issues
 - `docs/MEMORY_AUDIT.md` - Memory model Cerberus correspondence
 - `docs/TESTING.md` - Test infrastructure guide
-- `docs/VERIFICATION_PLAN.md` - Verification strategy and roadmap
-- `docs/REASONING.md` - Analysis of verification approaches
