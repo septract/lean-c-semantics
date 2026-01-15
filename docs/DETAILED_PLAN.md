@@ -1,4 +1,4 @@
-# C-to-Lean Detailed Implementation Plan
+# Lean C Semantics - Implementation Plan
 
 ## Project Goal
 Translate C code into Lean 4 code that captures C semantics, enabling formal reasoning about C programs in Lean.

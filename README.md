@@ -1,8 +1,8 @@
-# C-to-Lean
+# Lean C Semantics
 
 > **Warning**: This project contains AI-generated code. Review carefully before use.
 
-A tool for translating C code into Lean 4 for formal verification. Uses [Cerberus](https://github.com/rems-project/cerberus) as a C frontend to generate an intermediate representation, which is then parsed and interpreted in Lean.
+A Lean 4 implementation of C semantics via [Cerberus](https://github.com/rems-project/cerberus). Cerberus compiles C to its Core intermediate representation; this project parses and executes Core in Lean, enabling formal reasoning about C programs.
 
 ## Status
 

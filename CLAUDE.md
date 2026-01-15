@@ -1,7 +1,7 @@
-# C-to-Lean Project
+# Lean C Semantics
 
 ## Overview
-This project translates C code into Lean 4 code that captures C semantics, enabling formal reasoning about C programs in Lean.
+A Lean 4 implementation of C semantics via Cerberus. Cerberus compiles C to its Core intermediate representation; this project parses and executes Core in Lean, enabling formal reasoning about C programs.
 
 ## Architecture
 
@@ -17,8 +17,8 @@ C source → Cerberus → Core IR (JSON) → Lean Parser → Lean AST → Lean I
 
 ## Project Structure
 ```
-c-to-lean/
-├── cerberus/          # Git submodule - Cerberus C semantics tool (private fork)
+lean-c-semantics/
+├── cerberus/          # Git submodule - Cerberus C semantics tool (fork with JSON export)
 ├── docs/
 │   └── DETAILED_PLAN.md   # Full implementation roadmap
 ├── lean/              # Lean 4 project
@@ -37,7 +37,6 @@ c-to-lean/
 │   ├── minimal/       # Core test suite (NNN-description.c)
 │   ├── debug/         # Debug/investigation tests (category-NN-description.c)
 │   └── csmith/        # Csmith fuzz testing infrastructure
-├── context/           # Background materials
 ├── CLAUDE.md          # This file
 └── TODO.md            # Current tasks
 ```

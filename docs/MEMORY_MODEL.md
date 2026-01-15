@@ -1,6 +1,6 @@
 # Memory Model Interface Design
 
-This document describes the Lean memory model interface for the C-to-Lean project. The design mirrors Cerberus's concrete memory model with allocation-ID provenance tracking (excluding symbolic PNVI-ae-udi and CHERI extensions).
+This document describes the Lean memory model interface for the Lean C Semantics project. The design mirrors Cerberus's concrete memory model with allocation-ID provenance tracking (excluding symbolic PNVI-ae-udi and CHERI extensions).
 
 ## Overview
 

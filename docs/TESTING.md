@@ -1,6 +1,6 @@
 # Testing Guide
 
-This document describes the test infrastructure for the C-to-Lean project.
+This document describes the test infrastructure for the Lean C Semantics project.
 
 ## Quick Reference
 

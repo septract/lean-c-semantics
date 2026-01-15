@@ -89,6 +89,7 @@ else
     # Skip directories that require special modes or memory models:
     #   bmc/        - Bounded model checking (requires --bmc mode)
     #   cheri-ci/   - CHERI memory model tests
+    #   csmith/     - Csmith tests (require special header setup, use fuzz_csmith.sh)
     #   pnvi_testsuite/ - PNVI provenance tests
     echo "Testing all .c files in $TEST_DIR..."
     TEST_FILES=$(find "$TEST_DIR" -name "*.c" \
@@ -96,6 +97,7 @@ else
         ! -name "*.exhaust.c" \
         ! -path "*/bmc/*" \
         ! -path "*/cheri-ci/*" \
+        ! -path "*/csmith/*" \
         ! -path "*/pnvi_testsuite/*" \
         | sort)
 fi
