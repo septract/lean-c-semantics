@@ -62,7 +62,6 @@ theorem wpPureN_if ... := by
 ## Related Modules
 
 - `CToLean.Semantics.Monad`: Defines `InterpM` monad
-- `CToLean.Theorems.WP`: Uses equation lemmas for compositional proofs
 - `CToLean.Memory.Interface`: Memory operations used by effectful evaluation
 -/
 

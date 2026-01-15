@@ -17,6 +17,7 @@ lean/.cache/
 
 # Test artifacts
 test_outputs/
+logs/
 *.json
 platform.info
 tests/csmith/fuzz_results/

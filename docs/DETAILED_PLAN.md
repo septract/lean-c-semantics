@@ -206,20 +206,6 @@ lean/CToLean/Test/Compare.lean        # Compare execution results
 lean/CToLean/Test/Runner.lean         # Test harness
 ```
 
-### Phase 6: UB-Freeness Theorem Scaffolding
-**Goal**: Define what it means for a program to be UB-free
-
-**Approach**:
-1. Define `UBFree` predicate based on `undefined_behaviour` from Cerberus
-2. Generate theorem statement (without proof) for given Core program
-3. Allow incremental proving
-
-**Files to create**:
-```
-lean/CToLean/Theorems/UBFree.lean     # UB-freeness definition
-lean/CToLean/Theorems/Generate.lean   # Theorem statement generation
-```
-
 ---
 
 ## Scope Limitations (Initial Version)
@@ -272,8 +258,7 @@ lean/CToLean/Theorems/Generate.lean   # Theorem statement generation
 
 1. **Parser**: Can parse Core output for all `tests/ci/*.c` files
 2. **Interpreter**: Produces same results as Cerberus on 90%+ of sequential tests
-3. **Theorem Generation**: Can state UB-freeness for arbitrary Core programs
-4. **Documentation**: Clear mapping between Cerberus Core and Lean representation
+3. **Documentation**: Clear mapping between Cerberus Core and Lean representation
 
 ---
 

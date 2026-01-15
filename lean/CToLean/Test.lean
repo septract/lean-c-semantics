@@ -7,7 +7,6 @@ import CToLean.Test.Memory
 import CToLean.Test.Parser
 import CToLean.Test.PrettyPrint
 import CToLean.Test.Batch
-import CToLean.Test.RealAST
 
 namespace CToLean.Test
 
