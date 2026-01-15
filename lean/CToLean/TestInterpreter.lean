@@ -98,12 +98,22 @@ def memErrorToUBCode : MemError → String
   | .arrayShift => "UB046_array_pointer_outside"
   | .other msg => s!"UB_other({msg})"
 
+/-- Parse a space-separated args string into a list, prepending "cmdname".
+    Matches Cerberus behavior in pipeline.ml:621,625:
+    D.drive core_file ("cmdname" :: args) ... -/
+def parseArgs (argsStr : Option String) : List String :=
+  match argsStr with
+  | none => ["cmdname"]
+  | some s =>
+    let parts := s.splitOn " " |>.filter (· != "")
+    "cmdname" :: parts
+
 /-- Parse JSON file and run interpreter -/
-def runFile (jsonPath : String) (batch : Bool) : IO Unit := do
+def runFile (jsonPath : String) (batch : Bool) (progArgs : List String) : IO Unit := do
   let contents ← IO.FS.readFile jsonPath
   match parseFileFromString contents with
   | .ok file =>
-    let result := runMain file
+    let result := runMain file progArgs
     if batch then
       -- Batch mode: output simple parseable format
       match result.error with
@@ -146,16 +156,27 @@ def runFile (jsonPath : String) (batch : Bool) : IO Unit := do
 
 /-- Main entry point -/
 def main (args : List String) : IO UInt32 := do
-  match args with
-  | [jsonPath] =>
-    runFile jsonPath false
+  -- Parse command line: [--batch] [--args "arg1 arg2 ..."] <json-file>
+  let mut batch := false
+  let mut progArgs : Option String := none
+  let mut jsonPath : Option String := none
+  let mut i := 0
+  while i < args.length do
+    match args[i]? with
+    | some "--batch" => batch := true
+    | some "--args" =>
+      i := i + 1
+      progArgs := args[i]?
+    | some path =>
+      if !path.startsWith "--" then
+        jsonPath := some path
+    | none => pure ()
+    i := i + 1
+
+  match jsonPath with
+  | some path =>
+    runFile path batch (parseArgs progArgs)
     pure 0
-  | ["--batch", jsonPath] =>
-    runFile jsonPath true
-    pure 0
-  | [jsonPath, "--batch"] =>
-    runFile jsonPath true
-    pure 0
-  | _ =>
-    IO.println "Usage: ctolean_interp [--batch] <json-file>"
+  | none =>
+    IO.println "Usage: ctolean_interp [--batch] [--args \"arg1 arg2 ...\"] <json-file>"
     pure 1

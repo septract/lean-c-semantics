@@ -826,23 +826,182 @@ def initGlobals (file : File) : InterpM (List (HashMap Sym Value)) := do
 
   pure env
 
+/-- Convert a string to a null-terminated char array memory value.
+    Corresponds to: driver.lem:1630-1638
+    ```lem
+    let mem_vals = List.map (fun c -> Mem.integer_mval Ctype.Char (decode c)) (toCharList arg_str) in
+    Mem.array_mval (mem_vals ++ [Mem.integer_mval Ctype.Char 0])
+    ``` -/
+def stringToCharArrayMval (s : String) : MemValue :=
+  let charVals := s.toList.map fun c =>
+    integerValueMval .char ⟨c.toNat, .none⟩
+  -- Add null terminator
+  let withNull := charVals ++ [integerValueMval .char ⟨0, .none⟩]
+  arrayMval withNull
+
+/-- Prepare argc and argv arguments for two-arg main.
+    Corresponds to: prepare_main_args in driver.lem:1627-1698
+
+    Cerberus structure:
+    ```lem
+    let prepare_main_args loc callconv tid0 main_sym arg_strs argc_sym argv_sym =
+      (* 1. Build string memory values from arg_strs *)
+      let args_mem_val_tys = List.map (...) arg_strs in
+      let number_of_args = integerFromNat (List.length args_mem_val_tys) in
+      (* 2. Allocate each argv string *)
+      ND.foldlM (...) [] args_mem_val_tys >>= fun ptr_vals_rev ->
+      (* 3. Allocate argv array [ptr0, ..., ptrN, null] *)
+      liftMem (Mem.allocate_object ... argv_array_ty ...) >>= fun argv_array_ptr_val ->
+      (* 4. For Normal_callconv: allocate argc and argv pointer *)
+      match callconv with
+      | Core.Normal_callconv ->
+          (* allocate argc, store value *)
+          (* allocate argv (char**), store pointer to array *)
+          Mem.return (Vobject(OVpointer argc_ptr), Vobject(OVpointer argv_ptr))
+    ```
+
+    Audited: 2026-01-14
+    Deviations:
+    - Uses allocateImpl with init value instead of allocate_object + store (equivalent)
+    - Simplified prefixes (no Symbol.PrefSource with loc/sym, just strings)
+    - No tid0 parameter (sequential only, no thread tracking) -/
+def prepareMainArgs (args : List String) : InterpM (Value × Value) := do
+  let typeEnv ← InterpM.getTypeEnv
+
+  -- Type definitions matching Cerberus:
+  -- Ctype.signed_int, Ctype.char, Ctype.pointer_to_char
+  let signedIntTy := Ctype.integer (.signed .int_)
+  let charTy := Ctype.integer .char
+  let charPtrTy := Ctype.pointer .none charTy  -- char*
+  let charPtrPtrTy := Ctype.pointer .none charPtrTy  -- char**
+
+  -- Step 1: Allocate each argument string
+  -- Corresponds to: driver.lem:1629-1652 (building args_mem_val_tys and allocating strings)
+  -- Cerberus: ND.foldlM (fun ptr_vals (arg_mem_val, arg_ty) -> ...) [] args_mem_val_tys
+  let mut argPtrs : List PointerValue := []
+  for arg in args do
+    let argMval := stringToCharArrayMval arg
+    let argArrayTy := Ctype.mk' (.array charTy.ty (some (arg.length + 1)))  -- +1 for null
+    let argSize := sizeof typeEnv argArrayTy
+    -- Cerberus: Mem.allocate_object tid0 (Symbol.PrefOther "argv refs") ...
+    let argPtr ← InterpM.liftMem (allocateImpl "argv refs" argSize (some argArrayTy) 1 .writable (some argMval))
+    argPtrs := argPtrs ++ [argPtr]
+
+  -- Step 2: Build and allocate argv array [ptr0, ..., ptrN, null]
+  -- Corresponds to: driver.lem:1654-1670
+  -- Cerberus: argv_array_ty = Array pointer_to_char (1 + length(ptr_vals_rev))
+  -- Cerberus: argv_array_mem_val = array_mval(map pointer_mval (reverse(null :: ptr_vals_rev)))
+  -- Note: Cerberus builds in reverse then reverses; we build forward and append null
+  let nullCharPtr := nullPtrval charTy
+  let argvArrayElems := argPtrs.map (pointerMval charTy ·) ++ [pointerMval charTy nullCharPtr]
+  let argvArrayMval := arrayMval argvArrayElems
+  let argvArrayLen := args.length + 1  -- argc + 1 for null terminator
+  let argvArrayTy := Ctype.mk' (.array charPtrTy.ty (some argvArrayLen))
+  let argvArraySize := sizeof typeEnv argvArrayTy
+  let argvArrayAlign := alignof typeEnv argvArrayTy
+  -- Cerberus: Mem.allocate_object tid0 pref (Mem.alignof_ival argv_array_ty) argv_array_ty Nothing Nothing
+  let argvArrayPtr ← InterpM.liftMem (allocateImpl "argv array" argvArraySize (some argvArrayTy) argvArrayAlign .writable (some argvArrayMval))
+
+  -- Step 3: Allocate argv pointer (char**) pointing to argv array
+  -- Corresponds to: driver.lem:1680-1687 (Normal_callconv case)
+  -- Cerberus comment: "because of argument promotions, the char *argv[] is turned into a char **argv
+  --   so two objects are allocated: an array and a pointer to that array"
+  -- Cerberus: argv_ty = mk_ctype_pointer no_qualifiers pointer_to_char
+  let argvMval := pointerMval charPtrTy argvArrayPtr
+  let argvSize := sizeof typeEnv charPtrPtrTy
+  let argvAlign := alignof typeEnv charPtrPtrTy
+  let argvPtr ← InterpM.liftMem (allocateImpl "argv" argvSize (some charPtrPtrTy) argvAlign .writable (some argvMval))
+
+  -- Step 4: Allocate argc (signed int with value = number of args)
+  -- Corresponds to: driver.lem:1674-1678
+  -- Cerberus: let number_of_args = integerFromNat (List.length args_mem_val_tys) in
+  -- Cerberus: argc_mem_val = Mem.integer_mval (Ctype.Signed Ctype.Int_) number_of_args
+  let argc := args.length
+  let argcMval := integerValueMval (.signed .int_) ⟨argc, .none⟩
+  let argcSize := sizeof typeEnv signedIntTy
+  let argcAlign := alignof typeEnv signedIntTy
+  let argcPtr ← InterpM.liftMem (allocateImpl "argc" argcSize (some signedIntTy) argcAlign .writable (some argcMval))
+
+  -- Return (argc_cval, argv_cval) as object pointers
+  -- Corresponds to: driver.lem:1689-1691
+  -- Cerberus: Mem.return (Core.Vobject (Core.OVpointer argc_ptr_val), Core.Vobject (Core.OVpointer argv_ptr_val))
+  let argcVal := Value.object (.pointer argcPtr)
+  let argvVal := Value.object (.pointer argvPtr)
+  pure (argcVal, argvVal)
+
+/-- Get main function's parameter count.
+    Corresponds to: pattern match in driver.lem:1736-1737
+    ```lem
+    match params with
+      | [(argc_sym, _); (argv_sym, _)] -> (* 2-arg main *)
+      | [] -> (* 0-arg main, handled elsewhere *)
+    ```
+    Returns Some n if main is a Proc/Fun with n parameters, None otherwise. -/
+def getMainParamCount (file : File) : Option Nat := do
+  let mainSym ← file.main
+  let (_, decl) ← file.funs.find? fun (s, _) => s == mainSym
+  match decl with
+  | .proc _ _ _ params _ => some params.length
+  | .fun_ _ params _ => some params.length
+  | _ => none
+
 /-- Initialize thread state for running main.
-    Corresponds to the initial state setup in Cerberus driver.lem.
-    Audited: 2026-01-01
-    Deviations: Simplified - globals initialized inline -/
+    Corresponds to: driver.lem:1710-1860 (drive function, main setup portion)
+
+    Cerberus structure (driver.lem:1717-1830):
+    ```lem
+    match post_globals_dr_st.core_file.Core.main with
+      | Just sym -> ND.return sym
+      | Nothing -> ND.kill (DErr_other "no startup function")
+    end >>= fun main_sym ->
+    match Map.lookup main_sym funs with
+      | Just (Core.Proc loc _ _ params e) ->
+          match params with
+            | [(argc_sym, _); (argv_sym, _)] ->
+                prepare_main_args ... >>= fun (argc_cval, argv_cval) ->
+                (* add argc/argv to env *)
+            | [] -> (* no args case *)
+          ...
+          update_thread_state tid0 <| arena= expr; stack= Stack_empty; ... |>
+    ```
+
+    Audited: 2026-01-14
+    Deviations:
+    - Globals initialized separately in initGlobals (not inline here)
+    - Uses callProc to set up environment (Cerberus manually inserts argc/argv into env)
+    - No thread spawning (sequential only)
+
+    The `args` parameter corresponds to `arg_strs` in driver.lem.
+    Cerberus prepends "cmdname" to args (pipeline.ml:621,625). -/
 def initThreadState (file : File) (globalEnv : List (HashMap Sym Value))
-    : Except InterpError ThreadState := do
+    (args : List String := ["cmdname"]) : InterpM ThreadState := do
   -- Find main function
+  -- Corresponds to: driver.lem:1712-1717
   match file.main with
   | none => throw (.illformedProgram "no main function defined")
   | some mainSym =>
-    match callProc file mainSym [] with
+    -- Check if main takes argc/argv (2 params) or no params (0 params)
+    -- Corresponds to: driver.lem:1736-1737 pattern match on params
+    let mainArgs ← match getMainParamCount file with
+      | some 0 => pure []
+      | some 2 => do
+        -- Corresponds to: driver.lem:1812 prepare_main_args call
+        -- Cerberus: prepare_main_args loc callconv tid0 main_sym arg_strs argc_sym argv_sym
+        let (argcVal, argvVal) ← prepareMainArgs args
+        pure [argcVal, argvVal]
+      | some n => throw (.illformedProgram s!"main has {n} parameters, expected 0 or 2")
+      | none => throw (.illformedProgram "could not determine main parameter count")
+
+    -- Set up procedure call with args
+    -- Corresponds to: driver.lem:1814-1830 (adding argc/argv to env)
+    match callProc file mainSym mainArgs with
     | .ok (procEnv, body) =>
       -- Merge global env with procedure env
-      -- Global env is the base, procedure env is pushed on top
+      -- Corresponds to: driver.lem:1817-1827 env setup
       let combinedEnv := match globalEnv with
         | [] => [procEnv]
         | baseEnv :: rest => procEnv :: baseEnv :: rest
+      -- Corresponds to: driver.lem:1849-1857 update_thread_state
       pure {
         arena := body
         stack := .cons (some mainSym) [] .empty

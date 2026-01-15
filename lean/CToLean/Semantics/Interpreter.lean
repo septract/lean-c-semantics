@@ -66,23 +66,25 @@ def isUnspecified (v : Value) : Option Ctype :=
     1. Initialize global variables (initGlobals) - driver.lem:1541-1618
     2. Initialize thread state with main's body (initThreadState)
     3. Pre-collect labeled continuations (collectLabeledContinuations)
-    4. Run step loop until done (runUntilDone) -/
-def runMain (file : File) : InterpResult :=
+    4. Run step loop until done (runUntilDone)
+
+    The `args` parameter corresponds to the command line arguments passed to the C program.
+    Cerberus prepends "cmdname" to args (pipeline.ml:621,625), so we do the same by default. -/
+def runMain (file : File) (args : List String := ["cmdname"]) : InterpResult :=
   let typeEnv := TypeEnv.fromFile file
   -- Run initialization and execution in InterpM monad
   let result := runInterpM file typeEnv do
     -- Initialize global variables first
     -- Corresponds to: driver_globals in driver.lem:1541-1618
     let globalEnv ← initGlobals file
-    -- Initialize thread state with globals
-    match initThreadState file globalEnv with
-    | .error e => throw e
-    | .ok st =>
-      -- Pre-collect labeled continuations for all procedures
-      -- Corresponds to: collect_labeled_continuations_NEW in core_aux.lem:2379-2395
-      let allLabeledConts := collectAllLabeledContinuations file
-      -- Run step loop until done
-      runUntilDone st file allLabeledConts
+    -- Initialize thread state with globals (now in InterpM to support argc/argv allocation)
+    -- Corresponds to: pipeline.ml:621,625 - "cmdname" :: args
+    let st ← initThreadState file globalEnv args
+    -- Pre-collect labeled continuations for all procedures
+    -- Corresponds to: collect_labeled_continuations_NEW in core_aux.lem:2379-2395
+    let allLabeledConts := collectAllLabeledContinuations file
+    -- Run step loop until done
+    runUntilDone st file allLabeledConts
   match result with
   | .ok (v, state) =>
     { returnValue := some v
