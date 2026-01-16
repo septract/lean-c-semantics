@@ -675,33 +675,36 @@ def eqPtrvalImpl (p1 p2 : PointerValue) : ConcreteMemM Bool := do
   | _, .function _ => pure false
   | .concrete _ a1, .concrete _ a2 =>
     -- For concrete pointers, check provenance
-    -- Corresponds to: defacto_memory.lem:1430-1479 (impl_eq_ptrval)
-    match p1.prov, p2.prov with
-    | .some alloc1, .some alloc2 =>
-      -- Both have provenance
-      -- Corresponds to: defacto_memory.lem:1431-1472
-      if alloc1 == alloc2 then
-        -- Same allocation: compare addresses ("honest equality")
+    -- Corresponds to: impl_mem.ml:1851-1880 (eq_ptrval)
+    -- Step 1: Check if provenances "match"
+    let provsMatch : ConcreteMemM Bool := match p1.prov, p2.prov with
+      | .none, .none =>
+        -- impl_mem.ml:1855-1856: (Prov_none, Prov_none) -> return true
+        pure true
+      | .some alloc1, .some alloc2 =>
+        -- impl_mem.ml:1857-1858: (Prov_some id1, Prov_some id2) -> return (equal id1 id2)
+        pure (alloc1 == alloc2)
+      | .device, .device =>
+        -- impl_mem.ml:1859-1860: (Prov_device, Prov_device) -> return true
+        pure true
+      | .symbolic iota1, .symbolic iota2 =>
+        -- impl_mem.ml:1861-1870: symbolic lookup (simplified: just compare iotas)
+        pure (iota1 == iota2)
+      | _, _ =>
+        -- impl_mem.ml:1871-1872: _ -> return false (mixed provenance types)
+        pure false
+    -- Step 2: Based on provenance match result
+    -- impl_mem.ml:1873-1880
+    provsMatch >>= fun provMatch =>
+      if provMatch then
+        -- Provenances match: honest address comparison
+        -- impl_mem.ml:1874-1875: true -> return (equal addr1 addr2)
         pure (a1 == a2)
       else
-        -- Different allocations: always false (STD conforming behavior)
-        -- Corresponds to: defacto_memory.lem:1438 ("using provenance", return false)
-        -- Note: Cerberus uses nondeterminism here with Allow_disjoint_alloc_tests flag,
-        -- but in --exec mode it picks the "using provenance" path which returns false
+        -- Provenances don't match: nondeterministic in Cerberus
+        -- impl_mem.ml:1876-1879: msum ["using provenance" -> false, "ignoring provenance" -> addr_eq]
+        -- In --exec mode, Cerberus picks "using provenance" which returns false
         pure false
-    | .some _, _ =>
-      -- One has provenance, other doesn't: do "honest equality" (address comparison)
-      -- Corresponds to: defacto_memory.lem:1473-1474
-      pure (a1 == a2)
-    | _, .some _ =>
-      -- One has provenance, other doesn't: do "honest equality" (address comparison)
-      -- Corresponds to: defacto_memory.lem:1475-1476
-      pure (a1 == a2)
-    | _, _ =>
-      -- Neither has Prov_some - Cerberus throws error
-      -- Corresponds to: defacto_memory.lem:1477-1478
-      --   error "WIP: Mem.eq_ptrval, not (Just alloc_id1, Just alloc_id2)"
-      panic! s!"eqPtrvalImpl: neither pointer has allocation provenance (addr1={a1}, addr2={a2})"
 
 /-- Pointer difference.
     Corresponds to: diff_ptrval in impl_mem.ml

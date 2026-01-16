@@ -250,11 +250,13 @@ def evalIntOp (op : Binop) (v1 v2 : IntegerValue) : InterpM Value := do
   | .sub => pure (.object (.integer { val := n1 - n2, prov := .none }))
   | .mul => pure (.object (.integer { val := n1 * n2, prov := .none }))
   | .div =>
+    -- Use tdiv for C-style truncated division towards zero (not floor division)
     if n2 == 0 then InterpM.throwUB .ub045a_divisionByZero
-    else pure (.object (.integer { val := n1 / n2, prov := .none }))
+    else pure (.object (.integer { val := n1.tdiv n2, prov := .none }))
   | .rem_t =>
+    -- Use tmod for C-style truncated remainder (sign follows dividend)
     if n2 == 0 then InterpM.throwUB .ub045b_moduloByZero
-    else pure (.object (.integer { val := n1 % n2, prov := .none }))
+    else pure (.object (.integer { val := n1.tmod n2, prov := .none }))
   | .rem_f =>
     if n2 == 0 then InterpM.throwUB .ub045b_moduloByZero
     else
@@ -652,8 +654,10 @@ def wrapIntOp (ity : IntegerType) (iop : Iop) (v1 v2 : Value) : InterpM Value :=
       | .add => i1.val + i2.val
       | .sub => i1.val - i2.val
       | .mul => i1.val * i2.val
-      | .div => if i2.val != 0 then i1.val / i2.val else 0
-      | .rem_t => if i2.val != 0 then i1.val % i2.val else 0
+      -- Use tdiv for C-style truncated division towards zero (not floor division)
+      | .div => if i2.val != 0 then i1.val.tdiv i2.val else 0
+      -- Use tmod for C-style truncated remainder (sign follows dividend)
+      | .rem_t => if i2.val != 0 then i1.val.tmod i2.val else 0
       | .shl => i1.val <<< i2.val.toNat
       | .shr => i1.val >>> i2.val.toNat
     let env ← InterpM.getTypeEnv
@@ -680,8 +684,10 @@ def catchExceptionalOp (ity : IntegerType) (iop : Iop) (v1 v2 : Value) : InterpM
       | .add => i1.val + i2.val
       | .sub => i1.val - i2.val
       | .mul => i1.val * i2.val
-      | .div => if i2.val != 0 then i1.val / i2.val else 0
-      | .rem_t => if i2.val != 0 then i1.val % i2.val else 0
+      -- Use tdiv for C-style truncated division towards zero (not floor division)
+      | .div => if i2.val != 0 then i1.val.tdiv i2.val else 0
+      -- Use tmod for C-style truncated remainder (sign follows dividend)
+      | .rem_t => if i2.val != 0 then i1.val.tmod i2.val else 0
       | .shl => i1.val <<< i2.val.toNat
       | .shr => i1.val >>> i2.val.toNat
     let env ← InterpM.getTypeEnv
