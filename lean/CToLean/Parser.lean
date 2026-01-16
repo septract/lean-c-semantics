@@ -23,15 +23,24 @@ def getFieldOpt (obj : Json) (field : String) : Option Json :=
   | .ok v => some v
   | .error _ => none
 
+/-- Truncate JSON for error messages -/
+def truncateJson (j : Json) (maxLen : Nat := 100) : String :=
+  let s := toString j
+  if s.length > maxLen then s.take maxLen ++ "..." else s
+
 /-- Get a required string field -/
 def getStr (obj : Json) (field : String) : Except String String := do
   let v ← getField obj field
-  v.getStr?
+  match v.getStr? with
+  | .ok s => .ok s
+  | .error e => .error s!"{e} (field '{field}' in {truncateJson obj})"
 
 /-- Get a required integer field -/
 def getInt (obj : Json) (field : String) : Except String Int := do
   let v ← getField obj field
-  v.getInt?
+  match v.getInt? with
+  | .ok n => .ok n
+  | .error e => .error s!"{e} (field '{field}' in {truncateJson obj})"
 
 /-- Get a required natural number field -/
 def getNat (obj : Json) (field : String) : Except String Nat := do
@@ -178,9 +187,9 @@ def parseSymOpt (j : Json) : Except String (Option Sym) :=
 
 /-- Parse an Identifier from JSON -/
 def parseIdentifier (j : Json) : Except String Identifier := do
-  let s ← j.getStr?
-  -- Identifier in JSON is just a string; we create a dummy location
-  .ok { loc := .unknown, name := s }
+  match j.getStr? with
+  | .ok s => .ok { loc := .unknown, name := s }
+  | .error e => .error s!"{e} (parsing identifier from {truncateJson j})"
 
 /-- Parse a position from JSON: {file: string, line: nat, column: nat}
     Corresponds to: Cerb_position.t -/
@@ -1141,7 +1150,9 @@ mutual
       let pe ← parsePexpr e
       .ok (Pexpr.bmcAssume pe.expr)
     | "PEmemop" =>
-      let op ← getStr exprJ "op"
+      -- op is a tagged object like {"tag": "ByteFromInt"} or {"tag": "DeriveCap", ...}
+      let opJ ← getField exprJ "op"
+      let op ← getTag opJ
       let args ← getArr exprJ "args"
       let as ← args.toList.mapM parsePexpr
       .ok (Pexpr.pureMemop op (as.map (·.expr)))
