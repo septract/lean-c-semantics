@@ -19,8 +19,8 @@ C source → Cerberus → Core IR (JSON) → Lean Parser → Lean AST → Lean I
 ```
 lean-c-semantics/
 ├── cerberus/          # Git submodule - Cerberus C semantics tool (fork with JSON export)
-├── docs/
-│   └── DETAILED_PLAN.md   # Full implementation roadmap
+├── docs/              # Documentation (YYYY-MM-DD_title.md format)
+│   └── 2025-12-24_DETAILED_PLAN.md   # Full implementation roadmap
 ├── lean/              # Lean 4 project
 │   └── CToLean/
 │       ├── Core/      # Core AST types
@@ -58,9 +58,9 @@ lean-c-semantics/
 
 This is not about writing "good Lean code" - it's about creating a verifiable translation that can be audited for correctness against the Cerberus reference implementation.
 
-See `docs/INTERPRETER_REFACTOR.md` for the audit checklist and correspondence documentation requirements.
+See `docs/2025-12-31_INTERPRETER_REFACTOR.md` for the audit checklist and correspondence documentation requirements.
 
-See `docs/MEMORY_AUDIT.md` for the memory model audit plan and Cerberus correspondence mapping.
+See `docs/2026-01-01_MEMORY_AUDIT.md` for the memory model audit plan and Cerberus correspondence mapping.
 
 ### 1. Manual Translation (not Lem/Ott backends)
 We manually translate Cerberus Core semantics to Lean rather than creating automated backends because:
@@ -182,7 +182,7 @@ Current status:
 - **CI tests**: 100% match rate (121/121 files)
 - **Full test suite (5501 files)**: 99% match rate (1809/1817 files)
 
-See `docs/PP_DISCREPANCIES.md` for remaining issues (NULL type parsing for complex types - deferred pending Cerberus-side fix).
+See `docs/2025-12-26_PP_DISCREPANCIES.md` for remaining issues (NULL type parsing for complex types - deferred pending Cerberus-side fix).
 
 **Memory Model Tests** (`make test-memory`):
 Unit tests for the memory model implementation.
@@ -367,7 +367,7 @@ make test-parser-full # Full parser test suite (~5500 files, ~12 min)
 make test-pp-full     # Full pretty-printer test (all CI files)
 ```
 
-See `docs/TESTING.md` for full testing documentation.
+See `docs/2025-12-31_TESTING.md` for full testing documentation.
 
 Or build individually:
 ```bash
@@ -377,6 +377,21 @@ cd cerberus && make cerberus
 # Lean
 cd lean && lake build
 ```
+
+## Documentation
+
+**Note:** Documentation may be out of date. The date prefix indicates when the document was created - consider this when reading older docs as the codebase may have evolved since then.
+
+### Naming Convention
+All documentation files in `docs/` should use date-prefixed names:
+```
+YYYY-MM-DD_title.md
+```
+Examples:
+- `2026-01-16_TODO_AUDIT.md`
+- `2026-01-02_FULL_TEST_RESULTS.md`
+
+This ensures documents are chronologically ordered and clearly dated.
 
 ## References
 - [Cerberus Project](https://github.com/rems-project/cerberus)

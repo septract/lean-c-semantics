@@ -5,7 +5,7 @@
 **Test Results (2026-01-06):**
 - Minimal test suite: 74/74 (100% match with Cerberus)
 - Cerberus CI suite: 91% match rate on successful tests
-- See `docs/INTERPRETER_STATUS.md` and `docs/FULL_TEST_RESULTS_2026-01-02.md` for detailed breakdown
+- See `docs/2026-01-02_INTERPRETER_STATUS.md` and `docs/2026-01-02_FULL_TEST_RESULTS.md` for detailed breakdown
 
 ## Recent Fixes (2026-01-06)
 
@@ -69,7 +69,7 @@ Our memory addresses differ from Cerberus by ~4608 bytes for the first allocatio
 - Both use same initial address (0xFFFFFFFFFFFF) and same algorithm
 - Our calculation matches the expected math; Cerberus is 4608 bytes lower
 - Hypothesis: Cerberus allocates runtime structures before main()
-- See `docs/ADDRESS_DIFFERENCE_INVESTIGATION.md` for details
+- See `docs/2026-01-06_ADDRESS_DIFFERENCE_INVESTIGATION.md` for details
 - **Impact:** UB detection works correctly; only raw address values differ
 
 ### Union Active Member Tracking (not implemented)
@@ -100,7 +100,7 @@ Reading a union member other than the last one written produces "Unspecified" in
 - [x] Define `MemoryOps` type class with core operations
 - [x] Implement `Concrete` memory model (allocation-ID provenance)
 - [x] Add memory model unit tests (`make test-memory`)
-- [x] Audit against Cerberus `impl_mem.ml` - see `docs/MEMORY_AUDIT.md`
+- [x] Audit against Cerberus `impl_mem.ml` - see `docs/2026-01-01_MEMORY_AUDIT.md`
 
 ### Phase 4: Core Interpreter ✓
 - [x] Small-step interpreter with explicit stack/continuations
@@ -122,7 +122,7 @@ Reading a union member other than the last one written produces "Unspecified" in
 ## Current Work
 
 ### Remaining Interpreter Issues (from CI tests)
-See `docs/INTERPRETER_STATUS.md` for details.
+See `docs/2026-01-02_INTERPRETER_STATUS.md` for details.
 
 **Fixed (2026-01-02 and 2026-01-06):**
 - [x] 0056-unary_plus: Fixed by correcting test script to compare return values
@@ -180,6 +180,6 @@ make test
 ```
 
 ## Documentation
-- `docs/INTERPRETER_STATUS.md` - Current test results and issues
-- `docs/MEMORY_AUDIT.md` - Memory model Cerberus correspondence
-- `docs/TESTING.md` - Test infrastructure guide
+- `docs/2026-01-02_INTERPRETER_STATUS.md` - Current test results and issues
+- `docs/2026-01-01_MEMORY_AUDIT.md` - Memory model Cerberus correspondence
+- `docs/2025-12-31_TESTING.md` - Test infrastructure guide
