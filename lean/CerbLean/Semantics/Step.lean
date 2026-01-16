@@ -48,11 +48,12 @@ def createExternSymmap (file : File) : HashMap Sym Sym :=
     | .tentative defSym => decls.foldl (fun acc decl => acc.insert decl defSym) acc
     | .normal defSym => decls.foldl (fun acc decl => acc.insert decl defSym) acc
 
-/-- Look up a procedure and return (env, body).
+/-- Look up a procedure and return (resolvedSym, env, body).
     Corresponds to: call_proc in core_run.lem:30-70
-    Audited: 2025-01-01, updated 2026-01-16 for extern symbol remapping -/
+    Audited: 2025-01-01, updated 2026-01-16 for extern symbol remapping
+    Returns the resolved symbol (for label lookup) along with env and body -/
 def callProc (file : File) (psym : Sym) (cvals : List Value)
-    : Except InterpError (HashMap Sym Value × AExpr) := do
+    : Except InterpError (Sym × HashMap Sym Value × AExpr) := do
   -- Build extern symbol map (matches core_run.lem:42-45)
   let coreExtern := createExternSymmap file
   -- Look up in stdlib first, then funs (matches Cerberus order)
@@ -65,13 +66,13 @@ def callProc (file : File) (psym : Sym) (cvals : List Value)
       let coreSym := coreExtern.get? psym |>.getD psym
       file.funs.find? fun (s, _) => s == coreSym
   match procOpt with
-  | some (_, .proc _loc _markerEnv _retTy params body) =>
+  | some (resolvedSym, .proc _loc _markerEnv _retTy params body) =>
     if params.length != cvals.length then
       throw (.illformedProgram s!"calling procedure '{psym.name}' with wrong number of args")
     -- Build environment: env = foldl2 (fun acc (sym, _) cval -> Map.insert sym cval acc) Map.empty params cvals
     let emptyMap : HashMap Sym Value := {}
     let env := params.zip cvals |>.foldl (fun acc ((sym, _), cval) => acc.insert sym cval) emptyMap
-    pure (env, body)
+    pure (resolvedSym, env, body)
   | some (_, .fun_ _ _ _) =>
     throw (.illformedProgram s!"call_proc: '{psym.name}' is a fun, not a proc")
   | some (_, .procDecl _ _ _) =>
@@ -338,16 +339,17 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
     | .sym psym =>
       -- Evaluate arguments
       let cvals ← pes.mapM (evalPexpr defaultPexprFuel st.env)
-      -- Look up and call procedure
+      -- Look up and call procedure (returns resolved symbol for label lookup)
       match callProc file psym cvals with
-      | .ok (procEnv, body) =>
+      | .ok (resolvedSym, (procEnv, body)) =>
         -- Push new stack frame with procedure environment
-        let newStack := Stack.pushEmptyCont (some psym) sk
+        -- Use resolvedSym (not psym) so Erun can find labels in allLabeledConts
+        let newStack := Stack.pushEmptyCont (some resolvedSym) sk
         pure (.continue_ { st with
           arena := body
           stack := newStack
           env := procEnv :: st.env  -- Push new scope
-          currentProc := some psym
+          currentProc := some resolvedSym
         })
       | .error err => throw err
     | .impl ic =>
@@ -596,14 +598,15 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
     -- Step 5: Call procedure
     -- Corresponds to: core_run.lem:958-971 (call_proc)
     match callProc file funSym argVals with
-    | .ok (procEnv, body) =>
+    | .ok (resolvedSym, (procEnv, body)) =>
       -- Push new stack frame with procedure environment
-      let newStack := Stack.pushEmptyCont (some funSym) sk
+      -- Use resolvedSym (not funSym) so Erun can find labels in allLabeledConts
+      let newStack := Stack.pushEmptyCont (some resolvedSym) sk
       pure (.continue_ { st with
         arena := body
         stack := newStack
         env := procEnv :: st.env  -- Push new scope
-        currentProc := some funSym
+        currentProc := some resolvedSym
       })
     | .error err => throw err
 
@@ -1085,18 +1088,19 @@ def initThreadState (file : File) (globalEnv : List (HashMap Sym Value))
     -- Set up procedure call with args
     -- Corresponds to: driver.lem:1814-1830 (adding argc/argv to env)
     match callProc file mainSym mainArgs with
-    | .ok (procEnv, body) =>
+    | .ok (resolvedSym, (procEnv, body)) =>
       -- Merge global env with procedure env
       -- Corresponds to: driver.lem:1817-1827 env setup
       let combinedEnv := match globalEnv with
         | [] => [procEnv]
         | baseEnv :: rest => procEnv :: baseEnv :: rest
       -- Corresponds to: driver.lem:1849-1857 update_thread_state
+      -- Use resolvedSym (not mainSym) so Erun can find labels in allLabeledConts
       pure {
         arena := body
-        stack := .cons (some mainSym) [] .empty
+        stack := .cons (some resolvedSym) [] .empty
         env := combinedEnv
-        currentProc := some mainSym
+        currentProc := some resolvedSym
       }
     | .error err => throw err
 
