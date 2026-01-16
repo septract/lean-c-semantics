@@ -3,7 +3,8 @@
 .PHONY: all lean cerberus cerberus-setup clean
 .PHONY: test test-unit test-memory
 .PHONY: test-parser test-pp test-parser-quick test-pp-quick
-.PHONY: test-interp test-interp-minimal test-interp-debug test-interp-ci
+.PHONY: test-interp test-interp-minimal test-interp-debug
+.PHONY: test-interp-full test-interp-minimal-full test-interp-debug-full test-interp-ci
 .PHONY: init update-cerberus help
 
 # Configuration
@@ -85,18 +86,28 @@ test-pp-quick: lean cerberus
 test-pp: lean cerberus
 	./scripts/test_pp.sh
 
-# Interpreter Tests
+# Interpreter Tests (fast mode with --nolibc, skips *.libc.c tests)
 test-interp-minimal: lean cerberus
-	./scripts/test_interp.sh tests/minimal
+	./scripts/test_interp.sh --nolibc tests/minimal
 
 test-interp-debug: lean cerberus
+	./scripts/test_interp.sh --nolibc tests/debug
+
+# Run minimal and debug interpreter tests (fast)
+test-interp: test-interp-minimal test-interp-debug
+
+# Full interpreter tests (with libc, slower but complete)
+test-interp-minimal-full: lean cerberus
+	./scripts/test_interp.sh tests/minimal
+
+test-interp-debug-full: lean cerberus
 	./scripts/test_interp.sh tests/debug
 
+test-interp-full: test-interp-minimal-full test-interp-debug-full
+
+# CI suite (with libc)
 test-interp-ci: lean cerberus
 	./scripts/test_interp.sh
-
-# Run minimal and debug interpreter tests
-test-interp: test-interp-minimal test-interp-debug
 
 # ------------------------------------------------------------------------------
 # Maintenance
@@ -129,11 +140,14 @@ help:
 	@echo "  test-unit         Run Lean unit tests (Memory + Parser)"
 	@echo "  test-memory       Run Memory model unit tests only"
 	@echo ""
+	@echo "Interpreter Tests:"
+	@echo "  test-interp       Run fast interpreter tests (--nolibc, skips *.libc.c)"
+	@echo "  test-interp-full  Run full interpreter tests (with libc, slower)"
+	@echo "  test-interp-ci    Run interpreter tests on Cerberus CI suite"
+	@echo ""
 	@echo "Integration Tests (Full Suites):"
 	@echo "  test-parser       Run full parser test (~5500 files)"
 	@echo "  test-pp           Run full pretty-printer test (~5500 files)"
-	@echo "  test-interp       Run interpreter tests (Minimal + Debug)"
-	@echo "  test-interp-ci    Run interpreter tests on Cerberus CI suite"
 	@echo ""
 	@echo "Maintenance:"
 	@echo "  update-cerberus   Update Cerberus submodule"

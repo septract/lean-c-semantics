@@ -1,12 +1,16 @@
 #!/bin/bash
 # Test the Lean interpreter against Cerberus execution
-# Usage: ./scripts/test_interp.sh [--verbose] [--max N] [--list FILE] [test_dir_or_file]
+# Usage: ./scripts/test_interp.sh [--verbose] [--max N] [--list FILE] [--nolibc] [test_dir_or_file]
 #
 # Supports:
 #   - Single .c file: ./scripts/test_interp.sh path/to/test.c
 #   - Directory: tests all *.c files recursively
 #   - Cerberus CI directory: uses their tests.sh for the file list
 #   - List file: ./scripts/test_interp.sh --list paths.txt (one path per line)
+#
+# Options:
+#   --nolibc: Skip libc linking for faster testing (2MB vs 200MB JSON).
+#             Tests named *.libc.c are automatically skipped in this mode.
 
 set -e
 
@@ -24,6 +28,7 @@ VERBOSE=false
 TEST_PATH=""  # Can be a file or directory
 LIST_FILE=""  # File containing list of test paths
 MAX_TESTS=0  # 0 = unlimited
+NO_LIBC=false  # Skip libc linking for faster JSON (2MB vs 200MB)
 OUTPUT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/c-to-lean-interp-test.XXXXXXXXXX")
 
 # Parse arguments
@@ -40,6 +45,10 @@ while [[ $# -gt 0 ]]; do
         --list)
             LIST_FILE="$2"
             shift 2
+            ;;
+        --nolibc)
+            NO_LIBC=true
+            shift
             ;;
         *)
             TEST_PATH="$1"
@@ -128,6 +137,11 @@ else
         | sort)
 fi
 
+# Filter out .libc.c files when --nolibc is set
+if $NO_LIBC; then
+    TEST_FILES=$(echo $TEST_FILES | tr ' ' '\n' | grep -v '\.libc\.c$' | tr '\n' ' ')
+fi
+
 TOTAL_FILES=$(echo $TEST_FILES | wc -w | tr -d ' ')
 if ! $SINGLE_FILE || $LIST_MODE; then
     echo "Found $TOTAL_FILES test files"
@@ -140,6 +154,12 @@ fi
 
 # Timeout for interpreters (seconds)
 TIMEOUT_SECS=10
+
+# Build Cerberus flags
+CERBERUS_FLAGS=""
+if $NO_LIBC; then
+    CERBERUS_FLAGS="--nolibc"
+fi
 
 # Counters
 CERBERUS_OK=0
@@ -165,7 +185,7 @@ for c_file in $TEST_FILES; do
 
     # Run Cerberus in batch mode to get return value (not shell exit code)
     cerberus_shell_exit=0
-    cerberus_output=$(timeout ${TIMEOUT_SECS}s $CERBERUS --exec --batch "$c_file" 2>&1) || cerberus_shell_exit=$?
+    cerberus_output=$(timeout ${TIMEOUT_SECS}s $CERBERUS $CERBERUS_FLAGS --exec --batch "$c_file" 2>&1) || cerberus_shell_exit=$?
 
     # Check for timeout
     if [[ $cerberus_shell_exit -eq 124 ]]; then
@@ -220,7 +240,7 @@ for c_file in $TEST_FILES; do
 
     # Generate JSON for Lean
     json_file="$OUTPUT_DIR/$filename.json"
-    if ! eval $CERBERUS --json_core_out="$json_file" "$c_file" >/dev/null 2>&1; then
+    if ! eval $CERBERUS $CERBERUS_FLAGS --json_core_out="$json_file" "$c_file" >/dev/null 2>&1; then
         # JSON generation failed after Cerberus execution succeeded
         # This is a Cerberus inconsistency (--exec is more lenient than --json_core_out)
         ((CERBERUS_FAIL++))

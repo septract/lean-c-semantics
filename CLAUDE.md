@@ -316,9 +316,10 @@ See `scripts/test_interp.sh` for the exact skip logic.
 - `tests/minimal/`: Core test suite with numbered files: `NNN-description.c`
   - Examples: `001-return-literal.c`, `068-div-by-zero.undef.c`
   - Files with `.undef.c` suffix test undefined behavior detection
+  - Files with `.libc.c` suffix require libc (skipped with `--nolibc`)
 - `tests/debug/`: Debug/investigation tests: `category-NN-description.c`
   - Examples: `conv-01-neg-to-unsigned.c`, `ptr-03-no-decr.c`, `struct-01-init.c`
-  - Categories group related tests (conv, ptr, rec, struct, etc.)
+  - Categories group related tests (conv, ptr, rec, struct, libc, etc.)
 
 **Debugging strategy:**
 When investigating a bug or unexpected behavior:
