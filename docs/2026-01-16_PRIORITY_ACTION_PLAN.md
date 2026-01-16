@@ -75,13 +75,15 @@ These panic on malformed/impossible input. Crashing is fine here:
 
 ---
 
-## Parser/PP (Cerberus-Side Fix)
+## Parser/PP (Resolved)
 
-### P1. NULL Type Parsing
-**Issue:** 7 files show `NULL(void*)` instead of actual type
-**Root cause:** Cerberus exports NULL types as strings, not structured JSON
-**Action:** Fix in Cerberus JSON export
-**Status:** Deferred
+### P1. NULL Type Parsing - RESOLVED
+**Issue:** 7 files showed `NULL(void*)` instead of actual type
+**Root cause:** Was NOT a Cerberus issue. The `parseCtypeStr` function flagged in audit was DEAD CODE.
+**Actual state:** Cerberus already exports structured JSON for NULL types via `json_pointer_value`.
+  Our parser already uses `parseCtype` on this structured JSON (Parser.lean:761-764, 874-877).
+**Action:** Removed dead `parseCtypeStr` function from Parser.lean.
+**Status:** RESOLVED 2026-01-16
 
 ---
 

@@ -156,6 +156,11 @@ To support `builtin_printf` and other I/O functions, we need:
 **Affected tests:** treiber + 13 other tests that use printf
 **Cerberus files:** `driver.lem`, `formatted.lem`, `core_run.lem:1062-1098`
 
+### Dead Code Detection
+Consider building a tool to detect unused definitions in the Lean codebase:
+- Could use [tree-sitter-lean](https://github.com/Julian/tree-sitter-lean) to parse and build a call graph
+- Would help catch dead code from refactoring (e.g., `parseCtypeStr` was dead after switching to structured JSON)
+
 ### Out of Scope
 - Concurrent semantics (`Epar`, `Eunseq`)
 - PNVI/CHERI memory models

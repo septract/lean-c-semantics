@@ -470,63 +470,6 @@ partial def parseCtype (j : Json) : Except String Ctype := do
   let annots ← parseAnnots j
   .ok { annots := annots, ty := ty }
 
-/-- Parse a ctype from a string representation (for embedded ctypes in pp_pointer_value output) -/
--- This is a simplified parser for ctypes that appear inside string values
--- Returns a Ctype with empty annotations
-partial def parseCtypeStr (s : String) : Except String Ctype := do
-  let ty ← parseCtypeStr_ s
-  return { annots := [], ty := ty }
-where
-  parseCtypeStr_ (s : String) : Except String Ctype_ := do
-    let s := s.trim
-    -- Handle basic types
-    if s == "void" then return .void
-    else if s == "char" then return .basic (.integer .char)
-    else if s == "_Bool" then return .basic (.integer .bool)
-    else if s == "signed char" || s == "signed ichar" then return .basic (.integer (.signed .ichar))
-    else if s == "unsigned char" || s == "unsigned ichar" then return .basic (.integer (.unsigned .ichar))
-    else if s == "short" || s == "signed short" then return .basic (.integer (.signed .short))
-    else if s == "unsigned short" then return .basic (.integer (.unsigned .short))
-    else if s == "int" || s == "signed int" then return .basic (.integer (.signed .int_))
-    else if s == "unsigned int" then return .basic (.integer (.unsigned .int_))
-    else if s == "long" || s == "signed long" then return .basic (.integer (.signed .long))
-    else if s == "unsigned long" then return .basic (.integer (.unsigned .long))
-    else if s == "long long" || s == "signed long long" || s == "signed long_long" then return .basic (.integer (.signed .longLong))
-    else if s == "unsigned long long" || s == "unsigned long_long" then return .basic (.integer (.unsigned .longLong))
-    else if s == "float" then return .basic (.floating (.realFloating .float))
-    else if s == "double" then return .basic (.floating (.realFloating .double))
-    else if s == "long double" || s == "long_double" then return .basic (.floating (.realFloating .longDouble))
-    -- Handle size/width types
-    else if s == "size_t" then return .basic (.integer .size_t)
-    else if s == "ptrdiff_t" then return .basic (.integer .ptrdiff_t)
-    else if s == "wchar_t" then return .basic (.integer .wchar_t)
-    else if s == "wint_t" then return .basic (.integer .wint_t)
-    else if s == "ptraddr_t" then return .basic (.integer .ptraddr_t)
-    -- Handle pointer types
-    else if s.endsWith "*" then
-      let inner := s.dropRight 1 |>.trim
-      let innerTy ← parseCtypeStr_ inner
-      return .pointer {} innerTy
-    -- Handle atomic types: _Atomic (T) or _Atomic(T)
-    else if s.startsWith "_Atomic " || s.startsWith "_Atomic(" then
-      let inner := if s.startsWith "_Atomic (" then
-        -- _Atomic (T) - strip "_Atomic (" and ")"
-        (s.drop 9).dropRight 1 |>.trim
-      else
-        -- _Atomic(T) - strip "_Atomic(" and ")"
-        (s.drop 8).dropRight 1 |>.trim
-      let innerTy ← parseCtypeStr_ inner
-      return .atomic innerTy
-    -- Handle struct/union types
-    else if s.startsWith "struct " then
-      let tag := s.drop 7
-      return .struct_ { id := 0, name := some tag }
-    else if s.startsWith "union " then
-      let tag := s.drop 6
-      return .union_ { id := 0, name := some tag }
-    -- Default to void for unrecognized types
-    else return .void
-
 /-! ## Value Parsing -/
 
 /-- Parse a Ctor from JSON -/
