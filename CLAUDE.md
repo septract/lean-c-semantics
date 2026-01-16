@@ -293,6 +293,23 @@ Compare Lean interpreter output against Cerberus:
 
 Target: 90%+ agreement on sequential tests.
 
+**Generating a full test log:**
+```bash
+./scripts/test_interp.sh cerberus/tests -v 2>&1 | tee logs/interp-full-$(date +%Y%m%d-%H%M%S).log
+```
+
+**WARNING:** This is very expensive (several hours) and should only be run when the user explicitly requests it.
+
+Note: The script automatically skips certain directories and file types:
+- `*.syntax-only.c` - Parse-only tests (not executable)
+- `*.exhaust.c` - Exhaustive interleaving tests
+- `bmc/` - Bounded model checking tests (requires `--bmc` mode)
+- `cheri-ci/` - CHERI memory model tests
+- `csmith/` - Csmith tests (use `fuzz_csmith.sh` instead)
+- `pnvi_testsuite/` - PNVI provenance tests
+
+See `scripts/test_interp.sh` for the exact skip logic.
+
 ### Test Files (`tests/`)
 
 **Naming conventions:**

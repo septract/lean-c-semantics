@@ -110,6 +110,28 @@ def getAllocation (ptr : PointerValue) : ConcreteMemM Allocation := do
 def isInBounds (alloc : Allocation) (addr : Nat) (size : Nat) : Bool :=
   addr >= alloc.base && addr + size <= alloc.base + alloc.size
 
+/-- Check if a type is _Bool.
+    Corresponds to: AilTypesAux.is_Bool in impl_mem.ml:1579
+    Audited: 2026-01-16
+    Deviations: None -/
+def isBoolType (ty : Ctype) : Bool :=
+  match ty.ty with
+  | .basic (.integer .bool) => true
+  | _ => false
+
+/-- Check if a _Bool value is a trap representation.
+    A _Bool trap representation is any value other than 0 or 1, or unspecified.
+    Corresponds to: impl_mem.ml:1576-1586
+    Audited: 2026-01-16
+    Deviations: None -/
+def isBoolTrapRepresentation (mval : MemValue) : Bool :=
+  match mval with
+  | .unspecified _ => true
+  | .integer _ iv =>
+    -- Trap if not 0 or 1
+    iv.val != 0 && iv.val != 1
+  | _ => false
+
 /-! ## Byte-Level Operations
 
 Corresponds to: fetch_bytes and write_bytes in impl_mem.ml:708-737
@@ -217,9 +239,8 @@ def rawToAbsBytes (bytes : List (Option UInt8)) : List AbsByte :=
 
 /-- Serialize memory value to abstract bytes.
     Corresponds to: repr in impl_mem.ml:1139-1219
-    Audited: 2026-01-02
+    Audited: 2026-01-16
     Deviations:
-    - Float encoding simplified (not IEEE 754 bit pattern)
     - Function pointer encoding simplified -/
 partial def memValueToBytes (env : TypeEnv) (val : MemValue) : List AbsByte :=
   match val with
@@ -233,14 +254,33 @@ partial def memValueToBytes (env : TypeEnv) (val : MemValue) : List AbsByte :=
     -- Store float as IEEE 754 bit representation
     -- Corresponds to: impl_mem.ml float storing (repr for floating types)
     let size := floatingTypeSize fty
+    -- Determine if this is a 32-bit float or 64-bit double
+    let is32bit := match fty with
+      | .realFloating .float => true
+      | .realFloating .double => false
+      | .realFloating .longDouble => false
     match fv with
     | .finite f =>
       -- Convert float to IEEE 754 bits using Float.toBits
       rawToAbsBytes (intToBytes f.toBits.toNat size)
-    | .nan => panic! "memValueToBytes: NaN float encoding not implemented"
-    | .posInf => panic! "memValueToBytes: +Inf float encoding not implemented"
-    | .negInf => panic! "memValueToBytes: -Inf float encoding not implemented"
-    | .unspecified => panic! "memValueToBytes: unspecified float value"
+    | .nan =>
+      -- IEEE 754 quiet NaN: exponent all 1s, mantissa MSB = 1
+      -- Float (32-bit): 0x7FC00000, Double (64-bit): 0x7FF8000000000000
+      let bits := if is32bit then 0x7FC00000 else 0x7FF8000000000000
+      rawToAbsBytes (intToBytes bits size)
+    | .posInf =>
+      -- IEEE 754 +Infinity: sign=0, exponent all 1s, mantissa all 0s
+      -- Float (32-bit): 0x7F800000, Double (64-bit): 0x7FF0000000000000
+      let bits := if is32bit then 0x7F800000 else 0x7FF0000000000000
+      rawToAbsBytes (intToBytes bits size)
+    | .negInf =>
+      -- IEEE 754 -Infinity: sign=1, exponent all 1s, mantissa all 0s
+      -- Float (32-bit): 0xFF800000, Double (64-bit): 0xFFF0000000000000
+      let bits := if is32bit then 0xFF800000 else 0xFFF0000000000000
+      rawToAbsBytes (intToBytes bits size)
+    | .unspecified =>
+      -- Unspecified float value - store as unspecified bytes
+      List.replicate size (mkAbsByte none)
   | .pointer _ pv =>
     -- Pointer bytes carry the pointer's provenance
     -- Corresponds to: impl_mem.ml:1187 - AbsByte.v prov ~copy_offset:(Some i)
@@ -534,10 +574,9 @@ partial def reconstructValue (env : TypeEnv) (ty : Ctype) (bytes : List AbsByte)
 
 /-- Load value from memory.
     Corresponds to: load in impl_mem.ml:1552-1603
-    Audited: 2026-01-01
+    Audited: 2026-01-16
     Deviations:
     - No PNVI-ae-udi symbolic provenance resolution
-    - No trap representation checking for _Bool (TODO)
     - No device memory support -/
 def loadImpl (ty : Ctype) (ptr : PointerValue) : ConcreteMemM (Footprint × MemValue) := do
   let env ← read
@@ -566,6 +605,12 @@ def loadImpl (ty : Ctype) (ptr : PointerValue) : ConcreteMemM (Footprint × MemV
 
     -- Reconstruct value from bytes
     let val ← reconstructValue env ty bytes
+
+    -- Check for _Bool trap representation
+    -- Corresponds to: impl_mem.ml:1576-1586
+    if isBoolType ty && isBoolTrapRepresentation val then
+      throw (.trapRepresentation .read)
+
     pure (footprint, val)
 
 /-- Store value to memory.

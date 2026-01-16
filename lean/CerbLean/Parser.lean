@@ -738,12 +738,13 @@ mutual
       let valField ← getField j "value"
       match valField with
       | .str s =>
-        -- Handle special string values with proper types
+        -- Handle special string values - convert to Lean Float (matches Cerberus FVconcrete)
+        -- Cerberus uses OCaml's native float which handles NaN/Inf internally
         let fv := match s with
           | "unspecified" => FloatingValue.unspecified
-          | "NaN" => FloatingValue.nan
-          | "Infinity" => FloatingValue.posInf
-          | "-Infinity" => FloatingValue.negInf
+          | "NaN" => FloatingValue.finite (0.0 / 0.0)  -- Lean Float NaN
+          | "Infinity" => FloatingValue.finite (1.0 / 0.0)  -- Lean Float +Inf
+          | "-Infinity" => FloatingValue.finite ((-1.0) / 0.0)  -- Lean Float -Inf
           | _ =>
             -- Try parsing as number string
             match s.toNat? with
@@ -851,11 +852,12 @@ mutual
         | "LongDouble" => FloatingType.realFloating .longDouble
         | _ => FloatingType.realFloating .double  -- fallback
       let valField ← getField j "value"
+      -- Convert to Lean Float (matches Cerberus FVconcrete with OCaml native floats)
       let fv := match valField with
         | .str "unspecified" => FloatingValue.unspecified
-        | .str "NaN" => FloatingValue.nan
-        | .str "Infinity" => FloatingValue.posInf
-        | .str "-Infinity" => FloatingValue.negInf
+        | .str "NaN" => FloatingValue.finite (0.0 / 0.0)  -- Lean Float NaN
+        | .str "Infinity" => FloatingValue.finite (1.0 / 0.0)  -- Lean Float +Inf
+        | .str "-Infinity" => FloatingValue.finite ((-1.0) / 0.0)  -- Lean Float -Inf
         | .str s => match s.toNat? with
           | some n => FloatingValue.finite n.toFloat
           | none => FloatingValue.finite 0.0
