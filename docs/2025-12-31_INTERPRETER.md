@@ -44,7 +44,7 @@ We use **big-step semantics** rather than Cerberus's small-step approach. This i
 ## File Structure
 
 ```
-lean/CToLean/Semantics/
+lean/CerbLean/Semantics/
 ├── Monad.lean       # Interpreter monad (State + Error + Reader)
 ├── Env.lean         # Environment and symbol lookup
 ├── Eval.lean        # Pure expression evaluation
@@ -223,10 +223,10 @@ Compare Lean interpreter output against Cerberus `--exec --batch` results.
 - `cerberus/frontend/model/mem_common.lem` - Memory operations
 
 **Lean (existing)**:
-- `lean/CToLean/Core/Expr.lean` - Expression types
-- `lean/CToLean/Core/Value.lean` - Value types
-- `lean/CToLean/Memory/Concrete.lean` - Memory implementation
-- `lean/CToLean/Memory/Interface.lean` - Memory operations
+- `lean/CerbLean/Core/Expr.lean` - Expression types
+- `lean/CerbLean/Core/Value.lean` - Value types
+- `lean/CerbLean/Memory/Concrete.lean` - Memory implementation
+- `lean/CerbLean/Memory/Interface.lean` - Memory operations
 
 ## Out of Scope
 

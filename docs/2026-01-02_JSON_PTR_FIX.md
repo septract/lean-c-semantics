@@ -170,7 +170,7 @@ For now, this is acceptable since we're targeting the concrete memory model for 
    - Add `json_pointer_value` function
    - Update `OVpointer` case in `json_object_value`
 
-2. **`lean/CToLean/Parser.lean`**
+2. **`lean/CerbLean/Parser.lean`**
    - Update `OVpointer` parsing to handle structured JSON
    - Ensure `parseSym` extracts both `id` and `name`
 

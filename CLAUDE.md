@@ -22,7 +22,7 @@ lean-c-semantics/
 ├── docs/              # Documentation (YYYY-MM-DD_title.md format)
 │   └── 2025-12-24_DETAILED_PLAN.md   # Full implementation roadmap
 ├── lean/              # Lean 4 project
-│   └── CToLean/
+│   └── CerbLean/
 │       ├── Core/      # Core AST types
 │       ├── Parser.lean      # JSON parser (100% success on test suite)
 │       ├── PrettyPrint.lean # Pretty-printer matching Cerberus output
@@ -188,7 +188,7 @@ See `docs/2025-12-26_PP_DISCREPANCIES.md` for remaining issues (NULL type parsin
 Unit tests for the memory model implementation.
 ```bash
 make test-memory                           # Run memory model unit tests
-cd lean && .lake/build/bin/ctolean_memtest # Run directly
+cd lean && .lake/build/bin/cerblean_memtest # Run directly
 ```
 Tests include: layout (sizeof/alignof), allocation, store/load roundtrip, null dereference detection, use-after-free detection, double-free detection, out-of-bounds detection, read-only protection, pointer arithmetic.
 
@@ -199,7 +199,7 @@ The test script outputs files to a temp directory. To investigate a specific mis
 ./scripts/test_pp.sh --max 250
 
 # Use the Lean comparison tool directly (normalizes whitespace, strips section comments)
-./lean/.lake/build/bin/ctolean_pp /path/to/OUTPUT_DIR/filename.json --compare /path/to/OUTPUT_DIR/filename.cerberus.core
+./lean/.lake/build/bin/cerblean_pp /path/to/OUTPUT_DIR/filename.json --compare /path/to/OUTPUT_DIR/filename.cerberus.core
 
 # Example output showing the first difference:
 # First difference at position 458:

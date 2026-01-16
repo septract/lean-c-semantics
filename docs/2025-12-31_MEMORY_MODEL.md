@@ -25,7 +25,7 @@ Define an abstract interface for memory operations that:
 
 ## Core Types
 
-### Already Defined (lean/CToLean/Core/Value.lean)
+### Already Defined (lean/CerbLean/Core/Value.lean)
 
 These types are already implemented and match Cerberus:
 
@@ -64,7 +64,7 @@ inductive MemValue where
   | union_ (tag : Sym) (member : Identifier) (value : MemValue)
 ```
 
-### New Types (to be defined in lean/CToLean/Memory/)
+### New Types (to be defined in lean/CerbLean/Memory/)
 
 #### Allocation Metadata
 
@@ -498,7 +498,7 @@ Undefined {ub: "UB043_indirection_invalid_value", stderr: "", loc: "<6:3--6:5>"}
 ### File Structure
 
 ```
-lean/CToLean/Memory/
+lean/CerbLean/Memory/
 ├── Interface.lean    -- Type class defining memory operations
 ├── Types.lean        -- MemState, Allocation, Footprint, errors
 ├── Concrete.lean     -- Concrete memory model implementation

@@ -7,7 +7,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 CERBERUS_DIR="$PROJECT_DIR/cerberus"
-LEAN_PP="$PROJECT_DIR/lean/.lake/build/bin/ctolean_pp"
+LEAN_PP="$PROJECT_DIR/lean/.lake/build/bin/cerblean_pp"
 CERBERUS="$PROJECT_DIR/scripts/cerberus"
 OUTPUT_DIR="$PROJECT_DIR/tests/problem_tests"
 

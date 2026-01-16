@@ -83,8 +83,8 @@ fi
 # Build Lean interpreter
 echo "Building Lean interpreter..."
 cd "$LEAN_DIR"
-lake build ctolean_interp 2>&1 | tail -3
-LEAN_INTERP="$LEAN_DIR/.lake/build/bin/ctolean_interp"
+lake build cerblean_interp 2>&1 | tail -3
+LEAN_INTERP="$LEAN_DIR/.lake/build/bin/cerblean_interp"
 
 # Get test files
 echo ""

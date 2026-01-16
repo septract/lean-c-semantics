@@ -86,10 +86,10 @@ cerberus/ocaml_frontend/pprinters/pp_core.ml # Core pretty-printer
 
 **Files to create**:
 ```
-lean/CToLean/Core/Types.lean      # Basic types
-lean/CToLean/Core/Expr.lean       # Expression AST
-lean/CToLean/Core/Value.lean      # Value representations
-lean/CToLean/Core/File.lean       # Program structure
+lean/CerbLean/Core/Types.lean      # Basic types
+lean/CerbLean/Core/Expr.lean       # Expression AST
+lean/CerbLean/Core/Value.lean      # Value representations
+lean/CerbLean/Core/File.lean       # Program structure
 ```
 
 ### Phase 2: Core JSON Export & Parser
@@ -104,9 +104,9 @@ lean/CToLean/Core/File.lean       # Program structure
 
 **Lean implementation**:
 ```
-lean/CToLean/Parser/Json.lean     # JSON parsing utilities
-lean/CToLean/Parser/Core.lean     # Core-specific JSON parsing
-lean/CToLean/Pretty/Core.lean     # Pretty-printer matching Cerberus format
+lean/CerbLean/Parser/Json.lean     # JSON parsing utilities
+lean/CerbLean/Parser/Core.lean     # Core-specific JSON parsing
+lean/CerbLean/Pretty/Core.lean     # Pretty-printer matching Cerberus format
 ```
 
 **Validation approach**:
@@ -161,9 +161,9 @@ This validates both the parser and AST structure are correct without needing to 
 
 **Files to create**:
 ```
-lean/CToLean/Memory/Interface.lean  # Type class defining memory operations
-lean/CToLean/Memory/Simple.lean     # Level 1: integer addresses
-lean/CToLean/Memory/Concrete.lean   # Level 2: allocation-ID provenance
+lean/CerbLean/Memory/Interface.lean  # Type class defining memory operations
+lean/CerbLean/Memory/Simple.lean     # Level 1: integer addresses
+lean/CerbLean/Memory/Concrete.lean   # Level 2: allocation-ID provenance
 ```
 
 **Upgrade strategy**: Code using the `Memory` type class works with all implementations. Start proofs with Simple, upgrade to Concrete when needed for specific UB detection.
@@ -182,10 +182,10 @@ lean/CToLean/Memory/Concrete.lean   # Level 2: allocation-ID provenance
 
 **Files to create**:
 ```
-lean/CToLean/Semantics/Eval.lean      # Pure expression evaluation
-lean/CToLean/Semantics/Run.lean       # Effectful execution
-lean/CToLean/Semantics/State.lean     # Execution state
-lean/CToLean/Semantics/Monad.lean     # Execution monad
+lean/CerbLean/Semantics/Eval.lean      # Pure expression evaluation
+lean/CerbLean/Semantics/Run.lean       # Effectful execution
+lean/CerbLean/Semantics/State.lean     # Execution state
+lean/CerbLean/Semantics/Monad.lean     # Execution monad
 ```
 
 ### Phase 5: Validation Framework
@@ -201,9 +201,9 @@ lean/CToLean/Semantics/Monad.lean     # Execution monad
 
 **Files to create**:
 ```
-lean/CToLean/Test/Oracle.lean         # Run Cerberus as oracle
-lean/CToLean/Test/Compare.lean        # Compare execution results
-lean/CToLean/Test/Runner.lean         # Test harness
+lean/CerbLean/Test/Oracle.lean         # Run Cerberus as oracle
+lean/CerbLean/Test/Compare.lean        # Compare execution results
+lean/CerbLean/Test/Runner.lean         # Test harness
 ```
 
 ---

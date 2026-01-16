@@ -82,6 +82,6 @@ The following debug tests show the difference:
 
 ## Files Modified
 
-- `lean/CToLean/Memory/Types.lean` - Changed to allocate downward from 0xFFFFFFFFFFFF
-- `lean/CToLean/Memory/Concrete.lean` - Updated allocator to grow downward
-- `lean/CToLean/Memory/Layout.lean` - Added `integerTypeMax`/`integerTypeMin` helpers
+- `lean/CerbLean/Memory/Types.lean` - Changed to allocate downward from 0xFFFFFFFFFFFF
+- `lean/CerbLean/Memory/Concrete.lean` - Updated allocator to grow downward
+- `lean/CerbLean/Memory/Layout.lean` - Added `integerTypeMax`/`integerTypeMin` helpers

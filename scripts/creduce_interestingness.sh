@@ -6,7 +6,7 @@
 
 PROJECT=/Users/miked/Projects/c-to-lean
 CERBERUS="$PROJECT/scripts/cerberus"
-INTERP="$PROJECT/lean/.lake/build/bin/ctolean_interp"
+INTERP="$PROJECT/lean/.lake/build/bin/cerblean_interp"
 
 # Timeout in seconds (creduce can create infinite loops)
 TIMEOUT=10

@@ -1,6 +1,6 @@
 # Core Types Audit Plan
 
-This document tracks the audit of `lean/CToLean/Core/*.lean` against Cerberus source files to ensure exact correspondence.
+This document tracks the audit of `lean/CerbLean/Core/*.lean` against Cerberus source files to ensure exact correspondence.
 
 ## Audit Comment Format
 

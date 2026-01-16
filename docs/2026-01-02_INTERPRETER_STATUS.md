@@ -120,5 +120,5 @@ let result := if tmod != 0 && (tmod < 0) != (n2 < 0) then tmod + n2 else tmod
 
 # Run on specific test
 ./scripts/cerberus --json_core_out=/tmp/test.json path/to/test.c
-./lean/.lake/build/bin/ctolean_interp /tmp/test.json
+./lean/.lake/build/bin/cerblean_interp /tmp/test.json
 ```

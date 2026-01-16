@@ -220,7 +220,7 @@ When we reach a value with an empty continuation `[]`, we've finished the curren
 
 ### Phase 1: Data Structures
 
-Create `lean/CToLean/Semantics/State.lean`:
+Create `lean/CerbLean/Semantics/State.lean`:
 
 ```lean
 /-- Continuation element - what to do with a result -/
@@ -254,7 +254,7 @@ structure ThreadState where
 
 ### Phase 2: Core Step Function
 
-Create `lean/CToLean/Semantics/Step.lean`:
+Create `lean/CerbLean/Semantics/Step.lean`:
 
 ```lean
 /-- Result of a single step -/
@@ -429,10 +429,10 @@ partial def collectLabeledContinuations (e : AExpr) : HashMap Sym (List (Sym × 
 
 ## Files to Modify/Create
 
-- `lean/CToLean/Semantics/State.lean` - New data structures
-- `lean/CToLean/Semantics/Step.lean` - Core step function
-- `lean/CToLean/Semantics/Exec.lean` - Replace with step-based execution
-- `lean/CToLean/Semantics/Interpreter.lean` - Update entry point
+- `lean/CerbLean/Semantics/State.lean` - New data structures
+- `lean/CerbLean/Semantics/Step.lean` - Core step function
+- `lean/CerbLean/Semantics/Exec.lean` - Replace with step-based execution
+- `lean/CerbLean/Semantics/Interpreter.lean` - Update entry point
 
 ## References
 

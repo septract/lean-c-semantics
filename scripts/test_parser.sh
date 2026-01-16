@@ -59,7 +59,7 @@ fi
 # Build Lean parser
 echo "Building Lean parser..."
 cd "$LEAN_DIR"
-lake build ctolean_testbatch 2>&1 | tail -5
+lake build cerblean_testbatch 2>&1 | tail -5
 
 # Create output directory
 mkdir -p "$OUTPUT_DIR"
@@ -136,7 +136,7 @@ while IFS= read -r cfile; do
     fi
 
     # Run Lean parser
-    result=$("$LEAN_DIR/.lake/build/bin/ctolean_testbatch" "$json_file" 2>&1)
+    result=$("$LEAN_DIR/.lake/build/bin/cerblean_testbatch" "$json_file" 2>&1)
 
     if echo "$result" | grep -q "^✓"; then
         ((parse_success++)) || true

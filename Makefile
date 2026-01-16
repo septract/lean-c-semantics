@@ -66,10 +66,10 @@ test: test-unit test-memory test-parser-quick test-pp-quick test-interp
 
 # Unit Tests (No Cerberus required)
 test-unit: lean
-	cd lean && .lake/build/bin/ctolean_test
+	cd lean && .lake/build/bin/cerblean_test
 
 test-memory: lean
-	cd lean && .lake/build/bin/ctolean_memtest
+	cd lean && .lake/build/bin/cerblean_memtest
 
 # Parser Tests
 test-parser-quick: lean cerberus

@@ -60,7 +60,7 @@ fi
 # Build Lean pretty-printer
 echo "Building Lean pretty-printer..."
 cd "$LEAN_DIR"
-lake build ctolean_pp 2>&1 | tail -5
+lake build cerblean_pp 2>&1 | tail -5
 
 # Create output directory
 mkdir -p "$OUTPUT_DIR"
@@ -135,7 +135,7 @@ while IFS= read -r cfile; do
     ((cerberus_success++)) || true
 
     # Run Lean pretty-printer
-    if ! "$LEAN_DIR/.lake/build/bin/ctolean_pp" "$json_file" > "$lean_pp" 2>/dev/null; then
+    if ! "$LEAN_DIR/.lake/build/bin/cerblean_pp" "$json_file" > "$lean_pp" 2>/dev/null; then
         echo "$cfile: Lean pretty-printer failed" >> "$ERROR_LOG"
         if [[ "$VERBOSE" == "true" ]]; then
             echo "LEAN_PP_FAIL"
@@ -144,7 +144,7 @@ while IFS= read -r cfile; do
     fi
 
     # Compare outputs using the Lean comparison tool
-    result=$("$LEAN_DIR/.lake/build/bin/ctolean_pp" "$json_file" --compare "$cerberus_pp" 2>&1) || true
+    result=$("$LEAN_DIR/.lake/build/bin/cerblean_pp" "$json_file" --compare "$cerberus_pp" 2>&1) || true
 
     if echo "$result" | grep -q "^✓"; then
         ((pp_match++)) || true

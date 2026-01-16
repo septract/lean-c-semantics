@@ -1,4 +1,4 @@
-# CToLean
+# CerbLean
 
 Lean 4 library for parsing and reasoning about Cerberus Core IR.
 
@@ -27,27 +27,27 @@ Or run the scripts directly:
 
 ## Structure
 
-- `CToLean/Core/` - Core AST types matching Cerberus IR
+- `CerbLean/Core/` - Core AST types matching Cerberus IR
   - `Types.lean` - Base types, object types, operators
   - `Value.lean` - Values (integers, pointers, structs, etc.)
   - `Expr.lean` - Pure and effectful expressions
   - `File.lean` - Program structure (functions, globals, tags)
-- `CToLean/Parser.lean` - JSON parser for Cerberus output
-- `CToLean/PrettyPrint.lean` - Pretty-printer matching Cerberus format
-- `CToLean/Test*.lean` - Test utilities
+- `CerbLean/Parser.lean` - JSON parser for Cerberus output
+- `CerbLean/PrettyPrint.lean` - Pretty-printer matching Cerberus format
+- `CerbLean/Test*.lean` - Test utilities
 
 ## Usage
 
 ```lean
-import CToLean.Parser
-import CToLean.PrettyPrint
+import CerbLean.Parser
+import CerbLean.PrettyPrint
 
 -- Parse JSON from Cerberus
 let json ← IO.FS.readFile "output.json"
-match CToLean.Parser.parseFileFromString json with
+match CerbLean.Parser.parseFileFromString json with
 | .ok file =>
   -- Pretty-print back to Core syntax
-  IO.println (CToLean.PrettyPrint.ppFile file)
+  IO.println (CerbLean.PrettyPrint.ppFile file)
 | .error e =>
   IO.eprintln s!"Parse error: {e}"
 ```

@@ -1,26 +1,26 @@
-name = "CToLean"
+name = "CerbLean"
 version = "0.1.0"
-defaultTargets = ["CToLean", "ctolean_pp", "ctolean_test", "ctolean_testbatch", "ctolean_interp", "ctolean_memtest"]
+defaultTargets = ["CerbLean", "cerblean_pp", "cerblean_test", "cerblean_testbatch", "cerblean_interp", "cerblean_memtest"]
 
 [[lean_lib]]
-name = "CToLean"
+name = "CerbLean"
 
 [[lean_exe]]
-name = "ctolean_test"
-root = "CToLean.Test"
+name = "cerblean_test"
+root = "CerbLean.Test"
 
 [[lean_exe]]
-name = "ctolean_testbatch"
-root = "CToLean.TestBatch"
+name = "cerblean_testbatch"
+root = "CerbLean.TestBatch"
 
 [[lean_exe]]
-name = "ctolean_pp"
-root = "CToLean.TestPrettyPrint"
+name = "cerblean_pp"
+root = "CerbLean.TestPrettyPrint"
 
 [[lean_exe]]
-name = "ctolean_memtest"
-root = "CToLean.TestMemory"
+name = "cerblean_memtest"
+root = "CerbLean.TestMemory"
 
 [[lean_exe]]
-name = "ctolean_interp"
-root = "CToLean.TestInterpreter"
+name = "cerblean_interp"
+root = "CerbLean.TestInterpreter"
