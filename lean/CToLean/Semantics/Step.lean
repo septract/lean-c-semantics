@@ -716,11 +716,80 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
       let pval := { dst with prov := src.prov }
       pure (.object (.pointer pval))
 
-    -- Varargs - not yet implemented
-    | .vaStart, _ => throw (.notImplemented "va_start")
-    | .vaCopy, _ => throw (.notImplemented "va_copy")
-    | .vaArg, _ => throw (.notImplemented "va_arg")
-    | .vaEnd, _ => throw (.notImplemented "va_end")
+    -- Varargs
+    -- Corresponds to: va_start in impl_mem.ml:2698-2704
+    | .vaStart, [.list _ elems] =>
+      -- Extract (ctype, pointer) pairs from the list
+      let args ← elems.mapM fun v => do
+        match v with
+        | .tuple [.ctype cty, .object (.pointer ptr)] => pure (cty, ptr)
+        | _ => throw (.typeError "va_start: expected (ctype, pointer) pairs")
+      -- Get next varargs ID and store the args
+      let mem ← InterpM.getMemory
+      let id := mem.nextVarargsId
+      let newMem := { mem with
+        varargs := mem.varargs.insert id (0, args)
+        nextVarargsId := id + 1
+      }
+      InterpM.setMemory newMem
+      -- Return IV(Prov_none, id) as an integer value
+      pure (.object (.integer { val := id, prov := .none }))
+
+    -- Corresponds to: va_copy in impl_mem.ml:2706-2721
+    | .vaCopy, [.object (.integer iv)] =>
+      match iv.prov with
+      | .none =>
+        let id := iv.val.toNat
+        let mem ← InterpM.getMemory
+        match mem.varargs[id]? with
+        | some args =>
+          let newId := mem.nextVarargsId
+          let newMem := { mem with
+            varargs := mem.varargs.insert newId args
+            nextVarargsId := newId + 1
+          }
+          InterpM.setMemory newMem
+          pure (.object (.integer { val := newId, prov := .none }))
+        | none => throw (.typeError "va_copy: not initialized")
+      | _ => throw (.typeError "va_copy: invalid va_list")
+
+    -- Corresponds to: va_arg in impl_mem.ml:2723-2741
+    | .vaArg, [.object (.integer iv), .ctype _ty] =>
+      match iv.prov with
+      | .none =>
+        let id := iv.val.toNat
+        let mem ← InterpM.getMemory
+        match mem.varargs[id]? with
+        | some (i, args) =>
+          match args[i]? with
+          | some (_, ptr) =>
+            -- Update index
+            let newMem := { mem with varargs := mem.varargs.insert id (i + 1, args) }
+            InterpM.setMemory newMem
+            -- Return the pointer
+            pure (.object (.pointer ptr))
+          | none => throw (.typeError "va_arg: invalid number of arguments")
+        | none => throw (.typeError "va_arg: not initialized")
+      | _ => throw (.typeError "va_arg: invalid va_list")
+
+    -- Corresponds to: va_end in impl_mem.ml:2743-2754
+    | .vaEnd, [.object (.integer iv)] =>
+      match iv.prov with
+      | .none =>
+        let id := iv.val.toNat
+        let mem ← InterpM.getMemory
+        match mem.varargs[id]? with
+        | some _ =>
+          let newMem := { mem with varargs := mem.varargs.erase id }
+          InterpM.setMemory newMem
+          pure .unit
+        | none => throw (.typeError "va_end: not initialized")
+      | _ => throw (.typeError "va_end: invalid va_list")
+
+    | .vaStart, _ => throw (.typeError "va_start: expected list argument")
+    | .vaCopy, _ => throw (.typeError "va_copy: expected integer argument")
+    | .vaArg, _ => throw (.typeError "va_arg: expected (integer, ctype) arguments")
+    | .vaEnd, _ => throw (.typeError "va_end: expected integer argument")
 
     -- CHERI intrinsics - not yet implemented
     | .cheriIntrinsic name, _ => throw (.notImplemented s!"CHERI intrinsic: {name}")

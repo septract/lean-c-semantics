@@ -55,7 +55,7 @@ def testBasicSizes : IO Unit := do
   -- Floating types
   assert! sizeof env (ct (.basic (.floating (.realFloating .float)))) == 4
   assert! sizeof env (ct (.basic (.floating (.realFloating .double)))) == 8
-  assert! sizeof env (ct (.basic (.floating (.realFloating .longDouble)))) == 16
+  assert! sizeof env (ct (.basic (.floating (.realFloating .longDouble)))) == 8
 
   -- Pointer
   assert! sizeof env (ct (.pointer {} .void)) == 8

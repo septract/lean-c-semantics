@@ -169,7 +169,6 @@ type mem_state = {
     Audited: 2026-01-01
     Deviations:
     - next_iota, iota_map: Deferred (PNVI-ae-udi only)
-    - varargs, next_varargs_id: Deferred (variadic functions)
     - last_used: Deferred (PNVI-ae only)
     - requested: Deferred (cerb::with_address extension) -/
 structure MemState where
@@ -200,6 +199,12 @@ structure MemState where
       Cerberus uses 0xFFFFFFFFFFFF (48-bit address space).
       Allocations grow DOWNWARD from this address. -/
   lastAddress : Nat := 0xFFFFFFFFFFFF
+  /-- Variadic argument state: id -> (current index, list of (ctype, pointer) pairs).
+      Corresponds to: varargs field in impl_mem.ml:491 -/
+  varargs : Std.HashMap Nat (Nat × List (Ctype × PointerValue)) := {}
+  /-- Next variadic argument ID.
+      Corresponds to: next_varargs_id field in impl_mem.ml:492 -/
+  nextVarargsId : Nat := 0
   deriving Inhabited
 
 /-! ## Footprint Tracking

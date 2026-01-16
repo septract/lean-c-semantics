@@ -32,7 +32,10 @@ lean-c-semantics/
 │       └── Test*.lean # Test CLI entry points
 ├── scripts/           # Development scripts
 │   ├── test_parser.sh # Run parser against Cerberus test suite
-│   └── test_pp.sh     # Run pretty-printer comparison tests
+│   ├── test_pp.sh     # Run pretty-printer comparison tests
+│   ├── test_interp.sh # Run interpreter differential testing
+│   ├── fuzz_csmith.sh # Fuzz testing with csmith
+│   └── creduce_interestingness.sh # For minimizing failing tests with creduce
 ├── tests/             # C test files for differential testing
 │   ├── minimal/       # Core test suite (NNN-description.c)
 │   ├── debug/         # Debug/investigation tests (category-NN-description.c)
@@ -243,6 +246,43 @@ Generate a single csmith test for debugging:
 - Many csmith tests fail Cerberus compilation due to pointer type strictness
 - Tests using unions may show DIFF (Unspecified vs concrete) - we don't track active union member
 - Large tests may exhaust interpreter fuel (TIMEOUT, not necessarily a bug)
+
+**Using creduce to minimize failing tests** (`scripts/creduce_interestingness.sh`):
+When you find a complex failing test (from csmith or elsewhere), use creduce to automatically minimize it to the smallest reproducer:
+
+```bash
+# 1. Copy the failing test to /tmp
+cp path/to/failing_test.c /tmp/test.c
+
+# 2. Verify the interestingness test works on your file
+cd /tmp
+/path/to/project/scripts/creduce_interestingness.sh test.c
+echo $?  # Should print 0 if the bug reproduces
+
+# 3. Run creduce to minimize
+creduce /path/to/project/scripts/creduce_interestingness.sh test.c
+
+# 4. The minimized test is now in test.c - save it to tests/debug/
+cp test.c /path/to/project/tests/debug/category-NN-description.c
+```
+
+The interestingness script (`scripts/creduce_interestingness.sh`):
+- Returns 0 (interesting) if: Cerberus succeeds but Lean reports an error
+- Returns 1 (not interesting) otherwise
+- Has built-in 10-second timeouts to handle infinite loops creduce might create
+
+Customize the script for different bug patterns:
+- Change the grep pattern to match different error types
+- Modify success conditions (e.g., mismatch instead of error)
+
+Example: minimizing a "out of bounds" bug:
+```bash
+# The default script looks for "out of bounds" errors
+# Edit the script to match your specific error if needed:
+if echo "$LEAN_OUT" | grep -q "your error pattern"; then
+    exit 0  # Interesting
+fi
+```
 
 ### Differential Testing
 Compare Lean interpreter output against Cerberus:
