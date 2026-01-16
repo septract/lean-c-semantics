@@ -596,13 +596,20 @@ def evalCtor (c : Ctor) (args : List Value) : InterpM Value := do
 
   | .ivfromfloat =>
     -- Ivfromfloat: ctype -> floating -> integer
-    -- Corresponds to: core.ott:282
+    -- Corresponds to: core.ott:282, defacto_memory.lem:1113-1125 (integer_value_of_fval)
+    -- Audited: 2026-01-15
+    -- Truncation towards zero (C semantics)
     match args with
     | [.ctype _ty, .object (.floating fv)] =>
       match fv with
       | .finite f =>
-        -- Truncate float to integer (towards zero)
-        let intVal : Int := f.toUInt64.toNat  -- TODO: proper float truncation
+        -- Truncate float to integer towards zero
+        -- For positive: floor, for negative: ceiling
+        let intVal : Int := if f >= 0.0 then
+          f.floor.toUInt64.toNat
+        else
+          -- For negative: negate, floor, negate back
+          -(-f).floor.toUInt64.toNat
         pure (.object (.integer { val := intVal, prov := .none }))
       | _ => InterpM.throwTypeError "ivfromfloat: non-finite float"
     | _ => InterpM.throwTypeError "ivfromfloat requires (ctype, float)"

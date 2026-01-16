@@ -230,12 +230,13 @@ partial def memValueToBytes (env : TypeEnv) (val : MemValue) : List AbsByte :=
     let rawBytes := intToBytes iv.val (integerTypeSize ity)
     rawBytes.mapIdx fun i v => { prov := iv.prov, copyOffset := some i, value := v }
   | .floating fty fv =>
-    -- Simplified: just use size, actual float encoding would be more complex
+    -- Store float as IEEE 754 bit representation
+    -- Corresponds to: impl_mem.ml float storing (repr for floating types)
     let size := floatingTypeSize fty
     match fv with
     | .finite f =>
-      -- This is a simplification - proper IEEE 754 encoding needed
-      rawToAbsBytes (intToBytes f.toUInt64.toNat size)
+      -- Convert float to IEEE 754 bits using Float.toBits
+      rawToAbsBytes (intToBytes f.toBits.toNat size)
     | .nan => panic! "memValueToBytes: NaN float encoding not implemented"
     | .posInf => panic! "memValueToBytes: +Inf float encoding not implemented"
     | .negInf => panic! "memValueToBytes: -Inf float encoding not implemented"
@@ -399,10 +400,13 @@ partial def reconstructValue (env : TypeEnv) (ty : Ctype) (bytes : List AbsByte)
       pure (.unspecified ty)
 
   | .basic (.floating fty) =>
-    -- Simplified float reconstruction
+    -- Reconstruct float from IEEE 754 bit representation
+    -- Corresponds to: impl_mem.ml float loading (abst for floating types)
     match bytesToInt bytes false with
     | some n =>
-      pure (.floating fty (.finite (Float.ofScientific n.toNat true 0)))
+      -- Convert IEEE 754 bits back to Float
+      let bits : UInt64 := n.toNat.toUInt64
+      pure (.floating fty (.finite (Float.ofBits bits)))
     | none =>
       pure (.unspecified ty)
 

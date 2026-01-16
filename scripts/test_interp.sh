@@ -1,11 +1,12 @@
 #!/bin/bash
 # Test the Lean interpreter against Cerberus execution
-# Usage: ./scripts/test_interp.sh [--verbose] [--max N] [test_dir_or_file]
+# Usage: ./scripts/test_interp.sh [--verbose] [--max N] [--list FILE] [test_dir_or_file]
 #
 # Supports:
 #   - Single .c file: ./scripts/test_interp.sh path/to/test.c
 #   - Directory: tests all *.c files recursively
 #   - Cerberus CI directory: uses their tests.sh for the file list
+#   - List file: ./scripts/test_interp.sh --list paths.txt (one path per line)
 
 set -e
 
@@ -21,6 +22,7 @@ CERBERUS="$PROJECT_DIR/scripts/cerberus"
 # Configuration
 VERBOSE=false
 TEST_PATH=""  # Can be a file or directory
+LIST_FILE=""  # File containing list of test paths
 MAX_TESTS=0  # 0 = unlimited
 OUTPUT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/c-to-lean-interp-test.XXXXXXXXXX")
 
@@ -35,6 +37,10 @@ while [[ $# -gt 0 ]]; do
             MAX_TESTS=$2
             shift 2
             ;;
+        --list)
+            LIST_FILE="$2"
+            shift 2
+            ;;
         *)
             TEST_PATH="$1"
             shift
@@ -42,21 +48,36 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Default test directory
-if [[ -z "$TEST_PATH" ]]; then
+# Handle --list mode vs path mode
+LIST_MODE=false
+if [[ -n "$LIST_FILE" ]]; then
+    LIST_MODE=true
+    if [[ ! -f "$LIST_FILE" ]]; then
+        echo "Error: List file not found: $LIST_FILE"
+        exit 1
+    fi
+    # Resolve to absolute path before we change directories
+    LIST_FILE="$(cd "$(dirname "$LIST_FILE")" && pwd)/$(basename "$LIST_FILE")"
+fi
+
+# Default test directory (only used if not in list mode)
+if [[ -z "$TEST_PATH" ]] && ! $LIST_MODE; then
     TEST_PATH="$CERBERUS_DIR/tests/ci"
 fi
 
-# Check if it's a single file or a directory
+# Check if it's a single file or a directory (only relevant if not list mode)
 SINGLE_FILE=false
-if [[ -f "$TEST_PATH" ]]; then
-    SINGLE_FILE=true
-    # For single file, resolve to absolute path
-    TEST_PATH="$(cd "$(dirname "$TEST_PATH")" && pwd)/$(basename "$TEST_PATH")"
-    TEST_DIR="$(dirname "$TEST_PATH")"
-else
-    # Resolve directory to absolute path
-    TEST_DIR="$(cd "$TEST_PATH" && pwd)"
+TEST_DIR=""
+if ! $LIST_MODE; then
+    if [[ -f "$TEST_PATH" ]]; then
+        SINGLE_FILE=true
+        # For single file, resolve to absolute path
+        TEST_PATH="$(cd "$(dirname "$TEST_PATH")" && pwd)/$(basename "$TEST_PATH")"
+        TEST_DIR="$(dirname "$TEST_PATH")"
+    else
+        # Resolve directory to absolute path
+        TEST_DIR="$(cd "$TEST_PATH" && pwd)"
+    fi
 fi
 
 # Build Lean interpreter
@@ -67,7 +88,12 @@ LEAN_INTERP="$LEAN_DIR/.lake/build/bin/ctolean_interp"
 
 # Get test files
 echo ""
-if $SINGLE_FILE; then
+if $LIST_MODE; then
+    # List file mode - read paths from file (one per line)
+    echo "Testing files from list: $LIST_FILE"
+    # Read non-empty, non-comment lines
+    TEST_FILES=$(grep -v '^#' "$LIST_FILE" | grep -v '^$' | tr '\n' ' ')
+elif $SINGLE_FILE; then
     # Single file mode
     echo "Testing single file: $TEST_PATH"
     TEST_FILES="$TEST_PATH"
@@ -103,7 +129,7 @@ else
 fi
 
 TOTAL_FILES=$(echo $TEST_FILES | wc -w | tr -d ' ')
-if ! $SINGLE_FILE; then
+if ! $SINGLE_FILE || $LIST_MODE; then
     echo "Found $TOTAL_FILES test files"
 fi
 

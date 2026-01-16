@@ -21,3 +21,4 @@ logs/
 *.json
 platform.info
 tests/csmith/fuzz_results/
+tmp/
