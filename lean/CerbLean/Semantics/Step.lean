@@ -36,16 +36,34 @@ let call_proc core_extern file psym cvals =
 ```
 -/
 
+/-- Build symbol remapping from extern field.
+    Corresponds to: create_extern_symmap in core_linking.lem:317-325
+    For each (decls, lk) entry in file.extern:
+    - LK_none: skip
+    - LK_tentative def / LK_normal def: map each decl -> def -/
+def createExternSymmap (file : File) : HashMap Sym Sym :=
+  file.extern.fold (init := {}) fun acc _ (decls, lk) =>
+    match lk with
+    | .none_ => acc
+    | .tentative defSym => decls.foldl (fun acc decl => acc.insert decl defSym) acc
+    | .normal defSym => decls.foldl (fun acc decl => acc.insert decl defSym) acc
+
 /-- Look up a procedure and return (env, body).
     Corresponds to: call_proc in core_run.lem:30-70
-    Audited: 2025-01-01
-    Deviations: We don't handle core_extern (external symbol remapping) -/
+    Audited: 2025-01-01, updated 2026-01-16 for extern symbol remapping -/
 def callProc (file : File) (psym : Sym) (cvals : List Value)
     : Except InterpError (HashMap Sym Value × AExpr) := do
+  -- Build extern symbol map (matches core_run.lem:42-45)
+  let coreExtern := createExternSymmap file
   -- Look up in stdlib first, then funs (matches Cerberus order)
-  let procOpt := match file.stdlib.find? fun (s, _) => s == psym with
+  -- Note: stdlib lookup uses psym directly (core_run.lem:38)
+  -- funs lookup uses remapped symbol (core_run.lem:42-46)
+  let procOpt : Option (Sym × FunDecl) :=
+    match file.stdlib.find? fun (s, _) => s == psym with
     | some x => some x
-    | none => file.funs.find? fun (s, _) => s == psym
+    | none =>
+      let coreSym := coreExtern.get? psym |>.getD psym
+      file.funs.find? fun (s, _) => s == coreSym
   match procOpt with
   | some (_, .proc _loc _markerEnv _retTy params body) =>
     if params.length != cvals.length then
@@ -57,9 +75,12 @@ def callProc (file : File) (psym : Sym) (cvals : List Value)
   | some (_, .fun_ _ _ _) =>
     throw (.illformedProgram s!"call_proc: '{psym.name}' is a fun, not a proc")
   | some (_, .procDecl _ _ _) =>
-    throw (.illformedProgram s!"call_proc: '{psym.name}' is a procDecl (forward declaration)")
+    -- Function is declared but not defined - typically a libc function that
+    -- wasn't linked into the Core IR. Cerberus --exec links libc at runtime,
+    -- but --json_core_out doesn't include linked library implementations.
+    throw (.illformedProgram s!"cannot call '{psym.name}': declared but not defined (missing libc?)")
   | some (_, .builtinDecl _ _ _) =>
-    throw (.illformedProgram s!"call_proc: '{psym.name}' is a builtinDecl")
+    throw (.illformedProgram s!"call_proc: '{psym.name}' is a builtinDecl (use builtin handler)")
   | none =>
     throw (.illformedProgram s!"calling unknown procedure: '{psym.name}'")
 
