@@ -714,8 +714,12 @@ We implement GCC-like behavior for most cases.
 
 /-- Evaluate an implementation-defined function call.
     Corresponds to: runtime/libcore/impls/*.impl files
-    Audited: 2026-01-02
-    Deviations: We implement GCC-like behavior only -/
+    Audited: 2026-01-16
+    Deviations: We implement GCC-like behavior only
+
+    NOTE: These are IMPLEMENTATION-DEFINED behaviors in C. Different compilers
+    may handle these differently. Currently we hardcode GCC x86_64 behavior.
+    Future work: abstract these choices into a configurable implementation model. -/
 def evalImplCall (name : String) (args : List Value) : InterpM Value := do
   match name, args with
   -- Integer.conv_nonrepresentable_signed_integer: signed overflow on conversion
@@ -728,6 +732,18 @@ def evalImplCall (name : String) (args : List Value) : InterpM Value := do
   -- conv_int: standard integer conversion (also impl in some contexts)
   | "conv_int", [.ctype (.basic (.integer ity)), v] =>
     convertInt ity v
+
+  -- SHR_signed_negative: right shift of negative signed integer (IMPL-DEFINED)
+  -- Corresponds to: gcc_4.9.0_x86_64-apple-darwin10.8.0.impl:38-41
+  -- GCC says "Signed '>>' acts on negative numbers by sign extension."
+  -- This is arithmetic right shift: n >> m = floor(n / 2^m)
+  -- NOTE: Other compilers may use logical shift (fill with 0s) instead.
+  | "SHR_signed_negative", [.ctype _, .object (.integer nv), .object (.integer mv)] =>
+    let n := nv.val
+    let m := mv.val.toNat
+    -- Arithmetic right shift: floor(n / 2^m) gives sign extension behavior
+    let result := n / (2 ^ m)
+    pure (.object (.integer { val := result, prov := nv.prov }))
 
   | _, _ =>
     InterpM.throwNotImpl s!"impl call: {name}"
