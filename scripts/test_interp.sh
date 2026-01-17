@@ -156,9 +156,11 @@ fi
 TIMEOUT_SECS=10
 
 # Build Cerberus flags
-CERBERUS_FLAGS=""
+# Always use --sequentialise since our interpreter evaluates unseq left-to-right
+# (matches Cerberus's sequentialised behavior, not its non-deterministic exploration)
+CERBERUS_FLAGS="--sequentialise"
 if $NO_LIBC; then
-    CERBERUS_FLAGS="--nolibc"
+    CERBERUS_FLAGS="$CERBERUS_FLAGS --nolibc"
 fi
 
 # Counters

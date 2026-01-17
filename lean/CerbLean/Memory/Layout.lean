@@ -121,9 +121,9 @@ def integerTypeMin (ity : IntegerType) : Int :=
 /-- Size of real floating type in bytes.
     Corresponds to: sizeof_fty in ocaml_implementation.ml:206-212
     Audited: 2026-01-01
-    Deviations: float=4 (Cerberus uses 8 as hack) -/
+    Deviations: None (Cerberus uses 8 for all floating types) -/
 def realFloatingTypeSize : RealFloatingType → Nat
-  | .float => 4
+  | .float => 8       -- Cerberus uses 8 (stores float as double)
   | .double => 8
   | .longDouble => 8  -- Cerberus uses 8 (same as double)
 
@@ -188,9 +188,9 @@ def integerTypeAlign : IntegerType → Nat
 /-- Alignment of real floating type.
     Corresponds to: alignof_fty in ocaml_implementation.ml:247-253
     Audited: 2026-01-01
-    Deviations: float=4 (Cerberus uses 8 as hack) -/
+    Deviations: None (Cerberus uses 8 for all floating types) -/
 def realFloatingTypeAlign : RealFloatingType → Nat
-  | .float => 4
+  | .float => 8       -- Cerberus uses 8 (stores float as double)
   | .double => 8
   | .longDouble => 8  -- Cerberus uses 8 (same as double)
 

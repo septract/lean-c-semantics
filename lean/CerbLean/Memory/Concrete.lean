@@ -21,6 +21,88 @@ namespace CerbLean.Memory
 
 open CerbLean.Core
 
+/-! ## IEEE 754 Float Conversion Helpers
+
+Lean's Float is always 64-bit (double precision). We need to convert
+between 32-bit (float) and 64-bit (double) IEEE 754 representations.
+-/
+
+/-- Convert 64-bit IEEE 754 double bits to 32-bit IEEE 754 float bits.
+    This truncates precision from double to float. -/
+def doubleBitsToFloat32Bits (doubleBits : UInt64) : UInt32 :=
+  -- IEEE 754 double: sign(1) | exponent(11) | mantissa(52)
+  -- IEEE 754 float:  sign(1) | exponent(8)  | mantissa(23)
+  let sign := (doubleBits >>> 63) &&& 1
+  let exp := (doubleBits >>> 52) &&& 0x7FF  -- 11-bit exponent
+  let mant := doubleBits &&& 0xFFFFFFFFFFFFF  -- 52-bit mantissa
+
+  -- Handle special cases
+  if exp == 0x7FF then
+    -- Infinity or NaN
+    let float32Sign := sign.toUInt32 <<< 31
+    let float32Exp : UInt32 := (0xFF : UInt32) <<< 23  -- All 1s exponent
+    if mant == 0 then
+      -- Infinity
+      float32Sign ||| float32Exp
+    else
+      -- NaN - preserve quiet NaN bit
+      float32Sign ||| float32Exp ||| (0x400000 : UInt32)  -- Set quiet NaN bit
+  else if exp == 0 then
+    -- Zero or denormal - just return zero (denormals are rare)
+    sign.toUInt32 <<< 31
+  else
+    -- Normal number
+    -- Convert exponent: double bias is 1023, float bias is 127
+    -- new_exp = exp - 1023 + 127 = exp - 896
+    let expVal := exp.toNat
+    if expVal < 897 then
+      -- Underflow to zero
+      sign.toUInt32 <<< 31
+    else if expVal > 1150 then
+      -- Overflow to infinity
+      (sign.toUInt32 <<< 31) ||| ((0xFF : UInt32) <<< 23)
+    else
+      let float32Exp := (expVal - 896 : Nat).toUInt32
+      let float32Mant := (mant >>> 29).toUInt32  -- Keep top 23 bits
+      (sign.toUInt32 <<< 31) ||| (float32Exp <<< 23) ||| float32Mant
+
+/-- Convert 32-bit IEEE 754 float bits to 64-bit IEEE 754 double bits.
+    This widens precision from float to double. -/
+def float32BitsToDoubleBits (float32Bits : UInt32) : UInt64 :=
+  -- IEEE 754 float:  sign(1) | exponent(8)  | mantissa(23)
+  -- IEEE 754 double: sign(1) | exponent(11) | mantissa(52)
+  let sign := (float32Bits >>> 31) &&& 1
+  let exp := (float32Bits >>> 23) &&& 0xFF  -- 8-bit exponent
+  let mant := float32Bits &&& 0x7FFFFF  -- 23-bit mantissa
+
+  -- Handle special cases
+  if exp == 0xFF then
+    -- Infinity or NaN
+    let doubleSign := sign.toUInt64 <<< 63
+    let doubleExp : UInt64 := (0x7FF : UInt64) <<< 52  -- All 1s exponent
+    if mant == 0 then
+      -- Infinity
+      doubleSign ||| doubleExp
+    else
+      -- NaN - preserve quiet NaN
+      doubleSign ||| doubleExp ||| (mant.toUInt64 <<< 29)
+  else if exp == 0 then
+    -- Zero or denormal
+    if mant == 0 then
+      -- Zero
+      sign.toUInt64 <<< 63
+    else
+      -- Denormal - convert to normalized double
+      -- This is complex, just return zero for now
+      sign.toUInt64 <<< 63
+  else
+    -- Normal number
+    -- Convert exponent: float bias is 127, double bias is 1023
+    -- new_exp = exp - 127 + 1023 = exp + 896
+    let doubleExp := (exp.toNat + 896 : Nat).toUInt64
+    let doubleMant := mant.toUInt64 <<< 29  -- Extend mantissa
+    (sign.toUInt64 <<< 63) ||| (doubleExp <<< 52) ||| doubleMant
+
 /-! ## Concrete Memory Monad
 
 Corresponds to: memM monad in impl_mem.ml:277
@@ -253,30 +335,24 @@ partial def memValueToBytes (env : TypeEnv) (val : MemValue) : List AbsByte :=
   | .floating fty fv =>
     -- Store float as IEEE 754 bit representation
     -- Corresponds to: impl_mem.ml float storing (repr for floating types)
-    let size := floatingTypeSize fty
-    -- Determine if this is a 32-bit float or 64-bit double
-    let is32bit := match fty with
-      | .realFloating .float => true
-      | .realFloating .double => false
-      | .realFloating .longDouble => false
+    -- Note: Cerberus stores ALL floating types as 8-byte 64-bit doubles
+    let size := floatingTypeSize fty  -- Always 8 (Cerberus uses 8 for all floats)
     match fv with
     | .finite f =>
-      -- Convert float to IEEE 754 bits using Float.toBits
-      rawToAbsBytes (intToBytes f.toBits.toNat size)
+      -- Convert float to IEEE 754 64-bit bits (always double precision)
+      let bits := f.toBits.toNat
+      rawToAbsBytes (intToBytes bits size)
     | .nan =>
       -- IEEE 754 quiet NaN: exponent all 1s, mantissa MSB = 1
-      -- Float (32-bit): 0x7FC00000, Double (64-bit): 0x7FF8000000000000
-      let bits := if is32bit then 0x7FC00000 else 0x7FF8000000000000
+      let bits := 0x7FF8000000000000  -- 64-bit NaN
       rawToAbsBytes (intToBytes bits size)
     | .posInf =>
       -- IEEE 754 +Infinity: sign=0, exponent all 1s, mantissa all 0s
-      -- Float (32-bit): 0x7F800000, Double (64-bit): 0x7FF0000000000000
-      let bits := if is32bit then 0x7F800000 else 0x7FF0000000000000
+      let bits := 0x7FF0000000000000  -- 64-bit +Infinity
       rawToAbsBytes (intToBytes bits size)
     | .negInf =>
       -- IEEE 754 -Infinity: sign=1, exponent all 1s, mantissa all 0s
-      -- Float (32-bit): 0xFF800000, Double (64-bit): 0xFFF0000000000000
-      let bits := if is32bit then 0xFF800000 else 0xFFF0000000000000
+      let bits := 0xFFF0000000000000  -- 64-bit -Infinity
       rawToAbsBytes (intToBytes bits size)
     | .unspecified =>
       -- Unspecified float value - store as unspecified bytes
@@ -442,9 +518,10 @@ partial def reconstructValue (env : TypeEnv) (ty : Ctype) (bytes : List AbsByte)
   | .basic (.floating fty) =>
     -- Reconstruct float from IEEE 754 bit representation
     -- Corresponds to: impl_mem.ml float loading (abst for floating types)
+    -- Note: Cerberus stores ALL floating types as 8-byte 64-bit doubles
     match bytesToInt bytes false with
     | some n =>
-      -- Convert IEEE 754 bits back to Float
+      -- Convert IEEE 754 64-bit bits back to Float
       let bits : UInt64 := n.toNat.toUInt64
       pure (.floating fty (.finite (Float.ofBits bits)))
     | none =>

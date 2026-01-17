@@ -105,6 +105,12 @@ Focus on sequential Core initially:
 - `generic_expr`: Effectful expressions (memory operations)
 - `generic_file`: Complete Core program
 
+### Known Cerberus Issues
+
+**Non-determinism**: Cerberus exhibits non-deterministic behavior on certain tests. The same test may succeed on one run and fail on another with errors like "calling an unknown procedure". This has been observed on tests like pr34099.c and pr43629.c. **TODO**: Investigate the source of this non-determinism in the future.
+
+**Unsequenced race detection**: We use the `core_sequentialise` pass to eliminate concurrency constructs, which means we pick one specific evaluation order. Cerberus's default mode detects unsequenced race undefined behavior (e.g., `i = i++`), but our sequentialized interpreter will simply execute one ordering without flagging UB. Tests in `tests/ci/030*-unseq_race*.c` and `tests/examples/6.5-2.*.c` are expected to show DIFF results for this reason.
+
 ### Cerberus Setup
 
 **IMPORTANT**: Cerberus requires OCaml 4.14.1. It crashes on OCaml 5.x.
