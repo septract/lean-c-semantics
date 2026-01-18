@@ -242,15 +242,31 @@ structure FunParam where
   ty : Ctype
   deriving Repr, Inhabited
 
+/-- Raw CN magic annotation (cerb::magic attribute)
+    Corresponds to: Annot.attribute with namespace "cerb" and id "magic"
+    These are extracted from `/*@ ... @*/` comments in C source.
+    CN reads these via `get_cerb_magic_attr` during core_to_mucore.
+    See: cn/lib/core_to_mucore.ml -/
+structure CnMagicAnnotation where
+  /-- Source location of the annotation -/
+  loc : Loc
+  /-- Raw text content of the annotation -/
+  text : String
+  deriving Repr, Inhabited
+
 /-- Function type info - used by cfunction() expression
     Corresponds to: funinfo value type in core.ott:557
     Audited: 2025-12-31
-    Deviations: attributes field not used (always empty in practice) -/
+    Deviations: Added cnMagic field for CN specification annotations -/
 structure FunInfo where
   /-- Source location -/
   loc : Loc
   /-- C2X attributes (usually empty) -/
   attrs : Attributes := Attributes.empty
+  /-- CN magic annotations (from `/*@ ... @*/` comments)
+      Corresponds to: cerb::magic attributes in Annot.attributes
+      See: annot.lem get_cerb_magic_attr -/
+  cnMagic : List CnMagicAnnotation := []
   /-- Return type -/
   returnType : Ctype
   /-- Parameter types (with optional names) -/
