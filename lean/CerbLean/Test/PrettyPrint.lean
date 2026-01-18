@@ -35,7 +35,7 @@ def normalizeWhitespace (s : String) : String :=
         else go (' ' :: acc) true rest
       else
         go (c :: acc) false rest
-  String.ofList (go [] false chars) |>.trim
+  String.ofList (go [] false chars) |>.trimAscii.toString
 
 /-! ## Comparison Functions -/
 
