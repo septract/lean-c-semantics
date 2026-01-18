@@ -21,3 +21,4 @@ import CerbLean.CN.Terms
 import CerbLean.CN.Request
 import CerbLean.CN.Spec
 import CerbLean.CN.Parser
+import CerbLean.CN.PrettyPrint
