@@ -19,6 +19,9 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 CERBERUS_DIR="$PROJECT_DIR/cerberus"
 LEAN_DIR="$PROJECT_DIR/lean"
 
+# Check for required dependencies
+command -v timeout &> /dev/null || { echo "Error: 'timeout' command not found"; exit 1; }
+
 # Cerberus requires OCaml 4.14.1
 OPAM_SWITCH="cerberus-414"
 CERBERUS="$PROJECT_DIR/scripts/cerberus"
@@ -191,7 +194,7 @@ for c_file in $TEST_FILES; do
 
     # Check for timeout
     if [[ $cerberus_shell_exit -eq 124 ]]; then
-        ((CERBERUS_FAIL++))
+        (( CERBERUS_FAIL++ )) || true
         echo "[$file_num/$total_to_test] CERB_SKIP $filename (Cerberus timeout)"
         continue
     fi
@@ -204,7 +207,7 @@ for c_file in $TEST_FILES; do
 
     if [[ $cerberus_shell_exit -eq 139 ]] || [[ $cerberus_shell_exit -eq 134 ]] || [[ $cerberus_shell_exit -eq 137 ]]; then
         # Cerberus crashed (SIGSEGV, SIGABRT, etc.) - skip
-        ((CERBERUS_FAIL++))
+        (( CERBERUS_FAIL++ )) || true
         echo "[$file_num/$total_to_test] CERB_SKIP $filename (Cerberus crashed: $cerberus_shell_exit)"
         continue
     fi
@@ -223,29 +226,29 @@ for c_file in $TEST_FILES; do
         cerberus_ret=$(echo "$cerberus_output" | grep -o 'value: "[^"]*"' | sed 's/value: "\([^"]*\)"/\1/')
     elif echo "$cerberus_output" | grep -q '^Error {'; then
         # Cerberus reported an error (ill-formed program, unsupported feature, etc.)
-        ((CERBERUS_FAIL++))
+        (( CERBERUS_FAIL++ )) || true
         error_msg=$(echo "$cerberus_output" | grep -o 'msg: "[^"]*"' | head -1 | sed 's/msg: "\([^"]*\)"/\1/')
         echo "[$file_num/$total_to_test] CERB_SKIP $filename (error: $error_msg)"
         continue
     elif [[ $cerberus_shell_exit -ne 0 ]]; then
         # Cerberus exited with error (constraint violation, etc.)
-        ((CERBERUS_FAIL++))
+        (( CERBERUS_FAIL++ )) || true
         echo "[$file_num/$total_to_test] CERB_SKIP $filename (exit $cerberus_shell_exit)"
         continue
     else
         # Could not extract return value - skip
-        ((CERBERUS_FAIL++))
+        (( CERBERUS_FAIL++ )) || true
         echo "[$file_num/$total_to_test] CERB_SKIP $filename (could not extract return value)"
         continue
     fi
-    ((CERBERUS_OK++))
+    (( CERBERUS_OK++ )) || true
 
     # Generate JSON for Lean
     json_file="$OUTPUT_DIR/$filename.json"
     if ! eval $CERBERUS $CERBERUS_FLAGS --json_core_out="$json_file" "$c_file" >/dev/null 2>&1; then
         # JSON generation failed after Cerberus execution succeeded
         # This is a Cerberus inconsistency (--exec is more lenient than --json_core_out)
-        ((CERBERUS_FAIL++))
+        (( CERBERUS_FAIL++ )) || true
         echo "[$file_num/$total_to_test] CERB_INCONSISTENT $filename: exec succeeded but JSON failed"
         continue
     fi
@@ -256,7 +259,7 @@ for c_file in $TEST_FILES; do
 
     # Check for timeout (exit code 124)
     if [[ $lean_exit -eq 124 ]]; then
-        ((LEAN_TIMEOUT_COUNT++))
+        (( LEAN_TIMEOUT_COUNT++ )) || true
         echo "[$file_num/$total_to_test] TIMEOUT $filename (Lean >${TIMEOUT_SECS}s)"
         continue
     fi
@@ -281,25 +284,25 @@ for c_file in $TEST_FILES; do
     elif echo "$lean_output" | grep -q '^Error {'; then
         error_msg=$(echo "$lean_output" | grep -o 'msg: "[^"]*"' | sed 's/msg: "\([^"]*\)"/\1/')
         lean_ret="ERROR"
-        ((LEAN_FAIL++))
+        (( LEAN_FAIL++ )) || true
         echo "[$file_num/$total_to_test] FAIL $filename: $error_msg"
         continue
     else
         # Unexpected output format
-        ((LEAN_FAIL++))
+        (( LEAN_FAIL++ )) || true
         echo "[$file_num/$total_to_test] FAIL $filename: unexpected output: $lean_output"
         continue
     fi
 
     # If both detected UB, compare UB codes
     if $lean_has_ub && $cerberus_has_ub; then
-        ((LEAN_OK++))
+        (( LEAN_OK++ )) || true
         if [[ "$lean_ub_code" == "$cerberus_ub_code" ]]; then
-            ((UB_MATCH++))
+            (( UB_MATCH++ )) || true
             echo "[$file_num/$total_to_test] UB_MATCH $filename: $lean_ub_code"
         else
             # Both detected UB but with different codes - note but count as success
-            ((UB_CODE_DIFF++))
+            (( UB_CODE_DIFF++ )) || true
             echo "[$file_num/$total_to_test] UB_DIFF $filename: Lean=$lean_ub_code Cerberus=$cerberus_ub_code"
         fi
         continue
@@ -307,8 +310,8 @@ for c_file in $TEST_FILES; do
 
     # One detected UB but not the other - mismatch
     if $lean_has_ub || $cerberus_has_ub; then
-        ((LEAN_OK++))
-        ((MISMATCH++))
+        (( LEAN_OK++ )) || true
+        (( MISMATCH++ )) || true
         if $lean_has_ub; then
             echo "[$file_num/$total_to_test] DIFF $filename: Lean=UB($lean_ub_code) Cerberus=$cerberus_ret"
         else
@@ -317,14 +320,14 @@ for c_file in $TEST_FILES; do
         continue
     fi
 
-    ((LEAN_OK++))
+    (( LEAN_OK++ )) || true
 
     # Compare results
     if [[ "$lean_ret" == "$cerberus_ret" ]]; then
-        ((MATCH++))
+        (( MATCH++ )) || true
         echo "[$file_num/$total_to_test] MATCH $filename: $lean_ret"
     else
-        ((MISMATCH++))
+        (( MISMATCH++ )) || true
         echo "[$file_num/$total_to_test] MISMATCH $filename: Lean=$lean_ret Cerberus=$cerberus_ret"
     fi
 done

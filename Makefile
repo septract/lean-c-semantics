@@ -1,18 +1,18 @@
 # C-to-Lean Project Makefile
 
 .PHONY: all lean cerberus cerberus-setup clean
-.PHONY: test test-unit test-memory
+.PHONY: test test-unit test-memory ci check-deps
 .PHONY: test-parser test-pp test-parser-quick test-pp-quick
-.PHONY: test-interp test-interp-minimal test-interp-debug
+.PHONY: test-interp test-interp-minimal test-interp-debug test-one
 .PHONY: test-interp-full test-interp-minimal-full test-interp-debug-full test-interp-ci
-.PHONY: init update-cerberus help
+.PHONY: fuzz init update-cerberus help
 
 # Configuration
 # Cerberus requires OCaml 4.14.1 (crashes on OCaml 5.x)
 OPAM_SWITCH := cerberus-414
 OPAM_EXEC := OPAMSWITCH=$(OPAM_SWITCH) opam exec --
 # Run Cerberus from local build (avoids pinning/reinstalling)
-CERBERUS_CMD := $(OPAM_EXEC) dune exec --root cerberus -- cerberus
+CERBERUS_CMD := $(OPAM_EXEC) dune exec --root cerberus -- cerberus --runtime=cerberus/_build/install/default
 
 # Default target
 all: lean
@@ -62,8 +62,11 @@ clean:
 # Testing
 # ------------------------------------------------------------------------------
 
-# Run all quick tests 
-test: test-unit test-memory test-parser-quick test-pp-quick test-interp 
+# Run quick tests (same as CI)
+test: test-unit test-interp
+
+# Run exactly what CI runs (for local verification before pushing)
+ci: test-unit test-interp
 
 # Unit Tests (No Cerberus required)
 test-unit: lean
@@ -71,6 +74,12 @@ test-unit: lean
 
 test-memory: lean
 	cd lean && .lake/build/bin/cerblean_memtest
+
+# Test a single C file: make test-one FILE=tests/minimal/001-return-literal.c
+test-one:
+	@test -n "$(FILE)" || { echo "Usage: make test-one FILE=path/to/test.c"; exit 1; }
+	@$(MAKE) lean cerberus
+	./scripts/test_interp.sh --nolibc $(FILE)
 
 # Parser Tests
 test-parser-quick: lean cerberus
@@ -110,8 +119,25 @@ test-interp-ci: lean cerberus
 	./scripts/test_interp.sh
 
 # ------------------------------------------------------------------------------
+# Fuzzing
+# ------------------------------------------------------------------------------
+
+# Run csmith fuzzer (generates random C programs and compares interpreters)
+# Usage: make fuzz [N=100] - run N tests (default 100)
+fuzz: lean cerberus
+	./scripts/fuzz_csmith.sh $(or $(N),100)
+
+# ------------------------------------------------------------------------------
 # Maintenance
 # ------------------------------------------------------------------------------
+
+# Check that required dependencies are installed
+check-deps:
+	@echo "Checking dependencies..."
+	@command -v opam >/dev/null 2>&1 || { echo "❌ opam not found"; exit 1; }
+	@command -v lake >/dev/null 2>&1 || { echo "❌ lake not found (install elan)"; exit 1; }
+	@command -v timeout >/dev/null 2>&1 || { echo "❌ timeout not found (brew install coreutils)"; exit 1; }
+	@echo "✓ All dependencies found"
 
 # Update Cerberus submodule
 update-cerberus:
@@ -126,29 +152,34 @@ help:
 	@echo "C-to-Lean Project"
 	@echo ""
 	@echo "Setup (first time):"
-	@echo "  init              Initialize git submodules"
-	@echo "  cerberus-setup    Create OCaml 4.14 switch and install Cerberus"
+	@echo "  make check-deps      Check required dependencies are installed"
+	@echo "  make init            Initialize git submodules"
+	@echo "  make cerberus-setup  Create OCaml 4.14 switch and install Cerberus"
 	@echo ""
 	@echo "Build:"
-	@echo "  all               Build Lean project (default)"
-	@echo "  lean              Build Lean project"
-	@echo "  cerberus          Build Cerberus"
-	@echo "  clean             Clean all build artifacts"
+	@echo "  make                 Build Lean project (default)"
+	@echo "  make cerberus        Build Cerberus"
+	@echo "  make clean           Clean all build artifacts"
 	@echo ""
-	@echo "Test Suites:"
-	@echo "  test              Run quick sanity checks (Unit + Quick Parser/PP)"
-	@echo "  test-unit         Run Lean unit tests (Memory + Parser)"
-	@echo "  test-memory       Run Memory model unit tests only"
+	@echo "Quick Tests:"
+	@echo "  make test            Run quick tests (unit + interpreter)"
+	@echo "  make ci              Same as 'test' - verify before pushing"
+	@echo "  make test-unit       Run Lean unit tests only"
+	@echo "  make test-one FILE=path/to/test.c   Test a single C file"
 	@echo ""
 	@echo "Interpreter Tests:"
-	@echo "  test-interp       Run fast interpreter tests (--nolibc, skips *.libc.c)"
-	@echo "  test-interp-full  Run full interpreter tests (with libc, slower)"
-	@echo "  test-interp-ci    Run interpreter tests on Cerberus CI suite"
+	@echo "  make test-interp       Fast interpreter tests (--nolibc)"
+	@echo "  make test-interp-full  Full interpreter tests (with libc)"
+	@echo "  make test-interp-ci    Run on Cerberus CI suite (~5500 files)"
 	@echo ""
-	@echo "Integration Tests (Full Suites):"
-	@echo "  test-parser       Run full parser test (~5500 files)"
-	@echo "  test-pp           Run full pretty-printer test (~5500 files)"
+	@echo "Integration Tests (slow):"
+	@echo "  make test-parser     Full parser test (~5500 files)"
+	@echo "  make test-pp         Full pretty-printer test (~5500 files)"
+	@echo ""
+	@echo "Fuzzing:"
+	@echo "  make fuzz            Run csmith fuzzer (100 tests)"
+	@echo "  make fuzz N=500      Run csmith fuzzer (500 tests)"
 	@echo ""
 	@echo "Maintenance:"
-	@echo "  update-cerberus   Update Cerberus submodule"
-	@echo "  help              Show this help"
+	@echo "  make update-cerberus   Update Cerberus submodule"
+	@echo "  make help              Show this help"

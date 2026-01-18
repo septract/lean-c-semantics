@@ -52,8 +52,8 @@ def testBasicSizes : IO Unit := do
   -- Unsigned same sizes
   assert! sizeof env (ct (.basic (.integer (.unsigned .int_)))) == 4
 
-  -- Floating types
-  assert! sizeof env (ct (.basic (.floating (.realFloating .float)))) == 4
+  -- Floating types (Cerberus stores all floats as 8-byte doubles internally)
+  assert! sizeof env (ct (.basic (.floating (.realFloating .float)))) == 8
   assert! sizeof env (ct (.basic (.floating (.realFloating .double)))) == 8
   assert! sizeof env (ct (.basic (.floating (.realFloating .longDouble)))) == 8
 
