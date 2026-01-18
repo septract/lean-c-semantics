@@ -18,6 +18,11 @@ name = "batteries"
 git = "https://github.com/leanprover-community/batteries"
 rev = "main"
 
+[[require]]
+name = "mathlib"
+git = "https://github.com/leanprover-community/mathlib4"
+rev = "master"
+
 [[lean_lib]]
 name = "CerbLean"
 
