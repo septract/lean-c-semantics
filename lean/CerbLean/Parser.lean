@@ -26,7 +26,7 @@ def getFieldOpt (obj : Json) (field : String) : Option Json :=
 /-- Truncate JSON for error messages -/
 def truncateJson (j : Json) (maxLen : Nat := 100) : String :=
   let s := toString j
-  if s.length > maxLen then s.take maxLen ++ "..." else s
+  if s.length > maxLen then (s.take maxLen).toString ++ "..." else s
 
 /-- Get a required string field -/
 def getStr (obj : Json) (field : String) : Except String String := do
@@ -1523,12 +1523,30 @@ def parseFunDecl (j : Json) : Except String (Sym × FunDecl) := do
     .ok (s, .builtinDecl loc rt pts)
   | other => .error s!"unknown fun decl tag '{other}', expected one of {funDeclTags}"
 
+/-- Parse a single CN magic annotation from JSON
+    Corresponds to: cerb::magic attribute in Annot.attributes
+    JSON format: { "loc": {...}, "text": "..." } -/
+def parseCnMagicAnnotation (j : Json) : Except String CnMagicAnnotation := do
+  let locJ ← getField j "loc"
+  let loc ← parseLoc locJ
+  let text ← match getFieldOpt j "text" with
+    | some (.str s) => pure s
+    | some _ => .error "cn_magic text must be a string"
+    | none => .error "cn_magic entry missing 'text' field"
+  pure { loc, text }
+
 /-- Parse a FunInfo entry from JSON -/
 def parseFunInfoEntry (j : Json) : Except String (Sym × FunInfo) := do
   let symJ ← getField j "symbol"
   let sym ← parseSym symJ
   let locJ ← getField j "loc"
   let loc ← parseLoc locJ
+  -- Parse CN magic annotations (optional, may be empty array or missing)
+  -- These come from `/*@ ... @*/` comments when parsed with --switches=at_magic_comments
+  let cnMagic ← match getFieldOpt j "cn_magic" with
+    | some (.arr arr) => arr.toList.mapM parseCnMagicAnnotation
+    | some _ => .error "cn_magic must be an array"
+    | none => pure []
   let (_, retTyJ) ← getTaggedFieldMulti j "return_type" ctypeTags
   let returnType ← parseCtype retTyJ
   let paramsJ ← getArr j "params"
@@ -1547,7 +1565,7 @@ def parseFunInfoEntry (j : Json) : Except String (Sym × FunInfo) := do
   let hasProto ← match getFieldOpt j "has_proto" with
     | some (.bool b) => pure b
     | _ => pure true
-  pure (sym, { loc, returnType, params, isVariadic, hasProto })
+  pure (sym, { loc, cnMagic, returnType, params, isVariadic, hasProto })
 
 /-- Parse a complete Core File from JSON -/
 def parseFile (j : Json) : Except String File := do

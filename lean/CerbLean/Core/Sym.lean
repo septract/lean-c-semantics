@@ -104,12 +104,14 @@ structure Sym where
   name : Option String := none
   deriving Repr, Inhabited
 
-/-- Symbols are equal if they have the same digest and id -/
+/-- Symbols are equal if they have the same digest, id, and name
+    Note: We include name because Cerberus JSON export may have symbol ID collisions
+    across different translation units when digest is empty -/
 instance : BEq Sym where
-  beq a b := a.digest == b.digest && a.id == b.id
+  beq a b := a.digest == b.digest && a.id == b.id && a.name == b.name
 
 instance : Hashable Sym where
-  hash s := mixHash (hash s.digest) (hash s.id)
+  hash s := mixHash (mixHash (hash s.digest) (hash s.id)) (hash s.name)
 
 /-! ## Symbol Prefix
 

@@ -73,6 +73,41 @@ See `docs/2025-12-31_INTERPRETER_REFACTOR.md` for the audit checklist and corres
 
 See `docs/2026-01-01_MEMORY_AUDIT.md` for the memory model audit plan and Cerberus correspondence mapping.
 
+### 0.1 CRITICAL: CN Types Must Match CN Implementation EXACTLY
+
+**The Lean CN type system MUST mirror the CN implementation EXACTLY.**
+
+- Type definitions must match CN's OCaml types (in `lib/baseTypes.ml`, `lib/indexTerms.ml`, etc.)
+- Implementation strategy must follow CN's approach - no "improvements" or alternative designs
+- Each type and function must be auditable against the corresponding CN code
+- Document correspondence with comments linking to CN source (file:lines)
+- This allows us to reuse CN's theory and proofs
+
+Example audit comment:
+```lean
+-- CN: lib/baseTypes.ml lines 15-30
+inductive BaseType where
+  | Unit
+  | Bool
+  ...
+```
+
+Key CN source files for reference:
+| File | Purpose |
+|------|---------|
+| `cn/lib/baseTypes.ml` | CN base types |
+| `cn/lib/indexTerms.ml` | Index term representation |
+| `cn/lib/argumentTypes.ml` | Function spec structure |
+| `cn/lib/logicalReturnTypes.ml` | Postcondition structure |
+| `cn/lib/logicalConstraints.ml` | Constraint representation |
+| `cn/lib/resource.ml` | Ownership predicates |
+| `cn/lib/request.ml` | Resource requests |
+
+**CN Repository**: The CN source is available at https://github.com/rems-project/cn. If needed for reference, clone it to `tmp/cn/`:
+```bash
+mkdir -p tmp && cd tmp && git clone --depth 1 https://github.com/rems-project/cn.git
+```
+
 ### 1. Manual Translation (not Lem/Ott backends)
 We manually translate Cerberus Core semantics to Lean rather than creating automated backends because:
 - Allows idiomatic Lean 4 code

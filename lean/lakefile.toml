@@ -13,6 +13,11 @@ name = "smt"
 scope = "ufmg-smite"
 rev = "main"
 
+[[require]]
+name = "batteries"
+git = "https://github.com/leanprover-community/batteries"
+rev = "main"
+
 [[lean_lib]]
 name = "CerbLean"
 
