@@ -34,6 +34,9 @@ jobs:
           path: ~/.opam
           key: opam-cerberus-414-${{ hashFiles('cerberus/cerberus-lib.opam', 'cerberus/cerberus.opam') }}
 
+      - name: Initialize Opam
+        run: opam init -y --disable-sandboxing
+
       - name: Setup Cerberus
         run: make cerberus-setup
 
