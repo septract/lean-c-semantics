@@ -2,6 +2,11 @@ name = "CerbLean"
 version = "0.1.0"
 defaultTargets = ["CerbLean", "cerblean_pp", "cerblean_test", "cerblean_testbatch", "cerblean_interp", "cerblean_memtest"]
 
+[[require]]
+name = "batteries"
+git = "https://github.com/leanprover-community/batteries"
+rev = "main"
+
 [[lean_lib]]
 name = "CerbLean"
 
