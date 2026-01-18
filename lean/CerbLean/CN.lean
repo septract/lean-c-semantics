@@ -20,3 +20,4 @@ import CerbLean.CN.BaseTypes
 import CerbLean.CN.Terms
 import CerbLean.CN.Request
 import CerbLean.CN.Spec
+import CerbLean.CN.Parser
