@@ -301,10 +301,12 @@ Target: 90%+ agreement on sequential tests.
 
 **Generating a full test log:**
 ```bash
-./scripts/test_interp.sh cerberus/tests -v 2>&1 | tee logs/interp-full-$(date +%Y%m%d-%H%M%S).log
+./scripts/test_interp.sh cerberus/tests --nolibc -v 2>&1 | tee logs/interp-full-$(date +%Y%m%d-%H%M%S).log
 ```
 
-**WARNING:** This is very expensive (several hours) and should only be run when the user explicitly requests it.
+**Note:** Using `--nolibc` is much faster (2MB vs 200MB JSON per test) but many Cerberus tests will fail at the Cerberus stage because they require libc functions. This is expected - we're measuring match rate on tests that both interpreters can run.
+
+**WARNING:** This is expensive (1-2 hours) and should only be run when the user explicitly requests it.
 
 Note: The script automatically skips certain directories and file types:
 - `*.syntax-only.c` - Parse-only tests (not executable)

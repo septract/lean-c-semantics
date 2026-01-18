@@ -1,76 +1,38 @@
 # TODO - C-to-Lean Project
 
-## Current Status: Interpreter Working (100% on minimal tests, 91% on CI)
+## Current Status: Interpreter Working (100% on minimal/debug, 98% on full CI)
 
-**Test Results (2026-01-06):**
-- Minimal test suite: 74/74 (100% match with Cerberus)
-- Cerberus CI suite: 91% match rate on successful tests
-- See `docs/2026-01-02_INTERPRETER_STATUS.md` and `docs/2026-01-02_FULL_TEST_RESULTS.md` for detailed breakdown
+**Test Results (2026-01-18):**
+- Minimal test suite: 76/76 (100% match with Cerberus)
+- Debug test suite: 65/65 (100% match with Cerberus)
+- Full CI suite: 98% match rate (753/762 successful comparisons)
+- See logs/ directory for detailed test runs
 
-## Recent Fixes (2026-01-06)
+## Recent Fixes (2026-01-18)
 
-- **Floating point binary operations**: Added `evalFloatOp` for +, -, *, /, comparisons
-  - Corresponds to: core_eval.lem:443-452 and defacto_memory.lem:1097-1110
-- **Unspecified memory initialization**: Fixed `allocateImpl` to write unspecified bytes
-  - Bug: Was zero-initializing instead of writing `value := none` bytes
-  - Corresponds to: impl_mem.ml:1317-1322
-- **Unspecified pattern matching**: Fixed to match `Unspecified [inner]` with 1 subpattern
-  - Corresponds to: core_aux.lem:1121-1122
-- **exit()/abort() builtins**: Implemented early termination support
-- **Negative pointer arithmetic**: Fixed `arrayShiftPtrval` to handle negative offsets
-  - Bug: `n.val.toNat` converted -1 to 0, breaking `p--` and `p - 1`
-  - Fix: Use Int arithmetic throughout, convert to Nat only at end
-- **941014-1 function pointer to int**: Fixed `intfromPtrImpl` to convert function symbol ID
-  - Bug: Was throwing error for function pointers instead of converting
-  - Corresponds to: impl_mem.ml:2249-2272
-- **pr55875 false positive UB043**: Fixed `validForDerefImpl` to match Cerberus semantics
-  - Bug: Was checking bounds in validForDeref, but Cerberus only checks alignment there
-  - Bounds checking happens in load/store, not in validForDeref
-  - Corresponds to: impl_mem.ml:2086-2123
-- **b.c pointer equality**: Fixed `eqPtrvalImpl` to use provenance-aware comparison
-  - Corresponds to: defacto_memory.lem:1430-1479
-- **function_vs_var UB024**: Fixed pointer-to-integer range checking
-  - Bug: Was not checking if address fits in target integer type
-  - Fix: Changed memory allocation to use high addresses (downward from 0xFFFFFFFFFFFF)
-  - Added `integerTypeMax`/`integerTypeMin` helpers for range checking
-  - `intfromPtrImpl` now throws `MerrIntFromPtr` when address out of range
-  - Corresponds to: impl_mem.ml:2439-2461, impl_mem.ml:2367-2437
+- **Global/errno allocation order**: Fixed errno to allocate AFTER globals (not before)
+  - Bug: We allocated errno first, but Cerberus allocates globals first then errno
+  - Impact: Char arrays were getting 8-byte aligned addresses instead of 1-byte
+  - Fix: Move `allocateErrno` call to after `initGlobals` in `runMain`
+  - Corresponds to: driver.lem:1541-1618 (globals), driver.lem:1837-1845 (errno)
+  - This fixes pr43987 and other alignment-related test discrepancies
+
+- **Float memory semantics**: sizeof(float) = 8 (Cerberus stores all floats as doubles)
+  - Added IEEE 754 conversion functions for float32/float64
+  - Comprehensive float test suite in tests/float/ (68 tests)
+
+- **Cerberus wrapper optimization**: Use binary directly instead of dune exec
+  - Much faster test runs (no dune rebuild check overhead)
 
 ## Bugs Discovered (Investigation Needed)
 
 ### ARCHITECTURAL: evalPexpr Returns Values, Not Pexprs
 - **Cerberus behavior**: `step_eval_pexpr` returns `pexpr` (partially or fully evaluated)
-  - `valueFromPexpr` extracts value only if pexpr is `PEval cval`, else returns `Nothing`
-  - Unevaluated subexpressions are returned as-is (e.g., `PEmemberof tag member pe'`)
-  - Partial evaluation happens for: concurrent model, PEconstrained, memory wait states
 - **Our behavior**: `evalPexpr` returns `Value` directly (always fully evaluated)
 - **Impact**: We can't return partially evaluated expressions
-- **Analysis**:
-  - For sequential execution without `PEconstrained`, sub-expressions either:
-    1. Evaluate to a value (normal case)
-    2. Fail with an error (UB, type error, etc.)
-  - The "return partial expression" path in Cerberus is mainly for:
-    - Concurrent execution (we don't support)
-    - Constrained expressions (we don't support)
-    - Memory operations that need to wait (sequential model completes immediately)
-  - **Conclusion**: For sequential execution, our design should be equivalent
-- **Status**: Acceptable for sequential execution, but worth auditing if any tests fail mysteriously
+- **Analysis**: For sequential execution, our design should be equivalent
+- **Status**: Acceptable for sequential execution
 - **Location**: `Semantics/Eval.lean:evalPexpr`
-
-### Struct Reconstruction Not Implemented - FIXED 2026-01-06
-- ~~`reconstructValue` in `Memory/Concrete.lean:423` panics for structs~~
-- Fixed: Implemented struct/union reconstruction matching Cerberus impl_mem.ml
-
-### Remaining UB Issues
-All previously reported UB detection issues (false positive and false negative) have been fixed as of 2026-01-06.
-
-### Address Allocation Difference (needs investigation)
-Our memory addresses differ from Cerberus by ~4608 bytes for the first allocation.
-- Both use same initial address (0xFFFFFFFFFFFF) and same algorithm
-- Our calculation matches the expected math; Cerberus is 4608 bytes lower
-- Hypothesis: Cerberus allocates runtime structures before main()
-- See `docs/2026-01-06_ADDRESS_DIFFERENCE_INVESTIGATION.md` for details
-- **Impact:** UB detection works correctly; only raw address values differ
 
 ### Union Active Member Tracking (not implemented)
 Reading a union member other than the last one written produces "Unspecified" in Cerberus.
@@ -78,10 +40,34 @@ Reading a union member other than the last one written produces "Unspecified" in
 - Cerberus tracks which union member was last written
 - We would need to track "active member" metadata per union allocation
 - **Impact:** Programs doing type punning via unions may show DIFF (not MISMATCH)
-- **Test case:** `tests/csmith/interesting_cases/union_unspecified_3014219861.c` (seed 3014219861)
 
-### Other Semantic Differences (1 test)
-- **treiber**: Uses `builtin_printf` (see Future Work below)
+### Cerberus Non-determinism (pr34099, pr52286)
+These tests show as MISMATCH in some runs but are caused by Cerberus non-determinism.
+- Cerberus sometimes returns `Specified(0)`, sometimes errors with "calling an unknown procedure"
+- Running the same test multiple times gives different results
+- This is a known Cerberus issue documented in CLAUDE.md
+- **Not a bug in our interpreter**
+
+### CERB_INCONSISTENT: JSON Generation Fails When Exec Succeeds
+When Cerberus `--exec` detects UB for constraint violations (incomplete types, alignment errors),
+it reports `Undefined {...}`. But `--json_core_out` fails earlier in the pipeline for the same tests.
+- ~30 tests affected (mostly `.undef` and `.error` tests)
+- Not a bug in our interpreter, but limits our ability to compare UB detection
+- **Ideal fix**: Make Cerberus JSON export path as permissive as exec path
+
+### Not Implemented (causes FAIL in tests)
+- `pure_memop` - 5 tests (cast_*_byte.exec)
+- `builtin_printf` and other I/O builtins - ~80 tests
+- `par` (parallel execution) - 4 tests
+- `builtin_open/write` - 2 tests
+
+## Expected Differences (not bugs)
+
+### Unsequenced Race Detection (6 tests)
+Tests 0300-0306 and 6.5-2.* detect `UB035_unsequenced_race` in Cerberus.
+- We use `--sequentialise` which picks one evaluation order
+- Cerberus's default mode explores multiple orderings and detects races
+- These show as DIFF but are expected behavior
 
 ## Completed Phases
 
@@ -112,36 +98,15 @@ Reading a union member other than the last one written produces "Unspecified" in
 - [x] Ememop (pointer operations)
 - [x] Eccall (C function calls through pointers)
 - [x] Implementation-defined functions (`evalImplCall`)
+- [x] Struct/union reconstruction in memory model
 
 ### Phase 5: Validation Framework ✓
 - [x] Test runner for interpreter (`scripts/test_interp.sh`)
 - [x] Cerberus comparison with exit code matching
 - [x] UB detection matching (both interpreters detect same UB)
-- [x] Minimal test suite (72 tests including 5 UB tests)
-
-## Current Work
-
-### Remaining Interpreter Issues (from CI tests)
-See `docs/2026-01-02_INTERPRETER_STATUS.md` for details.
-
-**Fixed (2026-01-02 and 2026-01-06):**
-- [x] 0056-unary_plus: Fixed by correcting test script to compare return values
-- [x] 0335-non_decimal_unsigned_long_int_constants: Fixed floored remainder (`rem_f`) bug
-- [x] 0297-atomic_memberof: Added atomic member access UB detection (UB042)
-- [x] 0298-atomic_memberofptr: Fixed by same atomic member access check
-- [x] exit()/abort() builtins: Implemented for early termination
-- [x] Negative pointer arithmetic: Fixed `arrayShiftPtrval` Int handling
-
-**Semantic Mismatches (7 tests):**
-- [ ] 0300-0306 unseq_race tests: Out of scope (we sequentialize execution)
-
-**Medium Priority (5 pattern match failures):**
-- [ ] 0324-atomics
-- [ ] 0328-indeterminate_block_declaration
-- [ ] 0329, 0331, 0332 - rvalue temporary lifetime tests
-
-**High Priority (struct support):**
-- [ ] Implement struct reconstruction in `Memory/Concrete.lean:reconstructValue`
+- [x] Minimal test suite (76 tests including UB tests)
+- [x] Debug test suite for investigating specific issues
+- [x] Float test suite (68 tests)
 
 ## Future Work
 
@@ -153,29 +118,25 @@ To support `builtin_printf` and other I/O functions, we need:
 - [ ] Handle `Step_fs` step type for I/O operations
 - [ ] Support `builtin_vprintf`, `builtin_vsnprintf`, etc.
 
-**Affected tests:** treiber + 13 other tests that use printf
+**Affected tests:** ~80 tests that use printf
 **Cerberus files:** `driver.lem`, `formatted.lem`, `core_run.lem:1062-1098`
-
-### Dead Code Detection
-Consider building a tool to detect unused definitions in the Lean codebase:
-- Could use [tree-sitter-lean](https://github.com/Julian/tree-sitter-lean) to parse and build a call graph
-- Would help catch dead code from refactoring (e.g., `parseCtypeStr` was dead after switching to structured JSON)
 
 ### Out of Scope
 - Concurrent semantics (`Epar`, `Eunseq`)
 - PNVI/CHERI memory models
-- Variadic functions
 - Full C standard library
 
 ## Test Commands
 
 ```bash
-# Run minimal test suite (74 tests, 100% pass)
+# Run minimal test suite (76 tests, 100% pass)
 make test-interp
-# or: ./scripts/test_interp.sh tests/minimal
 
-# Run on Cerberus CI suite (~200 tests)
-./scripts/test_interp.sh cerberus/tests/ci
+# Run debug tests
+./scripts/test_interp.sh tests/debug --nolibc
+
+# Run on full Cerberus test suite (expensive, 1-2 hours)
+./scripts/test_interp.sh cerberus/tests --nolibc -v 2>&1 | tee logs/interp-full-$(date +%Y%m%d-%H%M%S).log
 
 # Run csmith fuzz testing (100 random programs)
 ./scripts/fuzz_csmith.sh
@@ -185,6 +146,6 @@ make test
 ```
 
 ## Documentation
-- `docs/2026-01-02_INTERPRETER_STATUS.md` - Current test results and issues
 - `docs/2026-01-01_MEMORY_AUDIT.md` - Memory model Cerberus correspondence
 - `docs/2025-12-31_TESTING.md` - Test infrastructure guide
+- `CLAUDE.md` - Project overview and conventions

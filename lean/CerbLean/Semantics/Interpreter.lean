@@ -63,7 +63,7 @@ def isUnspecified (v : Value) : Option Ctype :=
     Mem.bind (Mem.allocate_object tid0 (Symbol.PrefOther "errno")
               (Mem.alignof_ival Ctype.signed_int) Ctype.signed_int Nothing Nothing)
     ```
-    This must happen BEFORE other allocations to match Cerberus's memory layout. -/
+    This happens AFTER global allocation to match Cerberus's memory layout. -/
 def allocateErrno : InterpM Unit := do
   let signedInt : Ctype := { ty := .basic (.integer (.signed .int_)) }
   let alignIval := alignofIval (← InterpM.getTypeEnv) signedInt
@@ -76,8 +76,8 @@ def allocateErrno : InterpM Unit := do
     Deviations: Combined global init and main execution
 
     Steps (matching Cerberus driver.lem):
-    1. Allocate errno (allocateErrno) - driver.lem:1837-1839
-    2. Initialize global variables (initGlobals) - driver.lem:1541-1618
+    1. Initialize global variables (initGlobals) - driver.lem:1541-1618
+    2. Allocate errno (allocateErrno) - driver.lem:1837-1839
     3. Initialize thread state with main's body (initThreadState)
     4. Pre-collect labeled continuations (collectLabeledContinuations)
     5. Run step loop until done (runUntilDone)
@@ -88,12 +88,12 @@ def runMain (file : File) (args : List String := ["cmdname"]) : InterpResult :=
   let typeEnv := TypeEnv.fromFile file
   -- Run initialization and execution in InterpM monad
   let result := runInterpM file typeEnv do
-    -- Allocate errno first (before any user allocations)
-    -- Corresponds to: driver.lem:1837-1839
-    allocateErrno
     -- Initialize global variables
     -- Corresponds to: driver_globals in driver.lem:1541-1618
     let globalEnv ← initGlobals file
+    -- Allocate errno (after globals, before main)
+    -- Corresponds to: driver.lem:1837-1839
+    allocateErrno
     -- Initialize thread state with globals (now in InterpM to support argc/argv allocation)
     -- Corresponds to: pipeline.ml:621,625 - "cmdname" :: args
     let st ← initThreadState file globalEnv args

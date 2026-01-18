@@ -1,5 +1,5 @@
 #!/bin/bash
-# Wrapper to run Cerberus using the local build (dune exec)
+# Wrapper to run Cerberus using the local build (binary directly)
 # Usage: ./scripts/cerberus [args...]
 
 set -e
@@ -8,13 +8,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 CERBERUS_DIR="$PROJECT_DIR/cerberus"
 OPAM_SWITCH="cerberus-414"
+CERBERUS_BIN="$CERBERUS_DIR/_build/default/backend/driver/main.exe"
 
-# Verify opam switch exists
-if ! opam switch list 2>/dev/null | grep -q "$OPAM_SWITCH"; then
-    echo "Error: opam switch '$OPAM_SWITCH' not found"
-    echo "Run 'make cerberus-setup' first"
+# Verify binary exists
+if [[ ! -x "$CERBERUS_BIN" ]]; then
+    echo "Error: Cerberus binary not found at $CERBERUS_BIN"
+    echo "Run 'make cerberus' first"
     exit 1
 fi
 
-# Run cerberus via dune exec
-OPAMSWITCH=$OPAM_SWITCH opam exec -- dune exec --root "$CERBERUS_DIR" -- cerberus --runtime="$CERBERUS_DIR/_build/install/default" "$@"
+# Run cerberus binary directly (opam exec sets up library paths)
+OPAMSWITCH=$OPAM_SWITCH opam exec -- "$CERBERUS_BIN" --runtime="$CERBERUS_DIR/_build/install/default" "$@"
