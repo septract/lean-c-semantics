@@ -1,6 +1,6 @@
 name = "CerbLean"
 version = "0.1.0"
-defaultTargets = ["CerbLean", "cerblean_pp", "cerblean_test", "cerblean_testbatch", "cerblean_interp", "cerblean_memtest", "cerblean_genproof"]
+defaultTargets = ["CerbLean", "cerblean_pp", "cerblean_test", "cerblean_testbatch", "cerblean_interp", "cerblean_memtest", "cerblean_genproof", "test_cn"]
 preferReleaseBuild = true
 
 [[require]]
@@ -44,3 +44,7 @@ root = "CerbLean.TestInterpreter"
 [[lean_exe]]
 name = "cerblean_genproof"
 root = "CerbLean.GenProof"
+
+[[lean_exe]]
+name = "test_cn"
+root = "CerbLean.TestCN"
