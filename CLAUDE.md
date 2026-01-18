@@ -529,6 +529,12 @@ Silent error swallowing hides bugs. We discovered the parser was completely brok
 ### CRITICAL: Never Undo Changes Without Permission
 **NEVER revert, undo, or `git checkout` any changes without explicit user confirmation.** Even if you think a change caused a problem, ASK FIRST before reverting. The user may have made intentional changes you're not aware of.
 
+### CRITICAL: Never Commit Without Running Tests
+**NEVER commit changes without first running `make test`.** This ensures the build succeeds and all tests pass. A commit that breaks tests is unacceptable.
+
+### Always Use Build Targets for Testing
+**Always use Makefile targets** (e.g., `make test`, `make test-cn`) rather than invoking test binaries directly. Build targets ensure proper dependencies are built first and use the correct invocation.
+
 ### Shell Commands
 **IMPORTANT**: Do NOT use `sed`, `awk`, `tr`, or similar shell string manipulation tools for ad-hoc text processing. These commands are error-prone and often fail silently or produce unexpected results across different platforms.
 
