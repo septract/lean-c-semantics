@@ -5,6 +5,7 @@
 .PHONY: test-parser test-pp test-parser-quick test-pp-quick
 .PHONY: test-interp test-interp-minimal test-interp-debug test-one
 .PHONY: test-interp-full test-interp-minimal-full test-interp-debug-full test-interp-ci
+.PHONY: test-cn test-cn-all
 .PHONY: fuzz init update-cerberus help
 
 # Configuration
@@ -117,6 +118,13 @@ test-interp-full: test-interp-minimal-full test-interp-debug-full
 # CI suite (with libc)
 test-interp-ci: lean cerberus
 	./scripts/test_interp.sh
+
+# CN Tests
+test-cn: lean
+	./scripts/test_cn.sh
+
+test-cn-all: lean cerberus
+	./scripts/test_cn.sh --all
 
 # ------------------------------------------------------------------------------
 # Fuzzing

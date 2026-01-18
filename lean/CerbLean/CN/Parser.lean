@@ -229,47 +229,51 @@ where
         fail "expected '>' after '-'"
     | _ => pure e
 
-/-- Parse a binary operator -/
-partial def binop : P (String × BinOp) := lexeme do
+/-- Parse a binary operator. Returns (opString, binop, swapOperands).
+    For `>` and `>=`, we return the corresponding `<`/`<=` op with swap=true,
+    since CN normalizes a > b to b < a. -/
+partial def binop : P (String × BinOp × Bool) := lexeme do
   let c ← any
   match c with
-  | '+' => pure ("+", .add)
-  | '-' => pure ("-", .sub)
-  | '*' => pure ("*", .mul)
-  | '/' => pure ("/", .div)
-  | '%' => pure ("%", .mod_)
+  | '+' => pure ("+", .add, false)
+  | '-' => pure ("-", .sub, false)
+  | '*' => pure ("*", .mul, false)
+  | '/' => pure ("/", .div, false)
+  | '%' => pure ("%", .mod_, false)
   | '=' =>
     let c2 ← peek?
     if c2 == some '=' then do
       let _ ← any
-      pure ("==", .eq)
+      pure ("==", .eq, false)
     else
       fail "expected '==' operator"
   | '!' =>
     let c2 ← any
-    if c2 == '=' then pure ("!=", .eq)
+    if c2 == '=' then pure ("!=", .eq, false)  -- Will be wrapped in NOT
     else fail "expected '!=' operator"
   | '<' =>
     let c2 ← peek?
     if c2 == some '=' then do
       let _ ← any
-      pure ("<=", .le)
+      pure ("<=", .le, false)
     else
-      pure ("<", .lt)
+      pure ("<", .lt, false)
   | '>' =>
     let c2 ← peek?
     if c2 == some '=' then do
       let _ ← any
-      pure (">=", .le)
+      -- >= becomes <= with swapped operands: a >= b  ↔  b <= a
+      pure (">=", .le, true)
     else
-      pure (">", .lt)
+      -- > becomes < with swapped operands: a > b  ↔  b < a
+      pure (">", .lt, true)
   | '&' =>
     let c2 ← any
-    if c2 == '&' then pure ("&&", .and_)
+    if c2 == '&' then pure ("&&", .and_, false)
     else fail "expected '&&' operator"
   | '|' =>
     let c2 ← any
-    if c2 == '|' then pure ("||", .or_)
+    if c2 == '|' then pure ("||", .or_, false)
     else fail "expected '||' operator"
   | _ => fail s!"unexpected operator character: {c}"
 
@@ -292,14 +296,17 @@ where
     let opOpt ← optional (attempt binop)
     match opOpt with
     | none => pure lhs
-    | some (opStr, op) =>
+    | some (opStr, op, swap) =>
       let prec := binopPrec opStr
       if prec < minPrec then
         pure lhs
       else do
         let rhs ← postfixExpr
         let rhs ← exprRest rhs (prec + 1)
-        let newLhs := mkTerm (.binop op lhs rhs)
+        -- If swap is true, flip operands (e.g., a > b becomes b < a)
+        let binExpr := if swap then mkTerm (.binop op rhs lhs) else mkTerm (.binop op lhs rhs)
+        -- If != operator, wrap in NOT: a != b becomes !(a == b)
+        let newLhs := if opStr == "!=" then mkTerm (.unop .not binExpr) else binExpr
         exprRest newLhs minPrec
 
 end

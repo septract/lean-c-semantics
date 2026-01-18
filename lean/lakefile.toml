@@ -29,3 +29,7 @@ root = "CerbLean.TestMemory"
 [[lean_exe]]
 name = "cerblean_interp"
 root = "CerbLean.TestInterpreter"
+
+[[lean_exe]]
+name = "test_cn"
+root = "CerbLean.TestCN"
