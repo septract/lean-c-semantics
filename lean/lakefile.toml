@@ -1,6 +1,12 @@
 name = "CerbLean"
 version = "0.1.0"
 defaultTargets = ["CerbLean", "cerblean_pp", "cerblean_test", "cerblean_testbatch", "cerblean_interp", "cerblean_memtest"]
+preferReleaseBuild = true
+
+[[require]]
+name = "mathlib"
+git = "https://github.com/leanprover-community/mathlib4"
+rev = "v4.24.0"
 
 [[lean_lib]]
 name = "CerbLean"
@@ -24,3 +30,7 @@ root = "CerbLean.TestMemory"
 [[lean_exe]]
 name = "cerblean_interp"
 root = "CerbLean.TestInterpreter"
+
+[[lean_exe]]
+name = "cerblean_genproof"
+root = "CerbLean.GenProof"
