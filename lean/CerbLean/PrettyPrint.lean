@@ -43,7 +43,7 @@ def parens (s : String) : String := s!"({s})"
 
 /-- Indent a string -/
 def indent (n : Indent) (s : String) : String :=
-  String.ofList (List.replicate (n * 2) ' ') ++ s
+  String.mk (List.replicate (n * 2) ' ') ++ s
 
 /-- Simple inline formatting for keyword(arg) - no line breaking -/
 def withGroupedArg (keyword : String) (arg : String) (_ind : Indent) : String :=
@@ -414,7 +414,7 @@ mutual
   partial def ppPointerValueBase : PointerValueBase → String
     | .null ty => s!"NULL({ppCtype ty})"
     | .function sym => s!"Cfunction({ppSym sym})"
-    | .concrete _member addr => s!"0x{String.ofList (Nat.toDigits 16 addr)}"
+    | .concrete _member addr => s!"0x{String.mk (Nat.toDigits 16 addr)}"
 
   /-- Pretty-print pointer value -/
   partial def ppPointerValue (pv : PointerValue) : String :=

@@ -35,7 +35,7 @@ def normalizeWhitespace (s : String) : String :=
         else go (' ' :: acc) true rest
       else
         go (c :: acc) false rest
-  String.ofList (go [] false chars) |>.trim
+  String.mk (go [] false chars) |>.trim
 
 /-! ## Comparison Functions -/
 
@@ -56,8 +56,8 @@ def findFirstDiff (s1 s2 : String) : Option (Nat × String × String) :=
     | c1 :: r1, c2 :: r2 =>
       if c1 == c2 then go (idx + 1) r1 r2
       else
-        let ctx1 := String.ofList (r1.take 20)
-        let ctx2 := String.ofList (r2.take 20)
+        let ctx1 := String.mk (r1.take 20)
+        let ctx2 := String.mk (r2.take 20)
         some (idx, s!"{c1}{ctx1}", s!"{c2}{ctx2}")
   go 0 chars1 chars2
 
@@ -112,8 +112,8 @@ def runComparison (jsonPath : String) (expectedPath : Option String) : IO UInt32
         IO.eprintln s!"  Expected: '{expCtx}'"
         -- Show more context around the difference
         let startIdx := if pos > 20 then pos - 20 else 0
-        IO.eprintln s!"  Lean context:     '{String.ofList (n1.toList.drop startIdx |>.take 50)}'"
-        IO.eprintln s!"  Expected context: '{String.ofList (n2.toList.drop startIdx |>.take 50)}'"
+        IO.eprintln s!"  Lean context:     '{String.mk (n1.toList.drop startIdx |>.take 50)}'"
+        IO.eprintln s!"  Expected context: '{String.mk (n2.toList.drop startIdx |>.take 50)}'"
         IO.eprintln "\n=== Lean output ==="
         IO.println leanOutput
         IO.eprintln "\n=== Expected output ==="
