@@ -6,4 +6,5 @@ import CerbLean.Parser
 import CerbLean.Memory
 import CerbLean.Semantics
 import CerbLean.Verification
+import CerbLean.CN
 import CerbLean.Test
