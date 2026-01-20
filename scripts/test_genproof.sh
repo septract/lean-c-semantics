@@ -27,10 +27,12 @@ usage() {
     echo "  --no-strip     Skip the stripping step"
     echo "  --aggressive   Use aggressive stripping"
     echo "  --keep         Keep intermediate files"
+    echo "  --production   Output to lean/CerbLean/Verification/Programs/ with proper naming"
     echo "  -v, --verbose  Show verbose output"
     echo ""
     echo "Example:"
     echo "  $0 tests/minimal/001-return-literal.c"
+    echo "  $0 tests/minimal/001-return-literal.c --production  # Outputs to Verification/Programs/"
     exit 1
 }
 
@@ -40,6 +42,7 @@ AGGRESSIVE=false
 KEEP=false
 VERBOSE=false
 NOLIBC=false
+PRODUCTION=false
 INPUT_FILE=""
 OUTPUT_DIR=""
 
@@ -59,6 +62,11 @@ while [[ $# -gt 0 ]]; do
             ;;
         --keep)
             KEEP=true
+            shift
+            ;;
+        --production)
+            PRODUCTION=true
+            KEEP=true  # Always keep production files
             shift
             ;;
         -v|--verbose)
@@ -91,8 +99,23 @@ if [[ ! -f "$INPUT_FILE" ]]; then
     exit 1
 fi
 
+# Convert basename to PascalCase module name (e.g., "001-return-literal" -> "001ReturnLiteral")
+to_module_name() {
+    local name="$1"
+    # Remove extension, replace hyphens/underscores with spaces, title case, remove spaces
+    echo "$name" | sed 's/\.c$//' | sed 's/[-_]/ /g' | awk '{for(i=1;i<=NF;i++)$i=toupper(substr($i,1,1)) tolower(substr($i,2))}1' | tr -d ' '
+}
+
 # Set up output directory
-if [[ -z "$OUTPUT_DIR" ]]; then
+BASENAME=$(basename "$INPUT_FILE" .c)
+MODULE_NAME=$(to_module_name "$BASENAME")
+
+if [[ "$PRODUCTION" == "true" ]]; then
+    # Production mode: output to Verification/Programs with proper naming
+    OUTPUT_DIR="$LEAN_DIR/CerbLean/Verification/Programs"
+    LEAN_FILE="$OUTPUT_DIR/${MODULE_NAME}.lean"
+    echo -e "${YELLOW}Production mode: outputting to $LEAN_FILE${NC}"
+elif [[ -z "$OUTPUT_DIR" ]]; then
     OUTPUT_DIR=$(mktemp -d)
     if [[ "$KEEP" == "false" ]]; then
         trap "rm -rf $OUTPUT_DIR" EXIT
@@ -100,10 +123,11 @@ if [[ -z "$OUTPUT_DIR" ]]; then
 fi
 mkdir -p "$OUTPUT_DIR"
 
-BASENAME=$(basename "$INPUT_FILE" .c)
 JSON_FILE="$OUTPUT_DIR/${BASENAME}.json"
 STRIPPED_FILE="$OUTPUT_DIR/${BASENAME}_stripped.json"
-LEAN_FILE="$OUTPUT_DIR/${BASENAME}_proof.lean"
+if [[ "$PRODUCTION" != "true" ]]; then
+    LEAN_FILE="$OUTPUT_DIR/${BASENAME}_proof.lean"
+fi
 
 log() {
     if [[ "$VERBOSE" == "true" ]]; then

@@ -5,6 +5,7 @@
 .PHONY: test-parser test-pp test-parser-quick test-pp-quick
 .PHONY: test-interp test-interp-minimal test-interp-debug test-one
 .PHONY: test-interp-full test-interp-minimal-full test-interp-debug-full test-interp-ci
+.PHONY: test-genproof
 .PHONY: fuzz init update-cerberus help
 
 # Configuration
@@ -63,10 +64,10 @@ clean:
 # ------------------------------------------------------------------------------
 
 # Run quick tests (same as CI)
-test: test-unit test-interp
+test: test-unit test-interp test-genproof
 
 # Run exactly what CI runs (for local verification before pushing)
-ci: test-unit test-interp
+ci: test-unit test-interp test-genproof
 
 # Unit Tests (No Cerberus required)
 test-unit: lean
@@ -94,6 +95,12 @@ test-pp-quick: lean cerberus
 
 test-pp: lean cerberus
 	./scripts/test_pp.sh
+
+# GenProof Tests (test proof generation pipeline)
+test-genproof: lean cerberus
+	@echo "Testing genproof pipeline..."
+	./scripts/test_genproof.sh --nolibc tests/minimal/001-return-literal.c
+	@echo "✓ GenProof pipeline test passed"
 
 # Interpreter Tests (fast mode with --nolibc, skips *.libc.c tests)
 test-interp-minimal: lean cerberus
@@ -162,9 +169,10 @@ help:
 	@echo "  make clean           Clean all build artifacts"
 	@echo ""
 	@echo "Quick Tests:"
-	@echo "  make test            Run quick tests (unit + interpreter)"
+	@echo "  make test            Run quick tests (unit + interpreter + genproof)"
 	@echo "  make ci              Same as 'test' - verify before pushing"
 	@echo "  make test-unit       Run Lean unit tests only"
+	@echo "  make test-genproof   Test proof generation pipeline"
 	@echo "  make test-one FILE=path/to/test.c   Test a single C file"
 	@echo ""
 	@echo "Interpreter Tests:"

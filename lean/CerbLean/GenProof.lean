@@ -83,21 +83,33 @@ where
         return 1
       | .ok file =>
         -- Generate module name from output path
-        -- Filter out non-alphanumeric chars and ensure it starts with a letter
-        let rawName := outputPath
-          |>.replace ".lean" ""
-          |>.split (· == '/')
-          |>.getLast!
-        let cleanName := rawName.toList
-          |>.filter (fun c => c.isAlpha || c.isDigit || c == '_')
-          |> String.mk
-        -- Split on underscores and capitalize
-        let parts := cleanName.split (· == '_') |>.map String.capitalize
-        let moduleName := String.intercalate "" parts
-        -- Ensure starts with letter (prefix with "M" if starts with digit)
-        let moduleName := if moduleName.isEmpty then "Generated"
-          else if moduleName.get! 0 |>.isDigit then "M" ++ moduleName
-          else moduleName
+        -- If path contains "CerbLean/", use that as the namespace prefix
+        let pathParts := outputPath.replace ".lean" "" |>.split (· == '/')
+        let moduleName :=
+          -- Find the CerbLean prefix if present
+          match pathParts.findIdx? (· == "CerbLean") with
+          | some idx =>
+            -- Take everything from CerbLean onwards
+            let relevant := pathParts.drop idx
+            let cleanParts := relevant.map fun part =>
+              let clean := part.toList
+                |>.filter (fun c => c.isAlpha || c.isDigit || c == '_')
+                |> String.mk
+              -- Split on underscores and capitalize each part
+              let subParts := clean.split (· == '_') |>.map String.capitalize
+              String.intercalate "" subParts
+            String.intercalate "." cleanParts
+          | none =>
+            -- Fallback: just use the filename
+            let rawName := pathParts.getLast!
+            let cleanName := rawName.toList
+              |>.filter (fun c => c.isAlpha || c.isDigit || c == '_')
+              |> String.mk
+            let parts := cleanName.split (· == '_') |>.map String.capitalize
+            let name := String.intercalate "" parts
+            if name.isEmpty then "Generated"
+            else if name.get! 0 |>.isDigit then "M" ++ name
+            else name
 
         -- Generate and write output
         let output := generateProofFile file moduleName
