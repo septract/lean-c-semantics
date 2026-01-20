@@ -376,7 +376,7 @@ let extern_json = json_extern file.extern in
 ## Testing
 
 After each change:
-1. Rebuild Cerberus: `cd cerberus && OPAMSWITCH=cerberus-414 opam exec -- opam reinstall cerberus --yes`
+1. Rebuild Cerberus: `make cerberus`
 2. Run parser tests: `./scripts/test_parser.sh --quick`
 3. Run PP tests: `./scripts/test_pp.sh --max 100`
 

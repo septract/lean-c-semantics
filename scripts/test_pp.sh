@@ -9,8 +9,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 CERBERUS_DIR="$PROJECT_DIR/cerberus"
 LEAN_DIR="$PROJECT_DIR/lean"
 
-# Cerberus requires OCaml 4.14.1 (crashes on OCaml 5.x)
-OPAM_SWITCH="cerberus-414"
+# Cerberus wrapper script (handles local opam switch)
 CERBERUS="$PROJECT_DIR/scripts/cerberus"
 
 # Configuration
@@ -50,9 +49,9 @@ if [[ -z "$TEST_DIR" ]]; then
     TEST_DIR="$CERBERUS_DIR/tests"
 fi
 
-# Check prerequisites - verify opam switch exists
-if ! opam switch list 2>/dev/null | grep -q "$OPAM_SWITCH"; then
-    echo "Error: opam switch '$OPAM_SWITCH' not found"
+# Check prerequisites - verify local opam switch exists
+if [[ ! -d "$CERBERUS_DIR/_opam" ]]; then
+    echo "Error: Local opam switch not found at $CERBERUS_DIR/_opam"
     echo "Run 'make cerberus-setup' first"
     exit 1
 fi

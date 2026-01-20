@@ -7,8 +7,14 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 CERBERUS_DIR="$PROJECT_DIR/cerberus"
-OPAM_SWITCH="cerberus-414"
 CERBERUS_BIN="$CERBERUS_DIR/_build/default/backend/driver/main.exe"
+
+# Verify local opam switch exists
+if [[ ! -d "$CERBERUS_DIR/_opam" ]]; then
+    echo "Error: Local opam switch not found at $CERBERUS_DIR/_opam"
+    echo "Run 'make cerberus-setup' first"
+    exit 1
+fi
 
 # Verify binary exists
 if [[ ! -x "$CERBERUS_BIN" ]]; then
@@ -17,5 +23,5 @@ if [[ ! -x "$CERBERUS_BIN" ]]; then
     exit 1
 fi
 
-# Run cerberus binary directly (opam exec sets up library paths)
-OPAMSWITCH=$OPAM_SWITCH opam exec -- "$CERBERUS_BIN" --runtime="$CERBERUS_DIR/_build/install/default" "$@"
+# Run cerberus binary directly using the local opam switch
+opam exec --switch="$CERBERUS_DIR" -- "$CERBERUS_BIN" --runtime="$CERBERUS_DIR/_build/install/default" "$@"

@@ -124,13 +124,18 @@ Focus on sequential Core initially:
 
 ### Cerberus Setup
 
-**IMPORTANT**: Cerberus requires OCaml 4.14.1. It crashes on OCaml 5.x.
+**IMPORTANT**: Cerberus requires OCaml 4.14.1 or 5.4.0+. The version is configured in the Makefile via `OCAML_VERSION`.
 
 First-time setup:
 ```bash
 make cerberus-setup
 ```
-This creates the `cerberus-414` opam switch, installs dependencies, and builds Cerberus locally.
+This creates a **local opam switch** in `cerberus/_opam/`, installs dependencies, and builds Cerberus locally.
+
+**Benefits of local switches:**
+- Each checkout can have its own isolated OCaml environment
+- Multiple development versions can coexist without conflicts
+- The switch is scoped to this project directory
 
 Verify it works:
 ```bash
@@ -147,7 +152,7 @@ This runs `lem` (to update OCaml sources) and `dune build`.
 
 ### Running Cerberus
 
-Use the wrapper script `scripts/cerberus` (which uses `dune exec`):
+Use the wrapper script `scripts/cerberus` (which uses the local opam switch):
 ```bash
 # Pretty-print Core to stdout
 ./scripts/cerberus --pp=core input.c

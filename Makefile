@@ -9,9 +9,11 @@
 .PHONY: fuzz init update-cerberus help
 
 # Configuration
-# Cerberus requires OCaml 4.14.1 (crashes on OCaml 5.x)
-OPAM_SWITCH := cerberus-414
-OPAM_EXEC := OPAMSWITCH=$(OPAM_SWITCH) opam exec --
+# OCaml version for Cerberus (5.4.0+ recommended, 4.14.1 also works)
+OCAML_VERSION := 5.4.0
+# Use a local opam switch in cerberus/_opam/ for project isolation
+CERBERUS_DIR := $(shell pwd)/cerberus
+OPAM_EXEC := opam exec --switch=$(CERBERUS_DIR) --
 # Run Cerberus from local build (avoids pinning/reinstalling)
 CERBERUS_CMD := $(OPAM_EXEC) dune exec --root cerberus -- cerberus --runtime=cerberus/_build/install/default
 
@@ -26,7 +28,7 @@ all: lean
 lean:
 	cd lean && lake build
 
-# Build Cerberus (requires cerberus-414 opam switch)
+# Build Cerberus (requires local opam switch in cerberus/_opam/)
 cerberus:
 	cd cerberus && $(OPAM_EXEC) make cerberus
 
@@ -38,17 +40,18 @@ cerberus:
 init:
 	git submodule update --init --recursive
 
-# First-time Cerberus setup: create opam switch and install
+# First-time Cerberus setup: create local opam switch and install
 cerberus-setup: init
-	@echo "Creating opam switch $(OPAM_SWITCH) with OCaml 4.14.1..."
-	opam switch create $(OPAM_SWITCH) 4.14.1 || true
+	@echo "Creating local opam switch in cerberus/ with OCaml $(OCAML_VERSION)..."
+	cd cerberus && opam switch create . $(OCAML_VERSION) --no-install || true
 	@echo "Installing Cerberus dependencies..."
-	cd cerberus && $(OPAM_EXEC) opam install --deps-only -y ./cerberus-lib.opam ./cerberus.opam
+	cd cerberus && opam install --switch=. --deps-only -y ./cerberus-lib.opam ./cerberus.opam
 	@echo "Building Cerberus..."
 	cd cerberus && $(OPAM_EXEC) make cerberus
 	@echo "Verifying Cerberus works..."
 	$(CERBERUS_CMD) --exec cerberus/tests/ci/0001-emptymain.c
 	@echo "Cerberus setup complete!"
+	@echo "Local switch created at: cerberus/_opam/"
 
 # ------------------------------------------------------------------------------
 # Clean
@@ -161,7 +164,7 @@ help:
 	@echo "Setup (first time):"
 	@echo "  make check-deps      Check required dependencies are installed"
 	@echo "  make init            Initialize git submodules"
-	@echo "  make cerberus-setup  Create OCaml 4.14 switch and install Cerberus"
+	@echo "  make cerberus-setup  Create local OCaml $(OCAML_VERSION) switch and install Cerberus"
 	@echo ""
 	@echo "Build:"
 	@echo "  make                 Build Lean project (default)"

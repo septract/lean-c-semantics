@@ -22,8 +22,7 @@ LEAN_DIR="$PROJECT_DIR/lean"
 # Check for required dependencies
 command -v timeout &> /dev/null || { echo "Error: 'timeout' command not found"; exit 1; }
 
-# Cerberus requires OCaml 4.14.1
-OPAM_SWITCH="cerberus-414"
+# Cerberus wrapper script (handles local opam switch)
 CERBERUS="$PROJECT_DIR/scripts/cerberus"
 
 # Configuration

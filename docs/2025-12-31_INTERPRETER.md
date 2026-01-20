@@ -10,18 +10,18 @@ Implement a Lean interpreter that matches Cerberus semantics closely enough for 
 
 ### OCaml Version for Cerberus Execution
 
-Cerberus requires OCaml 4.14.1. It crashes with SIGSEGV (exit code 139) on OCaml 5.x.
+Cerberus requires OCaml 4.14.1 or 5.4.0+. The version is configured in the Makefile via `OCAML_VERSION`.
 
-**Solution**: Use `make cerberus-setup` to create a dedicated opam switch:
+**Solution**: Use `make cerberus-setup` to create a local opam switch:
 
 ```bash
-# First-time setup (creates cerberus-414 opam switch)
+# First-time setup (creates local opam switch in cerberus/_opam/)
 make cerberus-setup
 
 # This will:
-# 1. Create opam switch with OCaml 4.14.1
+# 1. Create local opam switch in cerberus/_opam/
 # 2. Install all dependencies
-# 3. Pin and install Cerberus
+# 3. Build Cerberus
 # 4. Verify execution works
 ```
 
