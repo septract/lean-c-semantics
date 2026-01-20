@@ -1,0 +1,34 @@
+# Git
+.git
+.gitignore
+.gitmodules
+
+# Documentation (not needed in image)
+*.md
+docs/
+
+# Build artifacts (will be rebuilt in Docker)
+lean/.lake/
+cerberus/_build/
+cerberus/_opam/
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs and temp files
+logs/
+tmp/
+*.log
+
+# Test outputs
+tests/csmith/
+
+# macOS
+.DS_Store
+
+# Keep essential cerberus submodule content but exclude its .git
+cerberus/.git

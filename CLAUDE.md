@@ -35,11 +35,17 @@ lean-c-semantics/
 │   ├── test_pp.sh     # Run pretty-printer comparison tests
 │   ├── test_interp.sh # Run interpreter differential testing
 │   ├── fuzz_csmith.sh # Fuzz testing with csmith
-│   └── creduce_interestingness.sh # For minimizing failing tests with creduce
+│   ├── creduce_interestingness.sh # For minimizing failing tests with creduce
+│   └── docker_entrypoint.sh # Docker container entrypoint
 ├── tests/             # C test files for differential testing
 │   ├── minimal/       # Core test suite (NNN-description.c)
 │   ├── debug/         # Debug/investigation tests (category-NN-description.c)
 │   └── csmith/        # Csmith fuzz testing infrastructure
+├── .github/workflows/ # CI/CD workflows
+│   ├── ci.yml         # Build and test on push/PR
+│   └── docker.yml     # Build and push Docker image
+├── Dockerfile         # Multi-stage build for Cerberus + Lean
+├── .dockerignore      # Files excluded from Docker build context
 ├── CLAUDE.md          # This file
 └── TODO.md            # Current tasks
 ```
@@ -403,6 +409,49 @@ cd cerberus && make cerberus
 # Lean
 cd lean && lake build
 ```
+
+### Docker
+
+A Docker image is available that bundles Cerberus and the Lean interpreter.
+
+**Using the published image:**
+```bash
+# Pull from GitHub Container Registry
+docker pull ghcr.io/septract/lean-c-semantics:main
+
+# Run on a C file (mount current directory)
+docker run --rm -v "$(pwd):$(pwd)" -w "$(pwd)" ghcr.io/septract/lean-c-semantics:main program.c
+
+# Recommended: create an alias for convenience
+alias cerblean='docker run --rm -v "$(pwd):$(pwd)" -w "$(pwd)" ghcr.io/septract/lean-c-semantics:main'
+cerblean program.c
+```
+
+**Container options:**
+```bash
+cerblean program.c              # Execute with Lean interpreter
+cerblean --batch program.c      # Machine-readable output (for scripts)
+cerblean --cerberus program.c   # Run Cerberus only (for comparison)
+cerblean --json program.c       # Output Core IR as JSON
+cerblean --nolibc program.c     # Skip libc (faster, but limited)
+cerblean --help                 # Show all options
+```
+
+**Building locally:**
+```bash
+docker build -t cerblean .
+docker run --rm -v "$(pwd):$(pwd)" -w "$(pwd)" cerblean program.c
+```
+
+**Layer caching:** The Dockerfile is optimized for incremental rebuilds:
+- Lean toolchain download is cached unless `lean-toolchain` changes
+- Cerberus opam dependencies are cached unless `*.opam` files change
+- Source changes only trigger rebuilds, not dependency re-downloads
+
+**CI/CD:** The `.github/workflows/docker.yml` workflow:
+- Builds and pushes to GHCR on pushes to `main`
+- Creates versioned tags on `v*` releases (e.g., `v0.1.0` → `:0.1.0`, `:0.1`)
+- PRs only build (no push) to validate the Dockerfile
 
 ## Documentation
 
