@@ -1,6 +1,6 @@
 name = "CerbLean"
 version = "0.1.0"
-defaultTargets = ["CerbLean", "cerblean_pp", "cerblean_test", "cerblean_testbatch", "cerblean_interp", "cerblean_memtest"]
+defaultTargets = ["CerbLean", "cerblean_pp", "cerblean_test", "cerblean_testbatch", "cerblean_interp", "cerblean_memtest", "cerblean_genproof"]
 preferReleaseBuild = true
 
 [[require]]
