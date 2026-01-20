@@ -29,7 +29,35 @@ The remaining 2% are due to: unimplemented I/O builtins (printf), Cerberus-speci
 C source → Cerberus → Core IR (JSON) → Lean Parser → Lean AST → Lean Interpreter
 ```
 
-## Building
+## Quick Start (Docker)
+
+The easiest way to use CerbLean is via Docker:
+
+```bash
+# Pull the image
+docker pull ghcr.io/septract/lean-c-semantics:main
+
+# Run on a C file
+docker run --rm -v "$(pwd):$(pwd)" -w "$(pwd)" ghcr.io/septract/lean-c-semantics:main program.c
+```
+
+For convenience, add an alias to your shell config:
+
+```bash
+alias cerblean='docker run --rm -v "$(pwd):$(pwd)" -w "$(pwd)" ghcr.io/septract/lean-c-semantics:main'
+```
+
+Then use it like a regular command:
+
+```bash
+cerblean program.c              # Execute and show result
+cerblean --batch program.c      # Machine-readable output
+cerblean --cerberus program.c   # Run Cerberus only (for comparison)
+cerblean --json program.c       # Output Core IR as JSON
+cerblean --help                 # Show all options
+```
+
+## Building from Source
 
 Requires: Lean 4 (via elan), OCaml 4.14.1 (for Cerberus), `timeout` command (for tests)
 
@@ -44,6 +72,13 @@ make lean            # Build Lean project
 
 # Test
 make test            # Run quick tests (unit + interpreter)
+```
+
+### Building the Docker Image Locally
+
+```bash
+docker build -t cerblean .
+docker run --rm -v "$(pwd):$(pwd)" -w "$(pwd)" cerblean program.c
 ```
 
 ## Documentation
