@@ -28,11 +28,11 @@ jobs:
           test: false
           lake-package-directory: lean
 
-      - name: Restore OPAM cache
+      - name: Restore OPAM cache (local switch)
         uses: actions/cache@v4
         with:
-          path: ~/.opam
-          key: opam-cerberus-414-${{ hashFiles('cerberus/cerberus-lib.opam', 'cerberus/cerberus.opam') }}
+          path: cerberus/_opam
+          key: opam-local-${{ hashFiles('cerberus/cerberus-lib.opam', 'cerberus/cerberus.opam') }}
 
       - name: Initialize Opam
         run: opam init -y --disable-sandboxing

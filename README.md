@@ -59,7 +59,7 @@ cerblean --help                 # Show all options
 
 ## Building from Source
 
-Requires: Lean 4 (via elan), OCaml 4.14.1 (for Cerberus), `timeout` command (for tests)
+Requires: Lean 4 (via elan), OCaml (for Cerberus, version configured in Makefile), `timeout` command (for tests)
 
 On macOS: `brew install coreutils` (provides `gtimeout` which is symlinked to `timeout`)
 
