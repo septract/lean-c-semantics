@@ -60,10 +60,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          # Build for amd64 only initially (arm64 adds significant build time)
-          # Uncomment below to enable multi-platform:
-          # platforms: linux/amd64,linux/arm64
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
 
   # Quick smoke test to verify the image works
   test:
