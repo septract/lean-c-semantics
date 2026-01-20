@@ -139,18 +139,17 @@ def runFile (jsonPath : String) (batch : Bool) (progArgs : List String) : IO Uni
             IO.println s!"Defined \{value: \"{ppValue v}\"}"
         | none => IO.println "Defined {value: \"void\"}"
     else
-      -- Verbose mode: full details
-      IO.println s!"Result: {result}"
-      match result.returnValue with
-      | some v => IO.println s!"Return value: {ppValue v}"
-      | none => IO.println "No return value"
+      -- Verbose mode: concise human-readable output
+      match result.error with
+      | some e => IO.println s!"Error: {e}"
+      | none =>
+        match result.returnValue with
+        | some v => IO.println s!"Return: {ppValue v}"
+        | none => IO.println "Return: void"
       if result.stdout != "" then
         IO.println s!"stdout: {result.stdout}"
       if result.stderr != "" then
         IO.println s!"stderr: {result.stderr}"
-      match result.error with
-      | some e => IO.println s!"Error: {e}"
-      | none => pure ()
   | .error e =>
     IO.println s!"Parse error: {e}"
 
