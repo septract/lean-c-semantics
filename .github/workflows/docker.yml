@@ -18,6 +18,9 @@ jobs:
     permissions:
       contents: read
       packages: write
+    # Expose the image tag for the test job
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
 
     steps:
       - name: Checkout repository
@@ -81,5 +84,5 @@ jobs:
           # Create a simple test file
           echo 'int main(void) { return 42; }' > /tmp/test.c
 
-          # Run the container
-          docker run --rm -v /tmp:/work ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }} --batch /work/test.c
+          # Use the image tag from the build job
+          docker run --rm -v /tmp:/work ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.image_tag }} --batch /work/test.c
