@@ -28,12 +28,17 @@ lean-c-semantics/
 │       ├── PrettyPrint.lean # Pretty-printer matching Cerberus output
 │       ├── Memory/    # Memory model (concrete with allocation-ID provenance)
 │       ├── Semantics/ # Interpreter
+│       ├── Verification/    # Verified C programs (see Program Verification section)
+│       │   └── Programs/    # Individual verified programs
+│       ├── GenProof.lean    # Generates proof skeleton files from Core JSON
 │       ├── Test/      # Unit tests (Memory, Parser smoke tests)
 │       └── Test*.lean # Test CLI entry points
 ├── scripts/           # Development scripts
 │   ├── test_parser.sh # Run parser against Cerberus test suite
 │   ├── test_pp.sh     # Run pretty-printer comparison tests
 │   ├── test_interp.sh # Run interpreter differential testing
+│   ├── test_genproof.sh # Test proof generation pipeline
+│   ├── strip_core_json.py # Strip Core JSON to minimal dependencies (for smaller proofs)
 │   ├── fuzz_csmith.sh # Fuzz testing with csmith
 │   ├── creduce_interestingness.sh # For minimizing failing tests with creduce
 │   └── docker_entrypoint.sh # Docker container entrypoint
@@ -341,6 +346,118 @@ When investigating a bug or unexpected behavior:
 2. Run `./scripts/test_interp.sh tests/debug` to compare against Cerberus
 3. Debug tests should be committed for future regression testing
 4. Once fixed, consider adding to `tests/minimal/` if it covers a new case
+
+## Program Verification
+
+The project supports proving properties of C programs directly in Lean using the interpreter semantics. Programs are embedded as Lean definitions (Core AST), and properties like UB-freedom and return values can be proven using `native_decide`.
+
+### Verification Pipeline
+
+```
+C source → Cerberus → Core JSON → strip_core_json.py → GenProof → Lean file with proof stubs
+                                                                          ↓
+                                                        Fill proofs (native_decide or Aristotle)
+```
+
+### Directory Structure
+
+- `CerbLean/Verification/Programs/` - Verified C programs with proofs
+  - `MinimalReturn.lean` - Hand-constructed program returning 42
+  - `CountingLoop.lean` - Loop counting 0→3 with save/run pattern
+  - `ReturnLiteral.lean` - Auto-generated from C, proven by Aristotle
+
+### Proof Patterns
+
+**UB-Freedom Proof** (no undefined behavior):
+```lean
+/-- Helper for native_decide -/
+theorem program_noError_bool : (runMain program).error.isNone = true := by
+  native_decide
+
+/-- The program completes without undefined behavior -/
+theorem program_noError : (runMain program).error = none := by
+  have := @program_noError_bool
+  cases h : (runMain program).error <;> simp_all
+```
+
+**Return Value Existence**:
+```lean
+theorem program_returns_expected :
+    ∃ v, (runMain program).returnValue = some v := by
+  have h_code : (runMain program).returnValue.isSome := by native_decide
+  exact Option.isSome_iff_exists.mp h_code
+```
+
+### Generating Proof Files
+
+**Using test_genproof.sh**:
+```bash
+# Test the full pipeline (temp directory, auto-cleanup)
+./scripts/test_genproof.sh tests/minimal/001-return-literal.c
+
+# Generate production file to Verification/Programs/
+./scripts/test_genproof.sh tests/minimal/001-return-literal.c --production
+
+# Options:
+#   --nolibc       Use --nolibc with Cerberus (smaller JSON)
+#   --no-strip     Skip JSON stripping step
+#   --aggressive   Use aggressive stripping
+#   --keep         Keep intermediate files
+#   --production   Output to Verification/Programs/ with proper naming
+#   -v, --verbose  Show verbose output
+```
+
+**Using GenProof directly**:
+```bash
+# Generate JSON from C
+./scripts/cerberus --json_core_out=program.json tests/minimal/001-return-literal.c
+
+# Optionally strip to reduce size
+python3 scripts/strip_core_json.py program.json program_stripped.json
+
+# Generate Lean proof file
+./lean/.lake/build/bin/cerblean_genproof program_stripped.json lean/CerbLean/Verification/Programs/MyProgram.lean
+```
+
+The GenProof tool automatically generates proper namespaces from paths containing "CerbLean/" (e.g., `CerbLean.Verification.Programs.MyProgram`).
+
+### JSON Stripping
+
+The `strip_core_json.py` script removes unused stdlib functions and impl definitions from Core JSON, dramatically reducing file size and proof complexity.
+
+```bash
+# Basic stripping (removes unused functions)
+python3 scripts/strip_core_json.py input.json output.json
+
+# Aggressive stripping (also removes location info, descriptions)
+python3 scripts/strip_core_json.py --aggressive input.json output.json
+
+# Show what was removed
+python3 scripts/strip_core_json.py -v input.json output.json
+```
+
+**Size reduction example:**
+- Original JSON (with libc): ~200MB
+- After stripping: ~40KB (for simple programs)
+- With `--nolibc`: ~2MB → ~20KB
+
+The stripper performs dependency analysis to keep only functions reachable from `main`, making the resulting Lean AST much more manageable for `native_decide` proofs.
+
+### Limitations
+
+- **`native_decide` only works for concrete programs**: Programs with no inputs can be fully evaluated at compile time. Programs with parameters or preconditions require symbolic reasoning.
+- **Proof complexity**: Large programs may cause `native_decide` to time out or run out of memory.
+- **Aristotle integration**: For complex proofs, the Aristotle theorem prover can fill `sorry` statements automatically.
+
+### Testing the Pipeline
+
+```bash
+# CI test: verify genproof pipeline works
+make test-genproof
+
+# Quick test on a single file
+./scripts/test_genproof.sh tests/minimal/001-return-literal.c --nolibc -v
+```
 
 ## Development Notes
 

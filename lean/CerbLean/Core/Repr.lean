@@ -259,35 +259,61 @@ instance : Repr GlobDecl where
   reprPrec d _ := reprGlobDecl d
 
 -- File repr (the main one we need)
+-- Uses Format.line for soft breaks - becomes space if fits, newline if doesn't
 def reprFile (f : File) : Std.Format :=
-  .group (.text "{ main := " ++ repr f.main ++
-    .text ", tagDefs := " ++ repr f.tagDefs ++
-    .text ", stdlib := " ++ reprFunMap f.stdlib ++
-    .text ", impl := " ++ reprImplDefs f.impl ++
-    .text ", globs := " ++ reprGlobs f.globs ++
-    .text ", funs := " ++ reprFunMap f.funs ++
-    .text ", extern := " ++ reprExtern f.extern ++
-    .text ", funinfo := " ++ reprFunInfo f.funinfo ++
-    .text " }")
+  .group (
+    .text "{" ++
+    .nest 2 (
+      .line ++ .text "main := " ++ repr f.main ++ .text "," ++
+      .line ++ .text "tagDefs := " ++ repr f.tagDefs ++ .text "," ++
+      .line ++ .text "stdlib := " ++ reprFunMap f.stdlib ++ .text "," ++
+      .line ++ .text "impl := " ++ reprImplDefs f.impl ++ .text "," ++
+      .line ++ .text "globs := " ++ reprGlobs f.globs ++ .text "," ++
+      .line ++ .text "funs := " ++ reprFunMap f.funs ++ .text "," ++
+      .line ++ .text "extern := " ++ reprExtern f.extern ++ .text "," ++
+      .line ++ .text "funinfo := " ++ reprFunInfo f.funinfo
+    ) ++
+    .line ++ .text "}"
+  )
 where
   reprFunMap (m : FunMap) : Std.Format :=
-    .text "[" ++ .group (.nest 2 (.join (m.map fun (s, d) =>
-      .group (.text "(" ++ repr s ++ .text ", " ++ reprFunDecl d ++ .text "), ")))) ++ .text "]"
+    .group (
+      .text "[" ++
+      .nest 2 (.join (m.map fun (s, d) =>
+        .line ++ .group (.text "(" ++ repr s ++ .text ", " ++ reprFunDecl d ++ .text "),"))) ++
+      .line ++ .text "]"
+    )
   reprImplDefs (m : ImplDefs) : Std.Format :=
     let items := m.toList
-    .text "Std.HashMap.ofList [" ++ .group (.nest 2 (.join (items.map fun (c, d) =>
-      .group (.text "(" ++ repr c ++ .text ", " ++ reprImplDecl d ++ .text "), ")))) ++ .text "]"
+    .group (
+      .text "Std.HashMap.ofList [" ++
+      .nest 2 (.join (items.map fun (c, d) =>
+        .line ++ .group (.text "(" ++ repr c ++ .text ", " ++ reprImplDecl d ++ .text "),"))) ++
+      .line ++ .text "]"
+    )
   reprGlobs (g : List (Sym × GlobDecl)) : Std.Format :=
-    .text "[" ++ .group (.nest 2 (.join (g.map fun (s, d) =>
-      .group (.text "(" ++ repr s ++ .text ", " ++ reprGlobDecl d ++ .text "), ")))) ++ .text "]"
+    .group (
+      .text "[" ++
+      .nest 2 (.join (g.map fun (s, d) =>
+        .line ++ .group (.text "(" ++ repr s ++ .text ", " ++ reprGlobDecl d ++ .text "),"))) ++
+      .line ++ .text "]"
+    )
   reprExtern (e : Std.HashMap Identifier (List Sym × LinkingKind)) : Std.Format :=
     let items := e.toList
-    .text "Std.HashMap.ofList [" ++ .group (.nest 2 (.join (items.map fun (id, (syms, lk)) =>
-      .group (.text "(" ++ repr id ++ .text ", (" ++ repr syms ++ .text ", " ++ repr lk ++ .text ")), ")))) ++ .text "]"
+    .group (
+      .text "Std.HashMap.ofList [" ++
+      .nest 2 (.join (items.map fun (id, (syms, lk)) =>
+        .line ++ .group (.text "(" ++ repr id ++ .text ", (" ++ repr syms ++ .text ", " ++ repr lk ++ .text ")),"))) ++
+      .line ++ .text "]"
+    )
   reprFunInfo (m : FunInfoMap) : Std.Format :=
     let items := m.toList
-    .text "Std.HashMap.ofList [" ++ .group (.nest 2 (.join (items.map fun (s, info) =>
-      .group (.text "(" ++ repr s ++ .text ", " ++ repr info ++ .text "), ")))) ++ .text "]"
+    .group (
+      .text "Std.HashMap.ofList [" ++
+      .nest 2 (.join (items.map fun (s, info) =>
+        .line ++ .group (.text "(" ++ repr s ++ .text ", " ++ repr info ++ .text "),"))) ++
+      .line ++ .text "]"
+    )
 
 instance : Repr File where
   reprPrec f _ := reprFile f
