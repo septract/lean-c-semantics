@@ -190,12 +190,25 @@ partial def checkExpr (e : AExpr) : TypingM IndexTerm := do
       return mkUnitTerm loc
     checkExpr es.head!
 
-  -- Save/run (for labels/goto - simplified)
+  -- Save/run (for labels/goto)
+  -- save label: ret_ty (param := default, ...) in body
+  -- The parameters are bound in the scope of the body
   | .save _retSym _retTy args body =>
-    -- Evaluate the argument expressions
-    for (_, _, argPe) in args do
-      let _ ← checkPexpr argPe
-    checkExpr body
+    -- Bind save parameters as variables in scope
+    -- Each arg is (sym, basetype, default_expr)
+    let mut bindings : List (Sym × BaseType) := []
+    for (sym, bt, _defaultPe) in args do
+      -- Convert Core.BaseType to CN BaseType
+      let cnBt := coreBaseTypeToCN bt
+      TypingM.addL sym cnBt loc s!"save parameter {sym.name.getD ""}"
+      bindings := (sym, cnBt) :: bindings
+    -- Check body with parameters in scope
+    let result ← checkExpr body
+    -- Unbind parameters (in reverse order)
+    for (sym, _) in bindings do
+      TypingM.modifyContext fun ctx =>
+        { ctx with logical := ctx.logical.filter (·.1.id != sym.id) }
+    return result
 
   | .run _label args =>
     for arg in args do
