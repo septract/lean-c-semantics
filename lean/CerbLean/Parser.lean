@@ -26,7 +26,7 @@ def getFieldOpt (obj : Json) (field : String) : Option Json :=
 /-- Truncate JSON for error messages -/
 def truncateJson (j : Json) (maxLen : Nat := 100) : String :=
   let s := toString j
-  if s.length > maxLen then (s.take maxLen).toString ++ "..." else s
+  if s.length > maxLen then s.extract 0 ⟨maxLen⟩ ++ "..." else s
 
 /-- Get a required string field -/
 def getStr (obj : Json) (field : String) : Except String String := do

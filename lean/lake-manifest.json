@@ -4,7 +4,7 @@
  [{"url": "https://github.com/ufmg-smite/lean-smt",
    "type": "git",
    "subDir": null,
-   "scope": "ufmg-smite",
+   "scope": "",
    "rev": "66457c1af38ba5680c4c837eeeb0d9fe683075a1",
    "name": "smt",
    "manifestFile": "lake-manifest.json",
