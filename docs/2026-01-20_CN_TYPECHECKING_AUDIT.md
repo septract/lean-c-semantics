@@ -492,11 +492,52 @@ When verifying `int read(int *p) { return *p; }` with spec `requires take v = Ow
 
 ---
 
+### Issue 21: Unspecified Value Handling in Store ✅ FIXED
+
+**Location**: `Action.lean` handleStore
+
+**Problem**: When storing an unspecified value (e.g., `int x;` without initialization), the store operation was converting `Owned<T>(Uninit)` to `Owned<T>(Init)`. This allowed subsequent loads to succeed when they should fail due to reading uninitialized memory.
+
+**CN OCaml**: At the muCore level, CN sees `LVunspecified` values and handles them appropriately. The key insight is that in muCore, `LVunspecified` triggers `assert false` in type checking (check.ml line 251), meaning unspecified values should be detected earlier in the pipeline.
+
+**Our Fix**: In `handleStore`, we detect if the value being stored is `LVunspecified`:
+```lean
+def isUnspecifiedValue (pe : APexpr) : Bool :=
+  match pe.expr with
+  | .val (.loaded (.unspecified _)) => true
+  | .ctor .unspecified _ => true
+  | _ => false
+```
+
+If unspecified, the store does NOT convert to Init:
+- `Store(Uninit, unspecified_value)` → produces `Owned<T>(Uninit)` (stays uninitialized)
+- `Store(Uninit, specified_value)` → produces `Owned<T>(Init)` (becomes initialized)
+
+This ensures that reading from memory that only had unspecified values stored will fail with "missing resource: Owned<T>(init)".
+
+**Test Verification**:
+- `012-read-uninit.fail.c`: Correctly fails - `int x; return x;` cannot load uninitialized memory
+- `025-write-uninit.fail.c`: Correctly fails - same reason
+- `027-local-variable.c`: Correctly passes - `int x = 42;` stores a specified value
+
+---
+
 ## CONCLUSION
 
-**Update (2026-01-20 evening)**: Significant progress has been made. The critical escape hatches for hardcoded types, fresh symbol generation, sandbox error handling, and parameter handling have all been fixed. All 12 integration tests pass and all 9 unit tests pass.
+**Update (2026-01-20 late evening)**: Further progress made. 21 of 23 tests now pass.
+
+**Fixed in this session**:
+- Issue 21: Unspecified value handling in Store - memory declared without initialization stays as `Owned<T>(Uninit)`, preventing reads
+
+**Test Status** (21 passing, 2 failing):
+- Tests 012-read-uninit.fail.c and 025-write-uninit.fail.c now correctly FAIL (expected failures that detect uninitialized reads)
+- Tests 023-struct-access.c and 026-constraint-violation.fail.c still fail:
+  - 023: Needs struct/memberShift handling (not yet implemented)
+  - 026: Needs real SMT solver (trivial oracle accepts all constraints)
 
 **Remaining work**:
+- Struct member access via memberShift (Issue: 023-struct-access.c)
+- Real SMT solver integration (Issue: 026-constraint-violation.fail.c)
 - Branch resource checking (Issue 4) - important for soundness
 - Non-deterministic expression handling (Issue 5)
 - Function call specification checking (Issue 8) - deferred for v0.1
