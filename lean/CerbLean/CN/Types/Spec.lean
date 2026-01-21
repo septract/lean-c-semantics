@@ -14,9 +14,9 @@
   Deviations: Simplified for minimal subset
 -/
 
-import CerbLean.CN.Request
+import CerbLean.CN.Types.Resource
 
-namespace CerbLean.CN
+namespace CerbLean.CN.Types
 
 open CerbLean.Core (Sym Loc)
 
@@ -98,4 +98,4 @@ structure FunctionAnnotations where
   annotations : List RawAnnotation
   deriving Repr, Inhabited
 
-end CerbLean.CN
+end CerbLean.CN.Types

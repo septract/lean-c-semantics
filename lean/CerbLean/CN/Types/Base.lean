@@ -12,7 +12,7 @@
 
 import CerbLean.Core.Sym
 
-namespace CerbLean.CN
+namespace CerbLean.CN.Types
 
 open CerbLean.Core (Sym Identifier)
 
@@ -209,4 +209,4 @@ def fitsRange (sign : Sign) (sz : Nat) (z : Int) : Bool :=
   let (minInt, maxInt) := bitsRange sign sz
   minInt ≤ z && z ≤ maxInt
 
-end CerbLean.CN
+end CerbLean.CN.Types

@@ -17,7 +17,7 @@ import CerbLean.CN.TypeChecking.Monad
 namespace CerbLean.CN.TypeChecking
 
 open CerbLean.Core (Sym Loc)
-open CerbLean.CN
+open CerbLean.CN.Types
 
 /-! ## Name Subsumption
 
