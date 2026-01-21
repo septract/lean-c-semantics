@@ -605,4 +605,25 @@ where
     | .ptraddr_t => 0
     | _ => 0
 
+/-! ## CPS Version
+
+For consistency with the CPS-style expression checking, we provide
+a continuation-passing version of checkPexpr.
+
+For pure expressions, CPS is straightforward since pure expressions
+don't have multiple exit paths (except for conditionals, which are
+handled by evaluating both branches symbolically).
+-/
+
+/-- Check a pure expression using continuation-passing style.
+
+    For pure expressions, we call the original checkPexpr and pass
+    the result to the continuation. This provides a uniform interface
+    with checkExprK.
+
+    Corresponds to: check_pexpr continuation handling in check.ml -/
+partial def checkPexprK (pe : APexpr) (k : IndexTerm → TypingM Unit) : TypingM Unit := do
+  let result ← checkPexpr pe
+  k result
+
 end CerbLean.CN.TypeChecking

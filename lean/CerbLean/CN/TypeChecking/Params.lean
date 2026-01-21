@@ -258,22 +258,22 @@ def checkFunctionWithParams
         paramValues := paramValueMap
       }
 
-      -- Step 5: Run type checking
+      -- Step 5: Run type checking (CPS style)
       let computation : TypingM Unit := do
-        -- Process precondition: consume initial resources, bind outputs
+        -- Process precondition: add resources to context, bind outputs
         processPrecondition spec.requires loc
 
-        -- Check the body expression
-        let _returnVal ← checkExpr body
+        -- Check the body with a continuation that handles postcondition
+        -- The continuation is called at each exit point of the function
+        let postconditionK (_returnVal : IndexTerm) : TypingM Unit := do
+          -- Process postcondition: consume final resources
+          processPostcondition spec.ensures loc
+          -- Verify all accumulated constraints
+          verifyConstraints
+          -- Check no resources leaked (must all be consumed or returned)
+          checkNoLeakedResources
 
-        -- Process postcondition: produce final resources
-        processPostcondition spec.ensures loc
-
-        -- Verify all accumulated constraints
-        verifyConstraints
-
-        -- Check no resources leaked (must all be consumed or returned)
-        checkNoLeakedResources
+        checkExprK body postconditionK
 
       match TypingM.run computation initialState with
       | .ok (_, finalState) =>

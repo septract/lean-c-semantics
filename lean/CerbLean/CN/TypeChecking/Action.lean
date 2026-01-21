@@ -404,4 +404,21 @@ def checkAction (pact : Paction) : TypingM IndexTerm := do
   | .seqRmw _isUpdate _ty _ptr _sym _val =>
     TypingM.fail (.other s!"SeqRMW not yet supported at {repr loc}")
 
+/-! ## CPS Version
+
+For consistency with the CPS-style expression checking, we provide
+a continuation-passing version of checkAction.
+-/
+
+/-- Check a memory action using continuation-passing style.
+
+    For actions, we call the original checkAction and pass
+    the result to the continuation. This provides a uniform interface
+    with checkExprK.
+
+    Corresponds to: Eaction continuation handling in check.ml -/
+def checkActionK (pact : Paction) (k : IndexTerm → TypingM Unit) : TypingM Unit := do
+  let result ← checkAction pact
+  k result
+
 end CerbLean.CN.TypeChecking
