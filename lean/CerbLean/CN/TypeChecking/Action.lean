@@ -19,7 +19,7 @@ import CerbLean.Core.Expr
 namespace CerbLean.CN.TypeChecking
 
 open CerbLean.Core (Sym Paction AAction Action APexpr Ctype KillKind SymPrefix)
-open CerbLean.CN
+open CerbLean.CN.Types
 
 /-! ## Fresh Symbol Generation
 

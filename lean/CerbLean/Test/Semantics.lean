@@ -9,7 +9,7 @@ namespace CerbLean.Test.Semantics
 
 open CerbLean.Core
 open CerbLean.Memory
-open CerbLean.CN
+open CerbLean.CN.Types
 open CerbLean.CN.Semantics
 
 /-! ## Helper: signed int type -/
