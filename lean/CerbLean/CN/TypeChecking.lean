@@ -37,3 +37,4 @@ import CerbLean.CN.TypeChecking.Pexpr
 import CerbLean.CN.TypeChecking.Action
 import CerbLean.CN.TypeChecking.Expr
 import CerbLean.CN.TypeChecking.Check
+import CerbLean.CN.TypeChecking.Params
