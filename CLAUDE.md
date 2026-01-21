@@ -73,24 +73,37 @@ See `docs/2025-12-31_INTERPRETER_REFACTOR.md` for the audit checklist and corres
 
 See `docs/2026-01-01_MEMORY_AUDIT.md` for the memory model audit plan and Cerberus correspondence mapping.
 
-### 0.1 CRITICAL: CN Types Must Match CN Implementation EXACTLY
+### 0.1 CRITICAL: CN Implementation Must Match CN EXACTLY
 
-**The Lean CN type system MUST mirror the CN implementation EXACTLY.**
+**The Lean CN type system and type checker MUST mirror the CN implementation EXACTLY.**
 
 - Type definitions must match CN's OCaml types (in `lib/baseTypes.ml`, `lib/indexTerms.ml`, etc.)
-- Implementation strategy must follow CN's approach - no "improvements" or alternative designs
+- Type checking functions must match CN's OCaml implementation - no "improvements" or alternative designs
 - Each type and function must be auditable against the corresponding CN code
 - Document correspondence with comments linking to CN source (file:lines)
 - This allows us to reuse CN's theory and proofs
 
-Example audit comment:
+**Audit Comment Style** (same as Cerberus audit comments):
 ```lean
--- CN: lib/baseTypes.ml lines 15-30
-inductive BaseType where
-  | Unit
-  | Bool
+/-
+  CN Pure Expression Checking
+  Corresponds to: cn/lib/check.ml (check_pexpr parts)
+
+  Converts Core pure expressions (Pexpr) to CN index terms (IndexTerm).
+
+  Audited: 2026-01-20 against cn/lib/check.ml
+-/
+
+/-- Check a pure expression and convert to an IndexTerm.
+    Corresponds to: check_pexpr in cn/lib/check.ml -/
+partial def checkPexpr (pe : APexpr) : TypingM IndexTerm := do
   ...
 ```
+
+Every function implementing CN functionality should have:
+1. A module-level comment explaining what it corresponds to in CN
+2. A docstring linking to the specific CN function/location
+3. An "Audited: YYYY-MM-DD" note when verified against CN source
 
 Key CN source files for reference:
 | File | Purpose |
@@ -102,6 +115,12 @@ Key CN source files for reference:
 | `cn/lib/logicalConstraints.ml` | Constraint representation |
 | `cn/lib/resource.ml` | Ownership predicates |
 | `cn/lib/request.ml` | Resource requests |
+| `cn/lib/check.ml` | Main type checker |
+| `cn/lib/typing.ml` | Typing monad |
+| `cn/lib/wellTyped.ml` | Well-typedness checking |
+| `cn/lib/resourceInference.ml` | Resource inference |
+| `cn/lib/core_to_mucore.ml` | Core to muCore transformation |
+| `cn/lib/compile.ml` | Compilation/translation |
 
 **CN Repository**: The CN source is available at https://github.com/rems-project/cn. If needed for reference, clone it to `tmp/cn/`:
 ```bash

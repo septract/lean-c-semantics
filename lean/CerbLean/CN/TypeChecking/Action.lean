@@ -256,9 +256,32 @@ def handleStore (_locking : Bool) (tyPe : APexpr) (ptrPe : APexpr) (valPe : APex
     Separation logic rule:
     {Owned<T>(Init)(p) ∧ *p == v} x = *p {Owned<T>(Init)(p) ∧ *p == v ∧ x == v}
 
+    **Lazy muCore transformation**: If the pointer is a parameter stack slot
+    (or alias thereof), we return the parameter value directly without
+    resource tracking. This corresponds to CN's C_vars.Value handling in
+    cn/lib/compile.ml line 1305.
+
     Corresponds to: Eaction Load case in check.ml lines 1892-1898 -/
 def handleLoad (tyPe : APexpr) (ptrPe : APexpr) (_order : Core.MemoryOrder) (loc : Core.Loc)
     : TypingM IndexTerm := do
+  -- Check if this is a load from a parameter stack slot (lazy muCore transformation)
+  -- Corresponds to: C_vars.Value case in compile.ml line 1305
+  match ptrPe.expr with
+  | .sym s =>
+    -- Check if this symbol (or what it aliases to) is a parameter stack slot
+    match ← TypingM.lookupParamValue s.id with
+    | some valueTerm =>
+      -- This is a parameter load - return the value directly, no resource tracking
+      -- This is the lazy equivalent of CN's Core-to-muCore transformation
+      return valueTerm
+    | none =>
+      -- Not a parameter - fall through to normal resource-based load
+      pure ()
+  | _ =>
+    -- Complex pointer expression - fall through to normal load
+    pure ()
+
+  -- Normal resource-based load
   -- Extract the C type from the type expression
   -- Corresponds to: act.ct in check.ml
   let ct ← extractCtype tyPe loc
@@ -292,20 +315,21 @@ def handleLoad (tyPe : APexpr) (ptrPe : APexpr) (_order : Core.MemoryOrder) (loc
 Dispatch to appropriate handler based on action type.
 -/
 
-/-- Infer Ctype from a size expression if possible.
-    In Core IR, the size expression often contains type information.
-    Returns void if type cannot be inferred (with a note that this is a limitation).
+/-- Infer Ctype from a size/type expression if possible.
+    In Core IR, the type information can appear in different forms:
+    1. As a Ctype value directly: `'signed int'` (parsed as .val (.ctype ct))
+    2. As sizeof: `sizeof('signed int')` (parsed as .impl (.sizeof_ ct))
 
     Note: In muCore (which CN works on), the type is directly available as act.ct.
-    Core IR doesn't have this, so we must infer it or accept the limitation. -/
+    Core IR encodes it differently, so we extract it from the expression. -/
 def inferCtypeFromSize (size : APexpr) (loc : Core.Loc) : TypingM Ctype := do
-  -- Try to extract type from size expression
-  -- Common pattern: size is `sizeof(T)` which contains the type
   match size.expr with
+  -- Pattern 1: Direct Ctype value (e.g., 'signed int')
+  | .val (.ctype ct) => return ct
+  -- Pattern 2: sizeof expression (e.g., sizeof('signed int'))
   | .impl (.sizeof_ ct) => return ct
   | _ =>
-    -- Cannot infer type from size - this is a known limitation
-    -- In a production system, we would need type annotations from the context
+    -- Cannot infer type - this is a known limitation
     TypingM.fail (.other s!"Cannot infer C type from size expression at {repr loc}. Create/Alloc requires type context from muCore.")
 
 /-- Check a memory action, consuming/producing resources as appropriate.
