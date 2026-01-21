@@ -336,30 +336,22 @@ def getParamValues : TypingM ParamValueMap := do
 
 /-! ### Scoped Operations
 
-Corresponds to: pure/sandbox in typing.ml lines 67-91
+Corresponds to: pure in typing.ml lines 67-72
 -/
 
-/-- Run a computation without modifying the state (for speculative checking)
+/-- Run a computation without modifying the state (for speculative checking).
+    The computation is executed and its result returned, but state changes
+    are discarded. Errors still propagate.
+
+    Used for branch checking in CPS: each branch is checked speculatively
+    with state restored afterward.
+
     Corresponds to: pure in typing.ml lines 67-72 -/
 def pure_ (m : TypingM α) : TypingM α := do
   let s ← getState
   let result ← m
   setState s
   return result
-
-/-- Run a computation and return whether it succeeds, without modifying state.
-    Properly captures and returns the actual error if the computation fails.
-    Corresponds to: sandbox in typing.ml lines 75-91 -/
-def sandbox (m : TypingM α) : TypingM (Except TypeError α) := do
-  let s ← getState
-  -- Use try/catch to properly capture the actual error
-  try
-    let a ← m
-    setState s  -- Restore state even on success (sandbox doesn't modify state)
-    return Except.ok a
-  catch e =>
-    setState s  -- Restore state on failure
-    return Except.error e
 
 end TypingM
 

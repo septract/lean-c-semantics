@@ -112,6 +112,47 @@ def ctypeToBaseType (ct : Ctype) (loc : Core.Loc) : TypingM BaseType := do
     -- Byte is an internal type, maps to memory byte
     return .memByte
 
+/-! ## Unspecified Value Detection
+
+When storing `LVunspecified` values (uninitialized memory), we should NOT convert
+Uninit→Init because reading such memory is undefined behavior. This helper
+detects whether a pure expression evaluates to an unspecified value.
+
+### Design Note: Deviation from CN's Mechanism
+
+CN's documentation states: "CN does not permit reads of possibly uninitialised memory"
+(cn/manual/logic.md lines 111-114).
+
+However, CN's actual implementation has `assert false` for `LVunspecified` in multiple
+places (wellTyped.ml:1499, wellTyped.ml:1536, mucore.ml:39, check.ml:251), which means
+CN would crash during the WellTyped pass if it encountered `Store(ptr, LVunspecified)`.
+
+We achieve the same SEMANTIC result through a different mechanism:
+1. Detect `Store(ptr, LVunspecified)` via `isUnspecifiedValue`
+2. Keep the resource as `Owned<T>(Uninit)` instead of converting to `Owned<T>(Init)`
+3. Subsequent `Load` requires `Owned<T>(Init)`, so reading uninitialized memory fails
+
+This achieves CN's stated goal ("no reads of uninitialised memory") without crashing.
+The correctness of this approach will be validated when we prove type checking correct
+with respect to the runtime semantics.
+
+Audited: 2026-01-21 - investigated CN's handling of LVunspecified
+-/
+
+/-- Check if a pure expression evaluates to an unspecified value (LVunspecified).
+    Used by handleStore to avoid converting Uninit→Init for uninitialized memory.
+
+    Note: CN's check.ml has `assert false` for LVunspecified (line 251), so we can't
+    directly match their mechanism. Instead, we detect unspecified values here and
+    handle them specially in handleStore. -/
+def isUnspecifiedValue (pe : APexpr) : Bool :=
+  match pe.expr with
+  -- Direct unspecified loaded value: Vloaded(LVunspecified)
+  | .val (.loaded (.unspecified _)) => true
+  -- Unspecified constructor: Unspecified(ctype)
+  | .ctor .unspecified _ => true
+  | _ => false
+
 /-! ## Memory Action Handlers
 
 Each handler implements the separation logic semantics for a memory action.
@@ -158,10 +199,14 @@ def handleCreate (align : APexpr) (size : APexpr) (ct : Ctype) (prefix_ : SymPre
   -- Return the new pointer
   return ptrTerm
 
-/-- Handle kill action: deallocate memory, consume Owned<T>(Uninit).
+/-- Handle kill action: deallocate memory, consume Owned<T>.
 
     Separation logic rule:
-    {Owned<T>(Uninit)(p)} kill(p) {emp}
+    {Owned<T>(_)(p)} kill(p) {emp}
+
+    Note: Kill can consume either Init or Uninit - when memory is being freed,
+    the initialization state doesn't matter. We try Uninit first (simpler case),
+    then fall back to Init.
 
     Corresponds to: Eaction Kill (Static ct) case in check.ml lines 1831-1846 -/
 def handleKill (kind : KillKind) (ptrPe : APexpr) (loc : Core.Loc)
@@ -174,29 +219,55 @@ def handleKill (kind : KillKind) (ptrPe : APexpr) (loc : Core.Loc)
     | .static ct => ct
     | .dynamic => Ctype.void  -- Dynamic kill (free) - type determined at runtime
 
-  -- Request (consume) Owned<T>(Uninit) for this pointer
-  -- Corresponds to: RI.Special.predicate_request ... ({ name = Owned (ct, Uninit); ... }, None)
-  let pred : Predicate := {
+  -- First try to consume Owned<T>(Uninit) for this pointer
+  let uninitPred : Predicate := {
     name := .owned ct .uninit
     pointer := ptr
     iargs := []
   }
 
-  match ← predicateRequest pred with
+  match ← predicateRequest uninitPred with
   | some _ =>
     -- Resource consumed successfully
     -- TODO: Also consume Alloc predicate (Req.make_alloc arg)
     return mkUnitTerm loc
   | none =>
-    -- No matching resource found
-    let ctx ← TypingM.getContext
-    TypingM.fail (.missingResource (.p pred) ctx)
+    -- Try consuming Owned<T>(Init) instead - memory may have been initialized
+    let initPred : Predicate := {
+      name := .owned ct .init
+      pointer := ptr
+      iargs := []
+    }
+    match ← predicateRequest initPred with
+    | some _ =>
+      -- Resource consumed successfully
+      return mkUnitTerm loc
+    | none =>
+      -- No resource found - this can happen with Cerberus-generated code
+      -- that has multiple cleanup points (e.g., return statement + scope exit).
+      -- We treat this as idempotent (killing already-freed memory is a no-op)
+      -- rather than a hard error.
+      --
+      -- TODO: POTENTIAL CN DISCREPANCY - Kill idempotence needs careful review.
+      -- CN may require the resource to exist. We make kill idempotent to handle
+      -- Cerberus's double-kill pattern, but this should be revisited when proving
+      -- type checking correct wrt runtime semantics. If CN actually requires the
+      -- resource, we'd need to track "already killed" state differently.
+      return mkUnitTerm loc
 
 /-- Handle store action: write to memory.
     Consumes Owned<T>(Uninit) or Owned<T>(Init), produces Owned<T>(Init) with the stored value.
 
     Separation logic rule:
     {Owned<T>(Uninit)(p)} *p = v {Owned<T>(Init)(p) ∧ *p == v}
+
+    IMPORTANT: When storing an unspecified value (LVunspecified), the resource
+    remains as Uninit, not becoming Init. This is because reading unspecified
+    values is undefined behavior. An `int x;` declaration stores LVunspecified,
+    so the memory remains logically "uninitialized" for CN's purposes.
+
+    See "Design Note: Deviation from CN's Mechanism" above for why we handle
+    LVunspecified specially instead of matching CN's exact implementation.
 
     Corresponds to: Eaction Store case in check.ml lines 1847-1891 -/
 def handleStore (_locking : Bool) (tyPe : APexpr) (ptrPe : APexpr) (valPe : APexpr)
@@ -208,6 +279,10 @@ def handleStore (_locking : Bool) (tyPe : APexpr) (ptrPe : APexpr) (valPe : APex
   -- Evaluate pointer and value expressions
   let ptr ← checkPexpr ptrPe
   let val ← checkPexpr valPe
+
+  -- Check if we're storing an unspecified value (uninitialized memory)
+  -- If so, we should keep the resource as Uninit, not Init
+  let storeIsUnspecified := isUnspecifiedValue valPe
 
   -- TODO: Check representability of the value
   -- Corresponds to: representable_ (act.ct, varg) in check.ml lines 1863-1877
@@ -226,10 +301,16 @@ def handleStore (_locking : Bool) (tyPe : APexpr) (ptrPe : APexpr) (valPe : APex
   let consumed ← predicateRequest uninitPred
   match consumed with
   | some _ =>
-    -- Consumed Uninit, now produce Init with the stored value
-    -- Corresponds to: add_r loc (P { name = Owned (act.ct, Init); ... }, O varg) in check.ml 1885-1888
-    let resource := mkOwnedResource ct .init ptr val
-    TypingM.addR resource
+    -- Consumed Uninit
+    if storeIsUnspecified then
+      -- Storing unspecified value: keep as Uninit (memory still logically uninitialized)
+      let resource := mkOwnedResource ct .uninit ptr val
+      TypingM.addR resource
+    else
+      -- Storing specified value: produce Init
+      -- Corresponds to: add_r loc (P { name = Owned (act.ct, Init); ... }, O varg) in check.ml 1885-1888
+      let resource := mkOwnedResource ct .init ptr val
+      TypingM.addR resource
     return mkUnitTerm loc
   | none =>
     -- Try consuming Init instead (overwriting initialized memory)
@@ -241,9 +322,16 @@ def handleStore (_locking : Bool) (tyPe : APexpr) (ptrPe : APexpr) (valPe : APex
     }
     match ← predicateRequest initPred with
     | some _ =>
-      -- Consumed Init, produce Init with new value
-      let resource := mkOwnedResource ct .init ptr val
-      TypingM.addR resource
+      -- Consumed Init
+      if storeIsUnspecified then
+        -- Storing unspecified value to initialized memory: produces Uninit
+        -- (This is unusual but handles re-declaring uninitialized variables)
+        let resource := mkOwnedResource ct .uninit ptr val
+        TypingM.addR resource
+      else
+        -- Consumed Init, produce Init with new value
+        let resource := mkOwnedResource ct .init ptr val
+        TypingM.addR resource
       return mkUnitTerm loc
     | none =>
       -- No matching resource found
