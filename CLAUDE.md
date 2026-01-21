@@ -593,6 +593,23 @@ Silent error swallowing hides bugs. We discovered the parser was completely brok
 ### CRITICAL: Never Commit Without Running Tests
 **NEVER commit changes without first running `make test`.** This ensures the build succeeds and all tests pass. A commit that breaks tests is unacceptable.
 
+### ABSOLUTE RULE: NEVER Modify Tests to Achieve a Pass
+
+**NEVER modify, weaken, or remove a test in order to make it pass. NEVER. UNDER ANY CIRCUMSTANCES.**
+
+Tests are targets that define expected behavior. If a test fails:
+- Fix the implementation to make the test pass
+- Do NOT change the test to match broken implementation
+- Do NOT mark a test as "trusted" or "expected fail" just to avoid fixing the real issue
+- Do NOT delete a test because it's inconvenient
+
+The ONLY acceptable reasons to modify a test are:
+1. The test itself has a bug (wrong expected behavior)
+2. Requirements have genuinely changed (confirmed by user)
+3. Adding MORE coverage to an existing test
+
+If you're tempted to weaken a test, STOP and fix the actual problem instead.
+
 ### Always Use Build Targets for Testing
 **Always use Makefile targets** (e.g., `make test`, `make test-cn`) rather than invoking test binaries directly. Build targets ensure proper dependencies are built first and use the correct invocation.
 

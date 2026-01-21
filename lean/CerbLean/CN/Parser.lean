@@ -105,14 +105,160 @@ def signedNumber : P Int := lexeme do
 
 /-! ## CN Type Parsers -/
 
-/-- Parse a simple C type (simplified: just identifier with optional pointer stars) -/
+/-- Sign specifiers for C types -/
+inductive CSignSpec where
+  | signed
+  | unsigned
+  deriving Repr, BEq
+
+/-- Size specifiers for C types -/
+inductive CSizeSpec where
+  | short
+  | long
+  | longLong
+  deriving Repr, BEq
+
+/-- Parse an optional sign specifier (signed/unsigned) -/
+def signSpec : P (Option CSignSpec) := optional (attempt do
+  let name ← ident
+  match name with
+  | "signed" => pure .signed
+  | "unsigned" => pure .unsigned
+  | _ => fail "not a sign specifier")
+
+/-- Parse an optional size specifier (short/long/long long) -/
+def sizeSpec : P (Option CSizeSpec) := optional (attempt do
+  let name ← ident
+  match name with
+  | "short" => pure .short
+  | "long" =>
+    -- Check for "long long"
+    let next ← optional (attempt (keyword "long"))
+    if next.isSome then pure .longLong else pure .long
+  | _ => fail "not a size specifier")
+
+/-- Parse pointer stars and return the count -/
+def pointerStars : P Nat := do
+  let stars ← many (lexeme (pchar '*'))
+  pure stars.toList.length
+
+/-- Build a Ctype from sign, size, base type name, and pointer depth -/
+def buildCtype (sign : Option CSignSpec) (size : Option CSizeSpec) (baseName : String) (ptrDepth : Nat) : Ctype :=
+  -- First, determine the base integer type
+  let intKind : IntBaseKind := match size with
+    | some .short => .short
+    | some .long => .long
+    | some .longLong => .longLong
+    | none => .int_
+
+  let intType : IntegerType := match sign with
+    | some .unsigned => .unsigned intKind
+    | _ => .signed intKind  -- Default to signed
+
+  -- Build the base type
+  let baseType : Ctype := match baseName with
+    | "void" => .void
+    | "char" =>
+      let charSign := sign.getD .signed
+      .basic (.integer (if charSign == .unsigned then .unsigned .ichar else .signed .ichar))
+    | "int" | "" => .basic (.integer intType)  -- "" means just sign/size without explicit "int"
+    | "float" => .basic (.floating (.realFloating .float))
+    | "double" =>
+      -- "long double" is a thing
+      if size == some .long
+      then .basic (.floating (.realFloating .longDouble))
+      else .basic (.floating (.realFloating .double))
+    | _ =>
+      -- Treat as struct tag for now (could also be typedef)
+      .struct_ { id := 0, name := some baseName }
+
+  -- Apply pointer indirection
+  let rec addPointers (ct : Ctype) (n : Nat) : Ctype :=
+    match n with
+    | 0 => ct
+    | n + 1 => addPointers (.pointer {} ct) n
+
+  addPointers baseType ptrDepth
+
+/-- Parse a C type with full support for sign/size specifiers and pointers.
+
+    Grammar:
+    ```
+    ctype = [sign_spec] [size_spec] [base_type] ["*"]*
+          | "struct" IDENT ["*"]*
+          | "union" IDENT ["*"]*
+          | IDENT ["*"]*
+    ```
+
+    Examples:
+    - `int` → signed int
+    - `signed int` → signed int
+    - `unsigned long` → unsigned long int
+    - `long long` → signed long long int
+    - `int*` → pointer to signed int
+    - `struct point` → struct point
+    - `struct point*` → pointer to struct point
+-/
+def parseCtype : P Ctype := do
+  ws
+  -- Try struct/union first
+  let structOrUnion ← optional (attempt do
+    let kw ← ident
+    if kw == "struct" || kw == "union" then
+      let tag ← ident
+      let ptrDepth ← pointerStars
+      let baseCt := Ctype.struct_ { id := 0, name := some tag }
+      pure (buildCtype none none "" ptrDepth |> fun _ => -- Ignore result, use struct directly
+        let rec addPointers (ct : Ctype) (n : Nat) : Ctype :=
+          match n with
+          | 0 => ct
+          | n + 1 => addPointers (.pointer {} ct) n
+        addPointers baseCt ptrDepth)
+    else
+      fail "not struct/union")
+
+  match structOrUnion with
+  | some ct => pure ct
+  | none =>
+    -- Parse optional sign specifier
+    let sign ← signSpec
+
+    -- Parse optional size specifier
+    let size ← sizeSpec
+
+    -- Parse optional base type name
+    -- If we have sign or size but no base name, it defaults to "int"
+    let baseName ← optional (attempt do
+      let name ← ident
+      -- Make sure it's a type name, not a keyword or variable
+      if name ∈ ["int", "char", "void", "float", "double"] then
+        pure name
+      else if sign.isNone && size.isNone then
+        -- No sign/size, so this could be a typedef name
+        pure name
+      else
+        fail "not a base type name")
+
+    -- If we got nothing, fail
+    if sign.isNone && size.isNone && baseName.isNone then
+      fail "expected type"
+
+    -- Parse pointer stars
+    let ptrDepth ← pointerStars
+
+    -- Build the type
+    let finalBaseName := baseName.getD (if sign.isSome || size.isSome then "int" else "")
+    pure (buildCtype sign size finalBaseName ptrDepth)
+
+/-- Parse a simple C type (for backward compatibility, now delegates to parseCtype) -/
 def ctypeStr : P String := lexeme do
+  -- This is kept for any code that needs string representation
   let base ← ident
   let stars ← manyChars (satisfy (· == '*'))
   pure (base ++ stars)
 
-/-- Parse a CN base type -/
-def baseType : P BaseType := do
+/-- Parse a CN base type (for CN-specific type names like i32, u64, etc.) -/
+def cnBaseType : P BaseType := do
   let name ← ident
   match name with
   | "void" => pure .unit
@@ -317,17 +463,23 @@ def predName : P ResourceName := do
   let name ← ident
   match name with
   | "Owned" =>
-    let _ ← optional do
+    -- Parse optional type parameter: Owned<type>
+    let ct ← optional do
       symbol "<"
-      let _ ← ctypeStr
+      let ct ← parseCtype
       symbol ">"
-    pure (.owned mkIntCtype .init)
+      pure ct
+    -- Default to signed int if no type specified
+    pure (.owned (ct.getD mkIntCtype) .init)
   | "Block" =>
-    let _ ← optional do
+    -- Parse optional type parameter: Block<type>
+    let ct ← optional do
       symbol "<"
-      let _ ← ctypeStr
+      let ct ← parseCtype
       symbol ">"
-    pure (.owned mkIntCtype .uninit)
+      pure ct
+    -- Block represents uninitialized memory
+    pure (.owned (ct.getD mkIntCtype) .uninit)
   | _ =>
     if name.front.isUpper then
       pure (.pname (mkSym name))
