@@ -188,15 +188,16 @@ def checkNoLeakedResources : TypingM Unit := do
     -- A strict implementation would fail here
     TypingM.fail (.other s!"Leaked resources: {ctx.resources.length} resource(s) not consumed")
 
-/-- Type check a function body against its specification.
+/-- Type check a function body against its specification (CPS style).
 
     The process:
     1. Start with initial resources (from caller)
     2. Process precondition: add resources to context
-    3. Check body expression: track resources through execution
-    4. Process postcondition: verify final resources match
-    5. Verify all constraints are provable
-    6. Check no resources leaked
+    3. Check body expression with postcondition continuation
+    4. At each exit point, the continuation:
+       - Processes postcondition (verify final resources)
+       - Verifies all constraints
+       - Checks no resources leaked
 
     Corresponds to: check_procedure in check.ml lines 2377-2426 -/
 def checkFunction
@@ -218,20 +219,20 @@ def checkFunction
     }
 
     let computation : TypingM Unit := do
-      -- 1. Process precondition: consume initial resources, bind outputs
+      -- 1. Process precondition: add resources to context, bind outputs
       processPrecondition spec.requires loc
 
-      -- 2. Check the body expression
-      let _returnVal ← checkExpr body
+      -- 2. Check the body with a continuation that handles postcondition
+      --    The continuation is called at each exit point of the function
+      let postconditionK (_returnVal : IndexTerm) : TypingM Unit := do
+        -- Process postcondition: consume final resources
+        processPostcondition spec.ensures loc
+        -- Verify all accumulated constraints
+        verifyConstraints
+        -- Check no resources leaked (must all be consumed or returned)
+        checkNoLeakedResources
 
-      -- 3. Process postcondition: produce final resources
-      processPostcondition spec.ensures loc
-
-      -- 4. Verify all accumulated constraints
-      verifyConstraints
-
-      -- 5. Check no resources leaked (must all be consumed or returned)
-      checkNoLeakedResources
+      checkExprK body postconditionK
 
     match TypingM.run computation initialState with
     | .ok (_, finalState) =>
