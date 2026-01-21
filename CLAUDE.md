@@ -576,6 +576,8 @@ If string manipulation is needed:
 - Write a proper Lean program to do the transformation
 - Or wrap the shell commands in a well-designed, tested shell script in `scripts/`
 
+Always run long-running commands in the background, and work on other tasks. Do not wait for a task unless it is blocking further progress. 
+
 ### Building
 
 Use the top-level Makefile:

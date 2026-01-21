@@ -11,6 +11,7 @@ import CerbLean.Parser
 import CerbLean.Core
 import CerbLean.CN.Parser
 import CerbLean.CN.PrettyPrint
+import CerbLean.CN.TypeChecking
 
 namespace CerbLean.Test.CN
 
@@ -18,6 +19,7 @@ open CerbLean.Parser
 open CerbLean.Core
 open CerbLean.CN.Parser
 open CerbLean.CN.PrettyPrint
+open CerbLean.CN.TypeChecking
 
 /-! ## Unit Test Cases -/
 
@@ -63,34 +65,52 @@ def unitTestCases : List (String × String) := [
 
 /-! ## Unit Tests -/
 
-/-- Run unit tests on the CN parser -/
+/-- Run unit tests on the CN parser and type checker -/
 def runUnitTests : IO UInt32 := do
-  IO.println "=== CN Parser Unit Tests ==="
+  IO.println "=== CN Parser & Type Checker Unit Tests ==="
   IO.println ""
 
-  let mut passed := 0
-  let mut failed := 0
+  let mut parsePassed := 0
+  let mut parseFailed := 0
+  let mut checkPassed := 0
+  let mut checkFailed := 0
 
   for (name, input) in unitTestCases do
     IO.print s!"Test '{name}': "
     match parseFunctionSpec input with
     | .ok spec =>
-      IO.println "PASS"
+      parsePassed := parsePassed + 1
+      IO.println "PARSE OK"
       IO.println s!"  requires: {spec.requires.clauses.length} clauses"
       IO.println s!"  ensures: {spec.ensures.clauses.length} clauses"
       IO.println s!"  trusted: {spec.trusted}"
       IO.println s!"  pretty: {ppFunctionSpec spec}"
-      passed := passed + 1
+
+      -- Run type checker
+      let result := checkSpecStandalone spec .trivial
+      if result.success then
+        checkPassed := checkPassed + 1
+        IO.println s!"  typecheck: PASS"
+      else
+        checkFailed := checkFailed + 1
+        IO.println s!"  typecheck: FAIL"
+        match result.error with
+        | some (.missingResource req _) => IO.println s!"    error: missing resource"
+        | some (.unprovableConstraint _ _) => IO.println s!"    error: unprovable constraint"
+        | some (.unboundVariable sym) => IO.println s!"    error: unbound variable {sym.name.getD "<unknown>"}"
+        | some (.other msg) => IO.println s!"    error: {msg}"
+        | none => IO.println s!"    error: unknown"
+
     | .error e =>
-      IO.println s!"FAIL: {e}"
-      failed := failed + 1
+      parseFailed := parseFailed + 1
+      IO.println s!"PARSE FAIL: {e}"
     IO.println ""
 
   IO.println "=== Summary ==="
-  IO.println s!"Passed: {passed}"
-  IO.println s!"Failed: {failed}"
+  IO.println s!"Parse: {parsePassed} passed, {parseFailed} failed"
+  IO.println s!"TypeCheck: {checkPassed} passed, {checkFailed} failed"
 
-  return if failed > 0 then 1 else 0
+  return if parseFailed > 0 || checkFailed > 0 then 1 else 0
 
 /-! ## JSON Integration Tests -/
 
@@ -107,6 +127,8 @@ def runJsonTest (jsonPath : String) : IO UInt32 := do
     let mut count := 0
     let mut parseSuccess := 0
     let mut parseFail := 0
+    let mut checkSuccess := 0
+    let mut checkFail := 0
     for (sym, funInfo) in file.funinfo.toList do
       if !funInfo.cnMagic.isEmpty then
         count := count + 1
@@ -123,6 +145,20 @@ def runJsonTest (jsonPath : String) : IO UInt32 := do
             IO.println s!"  trusted: {spec.trusted}"
             IO.println "--- Pretty-printed ---"
             IO.println (ppFunctionSpec spec)
+            IO.println "--- Type Check ---"
+            let result := checkSpecStandalone spec .trivial
+            if result.success then
+              checkSuccess := checkSuccess + 1
+              IO.println "  PASS (with trivial oracle)"
+            else
+              checkFail := checkFail + 1
+              IO.println "  FAIL"
+              match result.error with
+              | some (.missingResource _ _) => IO.println "    error: missing resource"
+              | some (.unprovableConstraint _ _) => IO.println "    error: unprovable constraint"
+              | some (.unboundVariable sym) => IO.println s!"    error: unbound variable {sym.name.getD "<unknown>"}"
+              | some (.other msg) => IO.println s!"    error: {msg}"
+              | none => IO.println "    error: unknown"
           | .error e =>
             parseFail := parseFail + 1
             IO.println s!"  PARSE ERROR: {e}"
@@ -133,8 +169,9 @@ def runJsonTest (jsonPath : String) : IO UInt32 := do
       IO.println "Note: Use --switches=at_magic_comments when running Cerberus"
     else
       IO.println s!"Total: {count} function(s) with CN annotations"
-      IO.println s!"Parse success: {parseSuccess}, failures: {parseFail}"
-    return if parseFail > 0 then 1 else 0
+      IO.println s!"Parse: {parseSuccess} success, {parseFail} failures"
+      IO.println s!"TypeCheck: {checkSuccess} success, {checkFail} failures"
+    return if parseFail > 0 || checkFail > 0 then 1 else 0
 
 /-! ## Main Entry Point -/
 

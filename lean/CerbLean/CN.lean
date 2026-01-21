@@ -18,8 +18,10 @@
 
 import CerbLean.CN.BaseTypes
 import CerbLean.CN.Terms
+import CerbLean.CN.LogicalConstraints
 import CerbLean.CN.Request
 import CerbLean.CN.Spec
 import CerbLean.CN.Parser
 import CerbLean.CN.PrettyPrint
 import CerbLean.CN.Semantics
+import CerbLean.CN.TypeChecking
