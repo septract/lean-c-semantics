@@ -51,7 +51,15 @@ echo "Testing ${#TEST_FILES[@]} file(s)"
 echo ""
 
 for TEST_FILE in "${TEST_FILES[@]}"; do
-    echo "=== Testing: $(basename "$TEST_FILE") ==="
+    BASENAME=$(basename "$TEST_FILE")
+    echo "=== Testing: $BASENAME ==="
+
+    # Determine if this is an expected-failure test
+    EXPECT_FAIL=""
+    if [[ "$BASENAME" == *.fail.c ]]; then
+        EXPECT_FAIL="--expect-fail"
+        echo "  (expecting failure)"
+    fi
 
     # Check test file exists
     if [ ! -f "$TEST_FILE" ]; then
@@ -69,8 +77,8 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
         continue
     fi
 
-    # Run Lean test on JSON
-    if "$TEST_CN" "$TMP_JSON" 2>&1; then
+    # Run Lean test on JSON (with --expect-fail for .fail.c files)
+    if "$TEST_CN" $EXPECT_FAIL "$TMP_JSON" 2>&1; then
         TOTAL_PASS=$((TOTAL_PASS + 1))
     else
         echo "  ERROR: Lean test failed"

@@ -122,15 +122,17 @@ structure TypingState where
   context : Context
   /-- Proof oracle for constraint checking -/
   oracle : ProofOracle
+  /-- Counter for generating fresh symbols -/
+  freshCounter : Nat := 0
   deriving Inhabited
 
 namespace TypingState
 
 def empty (oracle : ProofOracle := .trivial) : TypingState :=
-  { context := Context.empty, oracle := oracle }
+  { context := Context.empty, oracle := oracle, freshCounter := 0 }
 
 def withContext (ctx : Context) (oracle : ProofOracle := .trivial) : TypingState :=
-  { context := ctx, oracle := oracle }
+  { context := ctx, oracle := oracle, freshCounter := 0 }
 
 end TypingState
 
@@ -287,20 +289,18 @@ def pure_ (m : TypingM α) : TypingM α := do
   setState s
   return result
 
-/-- Run a computation and return whether it succeeds, without modifying state
+/-- Run a computation and return whether it succeeds, without modifying state.
+    Properly captures and returns the actual error if the computation fails.
     Corresponds to: sandbox in typing.ml lines 75-91 -/
 def sandbox (m : TypingM α) : TypingM (Except TypeError α) := do
   let s ← getState
-  let result : Except TypeError α ← (do
+  -- Use try/catch to properly capture the actual error
+  try
     let a ← m
-    return Except.ok a) <|> (do
-    return Except.error (TypeError.other "failed"))
-  match result with
-  | Except.ok a =>
-    setState s
+    setState s  -- Restore state even on success (sandbox doesn't modify state)
     return Except.ok a
-  | Except.error e =>
-    setState s
+  catch e =>
+    setState s  -- Restore state on failure
     return Except.error e
 
 end TypingM

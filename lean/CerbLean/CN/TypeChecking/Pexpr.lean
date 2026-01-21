@@ -39,7 +39,7 @@ Corresponds to: value handling in check.ml
 
 /-- Convert a Core Value to a CN Const.
     Corresponds to: value cases in check.ml -/
-def valueToConst (v : Value) (loc : Core.Loc) : Except TypeError Const := do
+def valueToConst (v : Value) (_loc : Core.Loc) : Except TypeError Const := do
   match v with
   | .unit => return .unit
   | .true_ => return .bool true
@@ -52,13 +52,15 @@ def valueToConst (v : Value) (loc : Core.Loc) : Except TypeError Const := do
     | .null _ => return .null
     | .concrete _ addr =>
       -- Convert provenance to allocation ID
+      -- Corresponds to: pointer value conversion in check.ml
+      -- Provenance is REQUIRED for memory safety verification
       match pv.prov with
       | .some allocId => return .pointer ⟨allocId, addr⟩
-      | _ => return .pointer ⟨0, addr⟩  -- Use 0 for unknown provenance
-    | .function _sym =>
-      -- Function pointers - represent as a special term
-      -- For now, just use a default pointer
-      return .pointer ⟨0, 0⟩
+      | _ => throw (.other "Pointer with unknown provenance - cannot verify memory safety")
+    | .function sym =>
+      -- Function pointers are not yet supported in CN verification
+      -- Corresponds to: check.ml does not handle function pointers in pure expressions
+      throw (.other s!"Function pointer {repr sym} not yet supported in CN verification")
   | .ctype ct => return .ctypeConst ct
   | .list _ _ => throw (.other "List values not yet supported")
   | .tuple _ => throw (.other "Tuple values not yet supported")
@@ -91,7 +93,7 @@ Convert Core binary operators to CN binary operators.
 
 /-- Convert Core Binop to CN BinOp.
     Returns the operator and the result base type given operand types. -/
-def convertBinop (op : Binop) (bt1 bt2 : BaseType) (loc : Core.Loc)
+def convertBinop (op : Binop) (bt1 _bt2 : BaseType) (_loc : Core.Loc)
     : Except TypeError (BinOp × BaseType) := do
   match op with
   -- Arithmetic
