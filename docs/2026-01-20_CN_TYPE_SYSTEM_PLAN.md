@@ -123,23 +123,35 @@ CN type checking for load:
 
 | File | Purpose | Level | Status |
 |------|---------|-------|--------|
-| `Context.lean` | Typing context data structure | Infrastructure | ✓ Correct |
-| `Monad.lean` | TypingM monad + ProofOracle | Infrastructure | ✓ Correct |
-| `Inference.lean` | Resource matching algorithm | Level 2 (SL) | ✓ Correct |
-| `Check.lean` | Spec clause processing | Level 2 (SL) | Partial |
+| `Context.lean` | Typing context data structure | Infrastructure | ✅ Complete |
+| `Monad.lean` | TypingM monad + ProofOracle | Infrastructure | ✅ Complete (incl. ParamValueMap) |
+| `Inference.lean` | Resource matching algorithm | Level 2 (SL) | ✅ Complete |
+| `Check.lean` | Spec clause processing | Level 2 (SL) | ✅ Complete |
+| `Pexpr.lean` | Pure expression → IndexTerm | Level 2 (SL) | ✅ Complete |
+| `Action.lean` | Memory action checking | Level 2 (SL) | ✅ Complete |
+| `Expr.lean` | Effectful expression walking | Level 2 (SL) | ✅ Complete (basic) |
+| `Params.lean` | Function parameter handling | Level 2 (SL) | ✅ Complete |
 
-### What's Missing
+### What's Working
 
 **Level 1 (Traditional Type Checking)**:
-- We don't have explicit `ensure_base_type` / `check_term` / `infer_term`
-- Currently our IndexTerms are already typed (they carry `bt : BaseType`)
-- **Decision**: Use construction-time typing - IndexTerms are well-typed by construction
+- IndexTerms are typed by construction (carry `bt : BaseType`)
+- No explicit runtime type checking needed - construction-time typing is sufficient
 
 **Level 2 (Separation Logic - Core Walking)**:
-- `check_expr` - walk effectful Core expressions
-- `check_pexpr` - walk pure Core expressions
-- Memory action handling (create, kill, store, load)
-- Pattern matching and variable binding
+- ✅ `check_expr` - walk effectful Core expressions
+- ✅ `check_pexpr` - walk pure Core expressions
+- ✅ Memory action handling (create, kill, store, load)
+- ✅ Pattern matching and variable binding
+- ✅ Resource leak detection at function end
+- ✅ Lazy muCore transformation for parameters
+
+### Remaining Work
+
+- Branch resource checking (both branches should agree)
+- Non-deterministic choice (check all branches)
+- Function calls with specifications
+- Representability checks
 
 ## Implementation Plan
 
@@ -198,15 +210,16 @@ Wire everything together for function verification:
 ## File Structure
 
 ```
-CerbLean/CN/Typing/
-├── Context.lean      ✓ Done - typing context
-├── Monad.lean        ✓ Done - typing monad + oracle
-├── Inference.lean    ✓ Done - resource inference
-├── Check.lean        ✓ Done - spec clause processing (needs update)
-├── Pexpr.lean        NEW - pure expression checking
-├── Action.lean       NEW - memory action checking
-├── Expr.lean         NEW - effectful expression checking
-└── Typing.lean       ✓ Done - re-exports
+CerbLean/CN/TypeChecking/
+├── Context.lean      ✅ Done - typing context
+├── Monad.lean        ✅ Done - typing monad + oracle + ParamValueMap
+├── Inference.lean    ✅ Done - resource inference
+├── Check.lean        ✅ Done - spec clause processing
+├── Pexpr.lean        ✅ Done - pure expression checking
+├── Action.lean       ✅ Done - memory action checking
+├── Expr.lean         ✅ Done - effectful expression checking
+├── Params.lean       ✅ Done - function parameter handling
+└── TypeChecking.lean ✅ Done - re-exports
 ```
 
 ## Correspondence to CN OCaml
@@ -223,21 +236,21 @@ CerbLean/CN/Typing/
 
 ## Success Criteria
 
-1. **Level 1**: IndexTerms are well-typed by construction (already done)
+1. **Level 1**: IndexTerms are well-typed by construction ✅ DONE
 
 2. **Level 2**: Can verify simple functions with:
-   - Memory allocation (`create`)
-   - Memory write (`store`)
-   - Memory read (`load`)
-   - Memory deallocation (`kill`)
-   - Sequential composition (`wseq`/`sseq`)
-   - Conditionals (`if`)
+   - Memory allocation (`create`) ✅ DONE
+   - Memory write (`store`) ✅ DONE
+   - Memory read (`load`) ✅ DONE
+   - Memory deallocation (`kill`) ✅ DONE (via free_proxy)
+   - Sequential composition (`wseq`/`sseq`) ✅ DONE
+   - Conditionals (`if`) ✅ DONE
 
 3. **Error detection**:
-   - Use-after-free: load/store after kill
-   - Double-free: kill after kill
-   - Memory leak: resources remain at function end
-   - Uninitialized read: load before store
+   - Use-after-free: load/store after kill ✅ TESTED (011-use-after-free.fail.c)
+   - Double-free: kill after kill ✅ TESTED (010-double-free.fail.c)
+   - Memory leak: resources remain at function end ✅ TESTED (014-resource-leak.fail.c)
+   - Uninitialized read: load before store ✅ TESTED (012-read-uninit.fail.c)
 
 ## Scope
 
