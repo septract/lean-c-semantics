@@ -10,12 +10,7 @@ rev = "v4.26.0"
 
 [[require]]
 name = "smt"
-scope = "ufmg-smite"
-rev = "main"
-
-[[require]]
-name = "batteries"
-git = "https://github.com/leanprover-community/batteries"
+git = "https://github.com/ufmg-smite/lean-smt"
 rev = "main"
 
 [[lean_lib]]
