@@ -1,11 +1,23 @@
 # CN Parameter Handling Audit
 
 **Date**: 2026-01-20
-**Status**: Discrepancy identified, fix planned
+**Status**: ✅ FIXED - Lazy muCore transformation implemented (commit b213542)
 
 ## Summary
 
-Our `Params.lean` implementation doesn't match CN's approach to parameter handling. CN transforms loads at compile time; we tried to use resources at type-checking time.
+~~Our `Params.lean` implementation doesn't match CN's approach to parameter handling. CN transforms loads at compile time; we tried to use resources at type-checking time.~~
+
+**UPDATE**: The fix has been implemented. We now use a "lazy muCore transformation" that:
+1. Maps stack slot symbol IDs to value terms in `ParamValueMap`
+2. Intercepts loads from parameter stack slots in `handleLoad`
+3. Returns the parameter value directly without resource tracking
+
+This matches CN's `C_vars.Value` pattern from `cn/lib/compile.ml`.
+
+See:
+- `Monad.lean`: Added `ParamValueMap` type and accessors
+- `Action.lean:265-282`: Modified `handleLoad` to check for parameter loads
+- `Params.lean`: Sets up the mapping when processing function parameters
 
 ## CN's Approach (core_to_mucore.ml)
 
