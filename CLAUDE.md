@@ -249,6 +249,33 @@ cd lean && .lake/build/bin/cerblean_memtest # Run directly
 ```
 Tests include: layout (sizeof/alignof), allocation, store/load roundtrip, null dereference detection, use-after-free detection, double-free detection, out-of-bounds detection, read-only protection, pointer arithmetic.
 
+**CN Verification Tests** (`make test-cn`):
+Tests for the CN separation logic type system implementation.
+```bash
+make test-cn                              # Run all CN tests
+./scripts/test_cn.sh --all                # Run all tests in tests/cn/
+./scripts/test_cn.sh /path/to/test.c      # Run a specific test
+```
+
+Test files in `tests/cn/` follow these conventions:
+- `NNN-description.c` - Tests expected to pass
+- `NNN-description.fail.c` - Tests expected to fail (e.g., double-free, use-after-free)
+
+The `.fail.c` suffix indicates the test should fail verification. The test infrastructure automatically passes `--expect-fail` to the test runner for these files.
+
+Example test structure:
+```c
+// tests/cn/001-simple-owned.c
+int read(int *p)
+/*@ requires take v = Owned<signed int>(p);
+    ensures take v2 = Owned<signed int>(p);
+            v == v2;
+            return == v; @*/
+{ return *p; }
+```
+
+See `docs/2026-01-20_CN_TYPECHECKING_AUDIT.md` for known issues and implementation status.
+
 **Investigating Pretty-Printer Mismatches**:
 The test script outputs files to a temp directory. To investigate a specific mismatch:
 ```bash
