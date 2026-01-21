@@ -100,17 +100,19 @@ def runUnitTests : IO UInt32 := do
         | some (.unboundVariable sym) => IO.println s!"    error: unbound variable {sym.name.getD "<unknown>"}"
         | some (.other msg) => IO.println s!"    error: {msg}"
         | none => IO.println s!"    error: unknown"
-
     | .error e =>
       parseFailed := parseFailed + 1
-      IO.println s!"PARSE FAIL: {e}"
+      IO.println s!"PARSE FAILED: {e}"
     IO.println ""
 
   IO.println "=== Summary ==="
   IO.println s!"Parse: {parsePassed} passed, {parseFailed} failed"
   IO.println s!"TypeCheck: {checkPassed} passed, {checkFailed} failed"
 
-  return if parseFailed > 0 || checkFailed > 0 then 1 else 0
+  if parseFailed > 0 || checkFailed > 0 then
+    return 1
+  else
+    return 0
 
 /-! ## Helper: Find Function Body and Parameters -/
 
@@ -132,90 +134,6 @@ def findFunctionInfo (file : Core.File) (name : Option String) : Option Function
       | _ => none  -- ProcDecl, BuiltinDecl have no body
     else
       none
-
-/-- Convert Core.BaseType to CN.Types.BaseType.
-    Returns none for unsupported types. -/
-def coreBaseTypeToCN (bt : Core.BaseType) : Option CN.Types.BaseType :=
-  match bt with
-  | .unit => some .unit
-  | .boolean => some .bool
-  | .ctype => some .ctype
-  | .object .integer => some .integer
-  | .object .pointer => some .loc
-  | .object .floating => some .real
-  | .object (.struct_ tag) => some (.struct_ tag)
-  | .loaded _ => some .loc
-  -- Unsupported types - return none to signal error
-  | .list _ => none
-  | .tuple _ => none
-  | .object (.array _) => none
-  | .object (.union_ _) => none
-  | .storable => none
-
-/-- Check a function with parameters bound to the context -/
-def checkFunctionWithParams
-    (spec : CN.Types.FunctionSpec)
-    (body : Core.AExpr)
-    (params : List (Core.Sym × Core.BaseType))
-    (loc : Core.Loc)
-    (oracle : ProofOracle := .trivial)
-    : TypeCheckResult :=
-  -- For trusted specs, skip verification
-  if spec.trusted then
-    { success := true
-    , finalContext := Context.empty
-    , error := none }
-  else
-    -- Synthesize initial resources from precondition
-    let initialResources := extractPreconditionResources spec
-
-    -- Convert parameters and check for unsupported types
-    let convertedParams : Except String (List (Core.Sym × CN.Types.BaseType)) :=
-      params.foldlM (fun acc (sym, bt) =>
-        match coreBaseTypeToCN bt with
-        | some cnBt => .ok ((sym, cnBt) :: acc)
-        | none => .error s!"Unsupported parameter type for {sym.name.getD "<unknown>"}: {repr bt}"
-      ) []
-
-    match convertedParams with
-    | .error msg =>
-      { success := false
-      , finalContext := Context.empty
-      , error := some (.other msg) }
-    | .ok cnParams =>
-      -- Create initial context with parameters bound
-      let initialCtx := cnParams.foldl (fun ctx (sym, cnBt) =>
-        ctx.addA sym cnBt ⟨loc, s!"parameter {sym.name.getD ""}"⟩
-      ) { Context.empty with resources := initialResources }
-
-      -- Run type checking
-      let initialState : TypingState := {
-        context := initialCtx
-        oracle := oracle
-      }
-
-      let computation : TypingM Unit := do
-        -- 1. Process precondition: consume initial resources, bind outputs
-        processPrecondition spec.requires loc
-
-        -- 2. Check the body expression
-        let _returnVal ← checkExpr body
-
-        -- 3. Process postcondition: produce final resources
-        processPostcondition spec.ensures loc
-
-        -- 4. Verify all accumulated constraints
-        verifyConstraints
-
-      match TypingM.run computation initialState with
-      | .ok (_, finalState) =>
-        { success := true
-        , finalContext := finalState.context
-        , error := none }
-      | .error err =>
-        { success := false
-        , finalContext := Context.empty
-        , error := some err }
 
 /-- Format a type error for display -/
 def formatTypeError : TypeError → String
@@ -308,33 +226,37 @@ def runJsonTest (jsonPath : String) (expectFail : Bool := false) : IO UInt32 := 
       IO.println s!"Parse: {parseSuccess} success, {parseFail} failures"
       IO.println s!"Verify: {verifySuccess} success, {verifyFail} failures"
 
-      -- Determine overall result based on expectFail
-      let hadFailures := parseFail > 0 || verifyFail > 0
+      -- Return code based on expectations
       if expectFail then
-        -- For .fail.c tests: we WANT verification failures
-        if hadFailures then
+        -- For .fail.c tests: pass if verification failed
+        if verifyFail > 0 then
           IO.println "=== EXPECTED FAILURE - TEST PASSED ==="
           return 0
         else
-          IO.println "=== EXPECTED FAILURE BUT GOT SUCCESS - TEST FAILED ==="
+          IO.eprintln "=== EXPECTED FAILURE BUT PASSED - TEST FAILED ==="
           return 1
       else
-        -- For normal tests: we want success
-        return if hadFailures then 1 else 0
+        -- Normal tests: pass if verification succeeded
+        if verifyFail > 0 then
+          return 1
+        else
+          return 0
 
 /-! ## Main Entry Point -/
 
-/-- Main entry point: run unit tests or JSON test based on args -/
 def main (args : List String) : IO UInt32 := do
   match args with
-  | [] => runUnitTests
-  | [jsonPath] => runJsonTest jsonPath false
-  | ["--expect-fail", jsonPath] => runJsonTest jsonPath true
-  | [jsonPath, "--expect-fail"] => runJsonTest jsonPath true
+  | [] =>
+    -- No arguments: run unit tests
+    runUnitTests
+  | ["--expect-fail", jsonPath] =>
+    -- Expected failure mode for .fail.c tests
+    runJsonTest jsonPath (expectFail := true)
+  | [jsonPath] =>
+    -- JSON file provided: run integration test
+    runJsonTest jsonPath
   | _ =>
-    IO.eprintln "Usage: test_cn                       Run unit tests"
-    IO.eprintln "       test_cn <json_file>           Test CN annotations from JSON"
-    IO.eprintln "       test_cn --expect-fail <json>  Test expecting failure"
+    IO.eprintln "Usage: test_cn [--expect-fail] [<json_file>]"
     return 1
 
 end CerbLean.Test.CN
