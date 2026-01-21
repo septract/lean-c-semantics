@@ -1,22 +1,39 @@
 /-
   Parameter handling for CN type checking.
 
-  In Core IR, function parameters are passed by reference to stack slots.
-  This module handles the transformation from Core IR's parameter representation
-  to CN's muCore-style where parameters are directly available as values.
+  This module implements the "lazy muCore transformation" for function parameters.
 
-  The key transformation:
-  - Core IR: parameter `p` is a stack slot address, value obtained via `load(T, p)`
-  - CN/muCore: parameter `p` is directly the value
+  ## Background
 
-  We scan function bodies to:
-  1. Track aliases through `let x = pure(p)` and `wseq`/`sseq` patterns
-  2. Extract C types from the first `load(T, p)` operations
-  3. Set up implicit resources for parameter stack slots
+  In Core IR (from Cerberus), function parameters are stored in stack slots:
+  - Parameter `p` of type `T*` is represented as a stack slot address
+  - The actual pointer value is obtained by `load(T*, p_slot)`
 
-  This corresponds to CN's core_to_mucore transformation.
+  In CN's muCore representation, parameters are direct values:
+  - Parameter `p` IS the pointer value directly
 
-  Audited: 2026-01-20 (new file for Issue 20)
+  CN's `core_to_mucore.ml` transforms Core to muCore by:
+  1. Mapping stack slot symbols to value symbols via `C_vars.Value`
+  2. Replacing `load(T, stack_slot)` with the value symbol
+
+  ## Our Approach: Lazy Transformation
+
+  Instead of transforming the AST upfront, we:
+  1. Build a `ParamValueMap` mapping stack slot IDs → value terms
+  2. Track aliases (e.g., `let a = pure(p)` means `a` aliases `p`)
+  3. In `handleLoad`, check if the pointer is a mapped symbol and return the value directly
+
+  This is semantically equivalent to CN's approach but done lazily during type checking.
+
+  ## Correspondence to CN
+
+  | CN (core_to_mucore.ml)              | Our Implementation                    |
+  |-------------------------------------|---------------------------------------|
+  | `C_vars.Value(pure_arg, sbt)`       | `ParamValueMap` entry                 |
+  | `C_vars.add [(mut_arg, state)]`     | `addParamValue` in TypingM            |
+  | Transform at translation time       | Transform at load time (lazy)         |
+
+  Audited: 2026-01-20 against cn/lib/core_to_mucore.ml lines 745-786
 -/
 
 import CerbLean.Core
@@ -32,44 +49,10 @@ open CerbLean.CN.Types
 
 /-! ## Type Aliases -/
 
-/-- Mapping from parameter symbol ID to its C type (from first load) -/
-abbrev ParamCtypeMap := Std.HashMap Nat Core.Ctype
-
 /-- Mapping from symbol ID to what it aliases (for tracking `let x = pure(p)` patterns) -/
 abbrev AliasMap := Std.HashMap Nat Nat
 
-/-- State for scanning: tracks both C types found and aliases -/
-structure ScanState where
-  ctypes : ParamCtypeMap
-  aliases : AliasMap
-  deriving Inhabited
-
 /-! ## Helper Functions -/
-
-/-- Extract Ctype from an APexpr that should contain a Ctype value.
-    The expression should be `PEval (Vctype ct)`. -/
-def extractCtypeFromExpr (e : Core.APexpr) : Option Core.Ctype :=
-  match e.expr with
-  | .val (.ctype ct) => some ct
-  | _ => none
-
-/-- Resolve a symbol through the alias chain to find the original parameter (if any).
-    Only follows two levels of aliasing to avoid termination issues. -/
-def resolveToParam (aliases : AliasMap) (paramIds : List Nat) (symId : Nat) : Option Nat :=
-  -- First check if symId is directly a parameter
-  if paramIds.contains symId then
-    some symId
-  else
-    -- Otherwise check if it's an alias to a parameter (one level)
-    match aliases.get? symId with
-    | some targetId =>
-      if paramIds.contains targetId then some targetId
-      else
-        -- Try one more level of aliasing
-        match aliases.get? targetId with
-        | some targetId2 => if paramIds.contains targetId2 then some targetId2 else none
-        | none => none
-    | none => none
 
 /-- Check if a pattern binds a single symbol -/
 def patternBindsSym (pat : Core.APattern) : Option Core.Sym :=
@@ -89,196 +72,81 @@ def isExprPureSym (e : Core.AExpr) : Option Core.Sym :=
   | .pure pe => isPureSym pe
   | _ => none
 
-/-- Try to track an alias from a let binding.
-    If we have `let x = pure(y)` where y is a parameter (or alias thereof),
-    record x as an alias for y. -/
-def tryTrackAlias (paramIds : List Nat) (acc : ScanState)
-    (boundSymOpt : Option Core.Sym) (srcSymOpt : Option Core.Sym) : ScanState :=
-  match boundSymOpt, srcSymOpt with
-  | some boundSym, some srcSym =>
-    -- Check if srcSym is a param or resolves to one
-    let targetId := (resolveToParam acc.aliases paramIds srcSym.id).getD srcSym.id
-    if paramIds.contains targetId || acc.aliases.contains srcSym.id then
-      { acc with aliases := acc.aliases.insert boundSym.id targetId }
-    else
-      acc
-  | _, _ => acc
+/-- Resolve a symbol through the alias chain to find the original parameter (if any).
+    Only follows a few levels of aliasing to avoid termination issues. -/
+def resolveToParam (aliases : AliasMap) (paramIds : List Nat) (symId : Nat) : Option Nat :=
+  -- First check if symId is directly a parameter
+  if paramIds.contains symId then
+    some symId
+  else
+    -- Otherwise check if it's an alias to a parameter (one level)
+    match aliases.get? symId with
+    | some targetId =>
+      if paramIds.contains targetId then some targetId
+      else
+        -- Try one more level of aliasing
+        match aliases.get? targetId with
+        | some targetId2 => if paramIds.contains targetId2 then some targetId2 else none
+        | none => none
+    | none => none
 
-/-! ## Scanning Functions -/
+/-! ## Alias Scanning
 
-/-- Scan a Pexpr for loads from parameter symbols, accumulating C types.
-    We only record the FIRST load from each parameter.
-    Also tracks aliasing through `pure(p)` patterns. -/
-partial def scanPexprForParamLoads
+We scan the function body to find all aliases of parameter symbols.
+This lets us handle patterns like:
+  let a_530 = pure(p)
+  ...
+  load(T, a_530)  -- a_530 is an alias of p
+-/
+
+/-- Scan an expression for alias bindings (let x = pure(p) patterns).
+    Returns a map from alias symbol ID to target symbol ID. -/
+partial def scanForAliases
     (paramIds : List Nat)
-    (acc : ScanState)
-    (e : Core.Pexpr) : ScanState :=
-  match e with
-  | .sym _ => acc
-  | .impl _ => acc
-  | .val _ => acc
-  | .undef _ _ => acc
-  | .error _ inner => scanPexprForParamLoads paramIds acc inner
-  | .ctor _ args => args.foldl (scanPexprForParamLoads paramIds) acc
-  | .case_ scrut branches =>
-    let acc := scanPexprForParamLoads paramIds acc scrut
-    branches.foldl (fun a (_, body) => scanPexprForParamLoads paramIds a body) acc
-  | .arrayShift ptr _ idx =>
-    let acc := scanPexprForParamLoads paramIds acc ptr
-    scanPexprForParamLoads paramIds acc idx
-  | .memberShift ptr _ _ => scanPexprForParamLoads paramIds acc ptr
-  | .not_ inner => scanPexprForParamLoads paramIds acc inner
-  | .op _ e1 e2 =>
-    let acc := scanPexprForParamLoads paramIds acc e1
-    scanPexprForParamLoads paramIds acc e2
-  | .struct_ _ members => members.foldl (fun a (_, v) => scanPexprForParamLoads paramIds a v) acc
-  | .union_ _ _ v => scanPexprForParamLoads paramIds acc v
-  | .cfunction inner => scanPexprForParamLoads paramIds acc inner
-  | .memberof _ _ inner => scanPexprForParamLoads paramIds acc inner
-  | .call _ args => args.foldl (scanPexprForParamLoads paramIds) acc
-  | .let_ _ e1 e2 =>
-    let acc := scanPexprForParamLoads paramIds acc e1
-    scanPexprForParamLoads paramIds acc e2
-  | .if_ c t e =>
-    let acc := scanPexprForParamLoads paramIds acc c
-    let acc := scanPexprForParamLoads paramIds acc t
-    scanPexprForParamLoads paramIds acc e
-  | .isScalar inner => scanPexprForParamLoads paramIds acc inner
-  | .isInteger inner => scanPexprForParamLoads paramIds acc inner
-  | .isSigned inner => scanPexprForParamLoads paramIds acc inner
-  | .isUnsigned inner => scanPexprForParamLoads paramIds acc inner
-  | .areCompatible e1 e2 =>
-    let acc := scanPexprForParamLoads paramIds acc e1
-    scanPexprForParamLoads paramIds acc e2
-  | .convInt _ inner => scanPexprForParamLoads paramIds acc inner
-  | .wrapI _ _ e1 e2 =>
-    let acc := scanPexprForParamLoads paramIds acc e1
-    scanPexprForParamLoads paramIds acc e2
-  | .catchExceptionalCondition _ _ e1 e2 =>
-    let acc := scanPexprForParamLoads paramIds acc e1
-    scanPexprForParamLoads paramIds acc e2
-  | .bmcAssume inner => scanPexprForParamLoads paramIds acc inner
-  | .pureMemop _ args => args.foldl (scanPexprForParamLoads paramIds) acc
-  | .constrained constraints => constraints.foldl (fun a (_, e) => scanPexprForParamLoads paramIds a e) acc
-
-def scanAPexprForParamLoads (paramIds : List Nat) (acc : ScanState) (e : Core.APexpr) : ScanState :=
-  scanPexprForParamLoads paramIds acc e.expr
-
-/-- Scan an action for loads from parameter symbols.
-    Uses alias tracking to handle `let x = pure(p)` patterns. -/
-def scanActionForParamLoads
-    (paramIds : List Nat)
-    (acc : ScanState)
-    (act : Core.Action) : ScanState :=
-  match act with
-  | .load tyExpr ptrExpr _ =>
-    -- Check if ptr resolves to a parameter through aliases
-    match ptrExpr.expr with
-    | .sym s =>
-      match resolveToParam acc.aliases paramIds s.id with
-      | some paramId =>
-        if !acc.ctypes.contains paramId then
-          -- Extract the C type from the type expression
-          match extractCtypeFromExpr tyExpr with
-          | some ct => { acc with ctypes := acc.ctypes.insert paramId ct }
-          | none => acc
-        else acc
-      | none => acc
-    | _ => acc
-  | .create _ size _ => scanAPexprForParamLoads paramIds acc size
-  | .createReadonly _ size init _ =>
-    let acc := scanAPexprForParamLoads paramIds acc size
-    scanAPexprForParamLoads paramIds acc init
-  | .alloc _ size _ => scanAPexprForParamLoads paramIds acc size
-  | .kill _ ptr => scanAPexprForParamLoads paramIds acc ptr
-  | .store _ ty ptr val _ =>
-    let acc := scanAPexprForParamLoads paramIds acc ty
-    let acc := scanAPexprForParamLoads paramIds acc ptr
-    scanAPexprForParamLoads paramIds acc val
-  | .rmw ty ptr expected desired _ _ =>
-    let acc := scanAPexprForParamLoads paramIds acc ty
-    let acc := scanAPexprForParamLoads paramIds acc ptr
-    let acc := scanAPexprForParamLoads paramIds acc expected
-    scanAPexprForParamLoads paramIds acc desired
-  | .fence _ => acc
-  | .compareExchangeStrong ty ptr expected desired _ _
-  | .compareExchangeWeak ty ptr expected desired _ _ =>
-    let acc := scanAPexprForParamLoads paramIds acc ty
-    let acc := scanAPexprForParamLoads paramIds acc ptr
-    let acc := scanAPexprForParamLoads paramIds acc expected
-    scanAPexprForParamLoads paramIds acc desired
-  | .seqRmw _ ty ptr _ val =>
-    let acc := scanAPexprForParamLoads paramIds acc ty
-    let acc := scanAPexprForParamLoads paramIds acc ptr
-    scanAPexprForParamLoads paramIds acc val
-
-/-- Scan an expression for loads from parameter symbols.
-    Tracks aliases through let bindings of pure(param) expressions. -/
-partial def scanExprForParamLoads
-    (paramIds : List Nat)
-    (acc : ScanState)
-    (e : Core.AExpr) : ScanState :=
+    (aliases : AliasMap)
+    (e : Core.AExpr) : AliasMap :=
   match e.expr with
-  | .pure pe => scanAPexprForParamLoads paramIds acc pe
-  | .memop _ args => args.foldl (scanAPexprForParamLoads paramIds) acc
-  | .action pact => scanActionForParamLoads paramIds acc pact.action.action
-  | .case_ scrut branches =>
-    let acc := scanAPexprForParamLoads paramIds acc scrut
-    branches.foldl (fun a (_, body) => scanExprForParamLoads paramIds a body) acc
+  | .pure _ => aliases
+  | .memop _ _ => aliases
+  | .action _ => aliases
+  | .case_ _ branches =>
+    branches.foldl (fun acc (_, body) => scanForAliases paramIds acc body) aliases
   | .let_ pat e1 e2 =>
-    -- Track aliases: if `let x = pure(param)`, then x is an alias for param
-    let acc := scanAPexprForParamLoads paramIds acc e1
-    let boundSymOpt := patternBindsSym pat
-    let srcSymOpt := isPureSym e1
-    -- Try to track aliasing if this is `let x = pure(y)` pattern
-    let acc := tryTrackAlias paramIds acc boundSymOpt srcSymOpt
-    scanExprForParamLoads paramIds acc e2
-  | .if_ cond then_ else_ =>
-    let acc := scanAPexprForParamLoads paramIds acc cond
-    let acc := scanExprForParamLoads paramIds acc then_
-    scanExprForParamLoads paramIds acc else_
-  | .ccall funPtr funTy args =>
-    let acc := scanAPexprForParamLoads paramIds acc funPtr
-    let acc := scanAPexprForParamLoads paramIds acc funTy
-    args.foldl (scanAPexprForParamLoads paramIds) acc
-  | .proc _ args => args.foldl (scanAPexprForParamLoads paramIds) acc
-  | .unseq es => es.foldl (scanExprForParamLoads paramIds) acc
+    -- Track aliases: if `let x = pure(y)` where y is a param or alias
+    let aliases' := tryTrackAlias paramIds aliases (patternBindsSym pat) (isPureSym e1)
+    scanForAliases paramIds aliases' e2
+  | .if_ _ then_ else_ =>
+    let aliases' := scanForAliases paramIds aliases then_
+    scanForAliases paramIds aliases' else_
+  | .ccall _ _ _ => aliases
+  | .proc _ _ => aliases
+  | .unseq es => es.foldl (scanForAliases paramIds) aliases
   | .wseq pat e1 e2 | .sseq pat e1 e2 =>
-    let acc := scanExprForParamLoads paramIds acc e1
-    -- Track aliases: if `pat = pure(sym)`, then pattern binds an alias to sym
-    let boundSymOpt := patternBindsSym pat
-    let srcSymOpt := isExprPureSym e1
-    let acc := tryTrackAlias paramIds acc boundSymOpt srcSymOpt
-    scanExprForParamLoads paramIds acc e2
-  | .bound inner => scanExprForParamLoads paramIds acc inner
-  | .nd es => es.foldl (scanExprForParamLoads paramIds) acc
-  | .save _ _ args body =>
-    let acc := args.foldl (fun a (_, _, e) => scanAPexprForParamLoads paramIds a e) acc
-    scanExprForParamLoads paramIds acc body
-  | .run _ args => args.foldl (scanAPexprForParamLoads paramIds) acc
-  | .par es => es.foldl (scanExprForParamLoads paramIds) acc
-  | .wait _ => acc
+    let aliases' := scanForAliases paramIds aliases e1
+    -- Track aliases from wseq/sseq bindings
+    let aliases'' := tryTrackAlias paramIds aliases' (patternBindsSym pat) (isExprPureSym e1)
+    scanForAliases paramIds aliases'' e2
+  | .bound inner => scanForAliases paramIds aliases inner
+  | .nd es => es.foldl (scanForAliases paramIds) aliases
+  | .save _ _ _ body => scanForAliases paramIds aliases body
+  | .run _ _ => aliases
+  | .par es => es.foldl (scanForAliases paramIds) aliases
+  | .wait _ => aliases
+where
+  /-- Try to track an alias from a binding pattern -/
+  tryTrackAlias (paramIds : List Nat) (acc : AliasMap)
+      (boundSymOpt : Option Core.Sym) (srcSymOpt : Option Core.Sym) : AliasMap :=
+    match boundSymOpt, srcSymOpt with
+    | some boundSym, some srcSym =>
+      -- Check if srcSym is a param or resolves to one
+      let targetId := (resolveToParam acc paramIds srcSym.id).getD srcSym.id
+      if paramIds.contains targetId || acc.contains srcSym.id then
+        acc.insert boundSym.id targetId
+      else
+        acc
+    | _, _ => acc
 
-/-- Extract C types for function parameters by scanning for their first loads.
-    Returns a map from parameter symbol ID to C type.
-
-    In Core IR, function parameters are stored in stack slots. The actual
-    parameter value is obtained by loading from the slot. We extract the
-    C type from these load operations.
-
-    Handles aliasing: tracks `let x = pure(p)` patterns so loads from `x`
-    are attributed to parameter `p`. -/
-def extractParamCtypes
-    (params : List (Core.Sym × Core.BaseType))
-    (body : Core.AExpr) : ParamCtypeMap :=
-  let paramIds := params.map (·.1.id)
-  let initState : ScanState := { ctypes := {}, aliases := {} }
-  let result := scanExprForParamLoads paramIds initState body
-  -- Debug output
-  dbg_trace s!"extractParamCtypes: paramIds={paramIds}, aliases={result.aliases.toList}, ctypes={result.ctypes.toList.map (fun (id, ct) => (id, repr ct.ty))}"
-  result.ctypes
-
-/-! ## Type Conversion Functions -/
+/-! ## Type Conversion -/
 
 /-- Convert Core.BaseType to CN.Types.BaseType.
     Returns none for unsupported types. -/
@@ -292,55 +160,33 @@ def tryCoreBaseTypeToCN (bt : Core.BaseType) : Option BaseType :=
   | .object .floating => some .real
   | .object (.struct_ tag) => some (.struct_ tag)
   | .loaded _ => some .loc
-  -- Unsupported types - return none to signal error
+  -- Unsupported types
   | .list _ => none
   | .tuple _ => none
   | .object (.array _) => none
   | .object (.union_ _) => none
   | .storable => none
 
-/-- Convert Ctype to CN BaseType (for parameter value types).
-    Returns the base type of the VALUE, not the storage type. -/
-def ctypeToCNBaseType (ct : Core.Ctype) : Option BaseType :=
-  match ct.ty with
-  | .void => some .unit
-  | .basic (.integer _) => some .integer
-  | .basic (.floating _) => some .real
-  | .pointer _ _ => some .loc
-  | .struct_ tag => some (.struct_ tag)
-  | .array _ _ => none  -- Arrays not yet supported
-  | .union_ _ => none   -- Unions not yet supported
-  | .function _ _ _ _ => none
-  | .functionNoParams _ _ => none
-  | .atomic _ => none
-  | .byte => none
+/-! ## Main Function: Check Function With Parameters
 
-/-! ## Term Construction Helpers -/
+This is the main entry point for checking a function with its parameters.
+It sets up the lazy muCore transformation by:
+1. Scanning for aliases
+2. Building the ParamValueMap
+3. Running type checking with the mapping in place
+-/
 
-/-- Create an IndexTerm for a parameter stack slot address -/
-def mkParamStackSlotTerm (sym : Core.Sym) (loc : Core.Loc) : IndexTerm :=
-  AnnotTerm.mk (.sym sym) .loc loc
+/-- Check a function with parameters using lazy muCore transformation.
 
-/-- Create a fresh symbolic IndexTerm for a parameter value -/
-def mkParamValueTerm (sym : Core.Sym) (bt : BaseType) (loc : Core.Loc) (id : Nat) : IndexTerm :=
-  -- Use a fresh symbol with a name indicating it's the parameter value
-  let valueSym : Core.Sym := { id := id, name := sym.name.map (· ++ "_value") }
-  AnnotTerm.mk (.sym valueSym) bt loc
+    For each pointer parameter:
+    1. Create a fresh value symbol representing the parameter value
+    2. Map the stack slot symbol (and its aliases) to this value
+    3. When loads from these symbols are encountered, return the value directly
 
-/-! ## Main Function Checking -/
+    This corresponds to CN's make_function_args in core_to_mucore.ml lines 745-786.
 
-/-- Check a function with parameters bound to the context.
-
-    In Core IR, function parameters are stored in stack slots:
-    - Parameter `p` of C type `T` is a stack slot address
-    - The actual value is obtained by `load(T, p)`
-
-    For CN verification, we:
-    1. Create implicit Owned<T>(p_slot) resources for each parameter's stack slot
-    2. Bind spec parameter names to symbolic values representing the loaded values
-    3. The spec's constraints then correctly apply to the parameter values
-
-    This corresponds to CN's core_to_mucore transformation. -/
+    The spec's parameter names (e.g., `p` in `Owned<int>(p)`) refer to the
+    parameter VALUES, which is what this transformation achieves. -/
 def checkFunctionWithParams
     (spec : FunctionSpec)
     (body : Core.AExpr)
@@ -354,61 +200,44 @@ def checkFunctionWithParams
     , finalContext := Context.empty
     , error := none }
   else
-    -- Extract C types for parameters from their first loads in the body
-    let paramCtypes := extractParamCtypes params body
+    -- Step 1: Get parameter IDs and scan for aliases
+    let paramIds := params.map (·.1.id)
+    let aliases := scanForAliases paramIds {} body
 
-    -- Build initial context and resources for parameters
-    -- For each pointer parameter, we need to:
-    -- 1. Create implicit Owned<Ctype>(stack_slot) resource
-    -- 2. Bind the parameter name to a symbolic value representing the loaded value
-    let setupResult : Except String (Context × List Resource × Nat) :=
-      params.foldlM (init := (Context.empty, [], 0)) fun (ctx, resources, nextId) (sym, bt) =>
+    -- Step 2: Build ParamValueMap and Context
+    -- For each pointer parameter, create a value term and add mapping
+    let setupResult : Except String (Context × ParamValueMap × Nat) :=
+      params.foldlM (init := (Context.empty, ({} : ParamValueMap), 0)) fun (ctx, pvm, nextId) (sym, bt) =>
         match bt with
         | .object .pointer =>
-          -- Pointer parameter: check if we found its C type from a load
-          match paramCtypes.get? sym.id with
-          | some ct =>
-            -- Found the C type from the body's load operation
-            match ctypeToCNBaseType ct with
-            | some valueBt =>
-              -- Create symbolic value for the parameter (what gets loaded from stack slot)
-              let valueId := nextId
-              let valueTerm := mkParamValueTerm sym valueBt loc valueId
-              let stackSlotTerm := mkParamStackSlotTerm sym loc
+          -- Pointer parameter: create value term and add to mapping
+          -- The value term represents the loaded value (the pointer the caller passed)
+          match tryCoreBaseTypeToCN bt with
+          | some cnBt =>
+            -- Create a fresh symbol for the parameter value
+            let valueSym : Core.Sym := { id := nextId, name := sym.name.map (· ++ "_val") }
+            let valueTerm : IndexTerm := AnnotTerm.mk (.sym valueSym) cnBt loc
 
-              -- Create implicit Owned<Ctype>(stack_slot) resource with the value term
-              let pred : Predicate := {
-                name := .owned ct .init
-                pointer := stackSlotTerm
-                iargs := []
-              }
-              let resource : Resource := {
-                request := .p pred
-                output := { value := valueTerm }
-              }
+            -- Map the stack slot to the value term
+            let pvm' := pvm.insert sym.id valueTerm
 
-              -- Bind the parameter name to the VALUE term in the context
-              -- This is the key transformation: spec's `p` refers to the loaded value
-              let ctx' := ctx.addA sym valueBt ⟨loc, s!"parameter {sym.name.getD ""} (value)"⟩
+            -- Also map all aliases of this parameter
+            let pvm'' := aliases.fold (init := pvm') fun acc aliasId targetId =>
+              if targetId == sym.id then acc.insert aliasId valueTerm else acc
 
-              Except.ok (ctx', resource :: resources, nextId + 1)
-            | none =>
-              Except.error s!"Unsupported C type for parameter {sym.name.getD "<unknown>"}: {repr ct}"
+            -- Add the parameter to the computational context
+            -- The parameter name in the context refers to the VALUE (the pointer)
+            let ctx' := ctx.addA sym cnBt ⟨loc, s!"parameter {sym.name.getD ""}"⟩
+
+            Except.ok (ctx', pvm'', nextId + 1)
           | none =>
-            -- No load found for this parameter - might be unused or non-pointer access pattern
-            -- Fall back to treating it as a simple pointer
-            match tryCoreBaseTypeToCN bt with
-            | some cnBt =>
-              let ctx' := ctx.addA sym cnBt ⟨loc, s!"parameter {sym.name.getD ""}"⟩
-              Except.ok (ctx', resources, nextId)
-            | none =>
-              Except.error s!"Unsupported parameter type for {sym.name.getD "<unknown>"}: {repr bt}"
+            Except.error s!"Unsupported parameter type for {sym.name.getD "<unknown>"}: {repr bt}"
         | _ =>
-          -- Non-pointer parameter: simple binding
+          -- Non-pointer parameter: simple binding, no mapping needed
           match tryCoreBaseTypeToCN bt with
           | some cnBt =>
             let ctx' := ctx.addA sym cnBt ⟨loc, s!"parameter {sym.name.getD ""}"⟩
-            Except.ok (ctx', resources, nextId)
+            Except.ok (ctx', pvm, nextId)
           | none =>
             Except.error s!"Unsupported parameter type for {sym.name.getD "<unknown>"}: {repr bt}"
 
@@ -417,32 +246,31 @@ def checkFunctionWithParams
       { success := false
       , finalContext := Context.empty
       , error := some (.other msg) }
-    | .ok (paramCtx, implicitResources, nextFreshId) =>
-      -- Combine implicit parameter resources with precondition resources
+    | .ok (paramCtx, paramValueMap, nextFreshId) =>
+      -- Step 3: Set up initial resources from precondition
       let precondResources := extractPreconditionResources spec
-      let allInitialResources := implicitResources ++ precondResources
+      let initialCtx := { paramCtx with resources := precondResources }
 
-      -- Create initial context with parameters bound and resources
-      let initialCtx := { paramCtx with resources := allInitialResources }
-
-      -- Run type checking
+      -- Step 4: Create initial state with ParamValueMap
       let initialState : TypingState := {
         context := initialCtx
         oracle := oracle
         freshCounter := nextFreshId
+        paramValues := paramValueMap
       }
 
+      -- Step 5: Run type checking
       let computation : TypingM Unit := do
-        -- 1. Process precondition: consume initial resources, bind outputs
+        -- Process precondition: consume initial resources, bind outputs
         processPrecondition spec.requires loc
 
-        -- 2. Check the body expression
+        -- Check the body expression
         let _returnVal ← checkExpr body
 
-        -- 3. Process postcondition: produce final resources
+        -- Process postcondition: produce final resources
         processPostcondition spec.ensures loc
 
-        -- 4. Verify all accumulated constraints
+        -- Verify all accumulated constraints
         verifyConstraints
 
       match TypingM.run computation initialState with
