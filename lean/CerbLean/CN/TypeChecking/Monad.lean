@@ -18,6 +18,7 @@
 
 import CerbLean.CN.TypeChecking.Context
 import CerbLean.CN.Types
+import Std.Data.HashMap
 
 namespace CerbLean.CN.TypeChecking
 
@@ -114,6 +115,26 @@ type s =
 ```
 -/
 
+/-! ## Parameter Value Mapping
+
+Corresponds to: C_vars.Value in cn/lib/compile.ml lines 332-333.
+
+In Core IR, function parameters are stored in stack slots. The value is
+obtained by loading from the slot. CN's core_to_mucore transformation
+maps stack slot symbols to their value symbols, so that loads from
+parameter stack slots are replaced with direct value references.
+
+We track this mapping in the typing state to implement the same transformation
+at type-checking time.
+-/
+
+/-- Maps stack slot symbol ID → value IndexTerm
+    When a load is performed from a symbol in this map, we return the
+    value term directly without consuming any resources.
+
+    Corresponds to: C_vars.Value (sym, sbt) in compile.ml -/
+abbrev ParamValueMap := Std.HashMap Nat IndexTerm
+
 /-- Typing monad state
     Corresponds to: s in typing.ml lines 11-17
     Simplified: we omit sym_eqs, movable_indices, log for now -/
@@ -124,6 +145,9 @@ structure TypingState where
   oracle : ProofOracle
   /-- Counter for generating fresh symbols -/
   freshCounter : Nat := 0
+  /-- Parameter value mapping: stack slot ID → value term
+      Corresponds to: C_vars state in cn/lib/compile.ml -/
+  paramValues : ParamValueMap := {}
   deriving Inhabited
 
 namespace TypingState
@@ -275,6 +299,40 @@ def setResources (rs : List Resource) : TypingM Unit := do
 /-- Remove a resource at the given index (for consumption) -/
 def removeResourceAt (idx : Nat) : TypingM Unit := do
   modifyContext (Context.removeRAt idx)
+
+/-! ### Parameter Value Mapping
+
+These functions manage the lazy muCore transformation for function parameters.
+Corresponds to: C_vars operations in cn/lib/compile.ml
+
+In CN, Core-to-muCore translation maps stack slot symbols to value terms
+so that `load(T, stack_slot)` becomes `pure(value)`. We do this lazily
+during type checking by maintaining a ParamValueMap.
+-/
+
+/-- Add a parameter value mapping: stack_slot_id → value_term
+    Corresponds to: C_vars.add [(mut_arg, Value(pure_arg, sbt))] in
+    cn/lib/core_to_mucore.ml line 755 -/
+def addParamValue (stackSlotId : Nat) (valueTerm : IndexTerm) : TypingM Unit := do
+  modifyState fun s => { s with paramValues := s.paramValues.insert stackSlotId valueTerm }
+
+/-- Look up a parameter value by stack slot symbol ID.
+    Returns the value term if this is a known parameter stack slot.
+    Corresponds to: looking up in C_vars and finding Value(sym, bt)
+    in cn/lib/compile.ml line 1305 -/
+def lookupParamValue (stackSlotId : Nat) : TypingM (Option IndexTerm) := do
+  let s ← getState
+  return s.paramValues.get? stackSlotId
+
+/-- Check if a symbol ID corresponds to a parameter stack slot -/
+def isParamStackSlot (symId : Nat) : TypingM Bool := do
+  let s ← getState
+  return s.paramValues.contains symId
+
+/-- Get the full parameter value map -/
+def getParamValues : TypingM ParamValueMap := do
+  let s ← getState
+  return s.paramValues
 
 /-! ### Scoped Operations
 
