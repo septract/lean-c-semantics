@@ -211,12 +211,9 @@ def checkFunction
     , finalContext := Context.empty
     , error := none }
   else
-    -- Synthesize initial resources from precondition
-    let initialResources := extractPreconditionResources spec
-
-    -- Run type checking
+    -- Run type checking (resources will be added by processPrecondition)
     let initialState : TypingState := {
-      context := { Context.empty with resources := initialResources }
+      context := Context.empty
       oracle := oracle
     }
 
@@ -233,8 +230,8 @@ def checkFunction
       -- 4. Verify all accumulated constraints
       verifyConstraints
 
-      -- 5. Check no resources leaked (optional strictness)
-      -- checkNoLeakedResources  -- Uncomment for strict mode
+      -- 5. Check no resources leaked (must all be consumed or returned)
+      checkNoLeakedResources
 
     match TypingM.run computation initialState with
     | .ok (_, finalState) =>
