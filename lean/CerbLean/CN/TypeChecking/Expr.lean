@@ -37,15 +37,109 @@ def negTerm (t : IndexTerm) : IndexTerm :=
 For conditionals and case expressions, we need to:
 1. Save the current resource state
 2. Check each branch
-3. Merge resource states (in CN, branches must agree)
+3. Verify resource states agree (in CN, branches must produce same resources)
+
+Corresponds to: cn/lib/check.ml branch merging logic
 -/
 
+/-- Check if two resource names match (same predicate type and C type) -/
+def resourceNameMatch (n1 n2 : ResourceName) : Bool :=
+  match n1, n2 with
+  | .owned ct1 init1, .owned ct2 init2 => ct1 == ct2 && init1 == init2
+  | .pname s1, .pname s2 => s1.id == s2.id
+  | _, _ => false
+
+/-- Syntactic comparison of constants (for the common cases) -/
+def constEq : Const → Const → Bool
+  | .z v1, .z v2 => v1 == v2
+  | .bits s1 w1 v1, .bits s2 w2 v2 => s1 == s2 && w1 == w2 && v1 == v2
+  | .bool b1, .bool b2 => b1 == b2
+  | .unit, .unit => true
+  | .null, .null => true
+  | .allocId id1, .allocId id2 => id1 == id2
+  | .pointer p1, .pointer p2 => p1.allocId == p2.allocId && p1.addr == p2.addr
+  | _, _ => false  -- Conservative: different constant types don't match
+
+/-- Syntactic comparison of terms (conservative - only matches identical structure).
+    A full implementation would use the SMT solver for semantic equality. -/
+partial def termEq : Term → Term → Bool
+  | .const c1, .const c2 => constEq c1 c2
+  | .sym s1, .sym s2 => s1.id == s2.id
+  | .unop op1 a1, .unop op2 a2 => op1 == op2 && annotTermEq a1 a2
+  | .binop op1 l1 r1, .binop op2 l2 r2 => op1 == op2 && annotTermEq l1 l2 && annotTermEq r1 r2
+  | _, _ => false  -- Conservative: different structures don't match
+where
+  annotTermEq (t1 t2 : AnnotTerm) : Bool := termEq t1.term t2.term
+
+/-- Check if two predicates match (same name and pointer).
+    We compare pointers syntactically for now - a full implementation
+    would use the SMT solver to check semantic equality. -/
+def predicateMatch (p1 p2 : Predicate) : Bool :=
+  resourceNameMatch p1.name p2.name &&
+  -- Compare pointers syntactically (term equality)
+  -- This is conservative - pointers must be syntactically identical
+  termEq p1.pointer.term p2.pointer.term
+
+/-- Check if two requests match structurally -/
+def requestMatch (r1 r2 : Request) : Bool :=
+  match r1, r2 with
+  | .p p1, .p p2 => predicateMatch p1 p2
+  | .q q1, .q q2 =>
+    resourceNameMatch q1.name q2.name &&
+    termEq q1.pointer.term q2.pointer.term &&
+    q1.q.1.id == q2.q.1.id
+  | _, _ => false
+
+/-- Find a matching resource in a list, return remaining resources if found -/
+def findMatchingResource (r : Resource) (rs : List Resource)
+    : Option (Resource × List Resource) :=
+  go rs []
+where
+  go : List Resource → List Resource → Option (Resource × List Resource)
+  | [], _ => none
+  | r' :: rest, acc =>
+    if requestMatch r.request r'.request then
+      some (r', acc.reverse ++ rest)
+    else
+      go rest (r' :: acc)
+
+/-- Format a resource name for error messages -/
+def formatResourceName (name : ResourceName) : String :=
+  match name with
+  | .owned _ initState => s!"Owned({if initState == Init.init then "Init" else "Uninit"})"
+  | .pname s => s!"{s.name.getD "?"}"
+
 /-- Check that resources after branches match.
-    In CN, both branches must end with the same resources. -/
-def checkResourcesMatch (_ctx1 _ctx2 : Context) : TypingM Unit := do
-  -- For now, we just trust that branches agree
-  -- A full implementation would check resource equality
-  pure ()
+    In CN, both branches must end with the same resources.
+
+    Corresponds to: branch merging in cn/lib/check.ml
+
+    The check ensures:
+    1. Both branches have the same number of resources
+    2. Each resource in one branch has a matching resource in the other
+       (same predicate type and pointer)
+
+    Note: Output values may differ between branches - that's expected
+    when branches write different values. What matters is that the
+    *structure* of resources is the same. -/
+def checkResourcesMatch (ctx1 ctx2 : Context) : TypingM Unit := do
+  let rs1 := ctx1.resources
+  let rs2 := ctx2.resources
+
+  -- First check: same number of resources
+  if rs1.length != rs2.length then
+    TypingM.fail (.other s!"Branch resource mismatch: then-branch has {rs1.length} resources, else-branch has {rs2.length}")
+
+  -- Second check: each resource in rs1 has a match in rs2
+  let mut remaining := rs2
+  for r1 in rs1 do
+    match findMatchingResource r1 remaining with
+    | some (_, rest) => remaining := rest
+    | none =>
+      let name := match r1.request with
+        | .p p => formatResourceName p.name
+        | .q q => s!"each {formatResourceName q.name}"
+      TypingM.fail (.other s!"Branch resource mismatch: then-branch has {name} resource not matched in else-branch")
 
 /-! ## Expression Checking
 
@@ -103,15 +197,17 @@ partial def checkExpr (e : AExpr) : TypingM IndexTerm := do
   | .if_ cond thenE elseE =>
     let condVal ← checkPexpr cond
 
-    -- Save current state for branching
-    let savedCtx ← TypingM.getContext
+    -- Save FULL state for branching (including fresh counter, param map, etc.)
+    -- This is critical: without this, fresh symbols in different branches
+    -- would have different IDs, causing spurious resource mismatches.
+    let savedState ← TypingM.getState
 
     -- Check "then" branch with condition as assumption
     let _thenResult ← withPathCondition condVal (checkExpr thenE)
     let thenCtx ← TypingM.getContext
 
-    -- Restore state and check "else" branch with negated condition
-    TypingM.setContext savedCtx
+    -- Restore FULL state and check "else" branch with negated condition
+    TypingM.setState savedState
     let elseResult ← withPathCondition (negTerm condVal) (checkExpr elseE)
     let elseCtx ← TypingM.getContext
 
@@ -128,12 +224,12 @@ partial def checkExpr (e : AExpr) : TypingM IndexTerm := do
     if branches.isEmpty then
       TypingM.fail (.other "Empty case expression")
 
-    -- Check each branch
-    let savedCtx ← TypingM.getContext
+    -- Check each branch (save FULL state to ensure consistent symbol IDs)
+    let savedState ← TypingM.getState
     let mut lastResult := mkUnitTerm loc
 
     for (pat, body) in branches do
-      TypingM.setContext savedCtx
+      TypingM.setState savedState
       let bindings ← bindPattern pat scrutVal
       lastResult ← checkExpr body
       unbindPattern bindings
