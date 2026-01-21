@@ -23,39 +23,46 @@ open CerbLean.CN.Types
 
 Corresponds to: bind_arguments in cn/lib/check.ml lines 2341-2364
 
-The key operations when processing a spec:
-- Resource clause in precondition: consume resource, bind output
-- Resource clause in postcondition: produce resource
+The key operations when processing a spec (function verification):
+- Resource clause in precondition: PRODUCE resource (assume caller provides)
+- Resource clause in postcondition: CONSUME resource (verify function produces)
 - Constraint clause: add to constraint set
 -/
 
 /-- Process a single clause from a precondition.
-    - Resource clauses: consume from context, bind output
-    - Constraint clauses: add to constraint set (to be checked later)
+    - Resource clauses: PRODUCE to context (caller provides these)
+    - Constraint clauses: add to constraint set (assumptions about inputs)
+
+    When verifying a function, precondition resources are ASSUMED (produced),
+    not consumed. The caller provides these resources when calling the function.
 
     Corresponds to: aux_l in check.ml lines 2342-2353 -/
 def processPreClause (clause : Clause) (loc : Loc) : TypingM Unit := do
   match clause with
   | .resource name resource =>
-    consumeResourceClause name resource loc
+    -- For preconditions, we ASSUME the resource exists (caller provides it)
+    -- Bind the output name as a logical variable
+    let bt := resource.output.value.bt
+    TypingM.addL name bt loc s!"precondition output {name.name.getD ""}"
+    -- Add the resource to the context (assume it exists)
+    produceResource resource
   | .constraint assertion =>
-    -- Add the constraint to be proved
+    -- Add the constraint as an assumption
     TypingM.addC (.t assertion)
 
 /-- Process a single clause from a postcondition.
-    - Resource clauses: add to context (ownership being returned)
-    - Constraint clauses: add to constraint set
+    - Resource clauses: CONSUME from context (verify function produces them)
+    - Constraint clauses: add to constraint set (obligations to prove)
+
+    When verifying a function, postcondition resources must be CONSUMED
+    (verified to exist) - the function must produce these for the caller.
 
     Corresponds to: similar to bind_arguments but for return types -/
 def processPostClause (clause : Clause) (loc : Loc) : TypingM Unit := do
   match clause with
   | .resource name resource =>
-    -- For postconditions, we produce the resource
-    -- First bind the name as a logical variable
-    let bt := resource.output.value.bt
-    TypingM.addL name bt loc s!"postcondition output {name.name.getD ""}"
-    -- Then add the resource to the context
-    produceResource resource
+    -- For postconditions, we VERIFY the resource exists (consume it)
+    consumeResourceClause name resource loc
   | .constraint assertion =>
     -- Add the constraint to be proved
     TypingM.addC (.t assertion)
