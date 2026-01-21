@@ -17,12 +17,12 @@
 -/
 
 import CerbLean.CN.TypeChecking.Context
-import CerbLean.CN.LogicalConstraints
+import CerbLean.CN.Types
 
 namespace CerbLean.CN.TypeChecking
 
 open CerbLean.Core (Sym Loc)
-open CerbLean.CN
+open CerbLean.CN.Types
 
 /-! ## Proof Oracle
 

@@ -10,10 +10,10 @@
   Deviations: None significant
 -/
 
-import CerbLean.CN.Terms
+import CerbLean.CN.Types.Term
 import CerbLean.Core.Ctype
 
-namespace CerbLean.CN
+namespace CerbLean.CN.Types
 
 open CerbLean.Core (Sym Ctype Loc)
 
@@ -182,4 +182,4 @@ structure Resource where
   output : Output
   deriving Inhabited
 
-end CerbLean.CN
+end CerbLean.CN.Types

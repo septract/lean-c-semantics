@@ -11,13 +11,12 @@
   Audited: 2026-01-20 against cn/lib/context.ml
 -/
 
-import CerbLean.CN.Request
-import CerbLean.CN.LogicalConstraints
+import CerbLean.CN.Types
 
 namespace CerbLean.CN.TypeChecking
 
 open CerbLean.Core (Sym Loc)
-open CerbLean.CN
+open CerbLean.CN.Types
 
 /-! ## Binding Types
 
