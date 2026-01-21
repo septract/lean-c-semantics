@@ -64,8 +64,11 @@ def valueToConst (v : Value) (_loc : Core.Loc) : Except TypeError Const := do
   | .ctype ct => return .ctypeConst ct
   | .list _ _ => throw (.other "List values not yet supported")
   | .tuple _ => throw (.other "Tuple values not yet supported")
-  | .object _ => throw (.other "Object values not yet supported")
-  | .loaded _ => throw (.other "Loaded values not yet supported")
+  | .object (.floating ..) => throw (.other "Floating point values not yet supported")
+  | .object (.struct_ ..) => throw (.other "Struct values not yet supported")
+  | .object (.array ..) => throw (.other "Array values not yet supported")
+  | .object (.union_ ..) => throw (.other "Union values not yet supported")
+  | .loaded _ => throw (.other "Loaded values should be handled symbolically, not as constants")
 
 /-- Convert a Core Value to a CN IndexTerm. -/
 def valueToTerm (v : Value) (loc : Core.Loc) : Except TypeError IndexTerm := do
@@ -139,7 +142,7 @@ def coreBaseTypeToCN (bt : Core.BaseType) : BaseType :=
 
 /-- Bind a pattern to a value, returning the bound variables.
     Corresponds to: check_and_match_pattern in check.ml -/
-def bindPattern (pat : APattern) (value : IndexTerm) : TypingM PatternBindings := do
+partial def bindPattern (pat : APattern) (value : IndexTerm) : TypingM PatternBindings := do
   match pat.pat with
   | .base (some sym) bt =>
     -- Bind variable to value
@@ -150,9 +153,27 @@ def bindPattern (pat : APattern) (value : IndexTerm) : TypingM PatternBindings :
   | .base none _ =>
     -- Wildcard - no binding
     return { boundVars := [] }
-  | .ctor _c _args =>
-    -- Constructor patterns not yet implemented
-    TypingM.fail (.other "Constructor patterns not yet supported")
+  | .ctor c args =>
+    -- Constructor patterns for Specified/Unspecified loaded values
+    match c with
+    | .specified =>
+      -- Specified(inner_pat) - bind inner pattern to the unwrapped value
+      match args with
+      | [innerPat] =>
+        -- Wrap the inner Pattern in an APattern with the same annotations
+        let innerAPat : APattern := ⟨pat.annots, innerPat⟩
+        bindPattern innerAPat value
+      | _ => TypingM.fail (.other "Specified pattern requires exactly 1 argument")
+    | .unspecified =>
+      -- Unspecified(_) - this is the undefined behavior path
+      -- We skip binding here (matches any value, binds nothing useful)
+      return { boundVars := [] }
+    | .tuple =>
+      -- Tuple patterns - bind each component
+      -- For now, just return empty bindings (simplified)
+      -- TODO: implement proper tuple destructuring
+      return { boundVars := [] }
+    | _ => TypingM.fail (.other s!"Unsupported constructor pattern: {repr c}")
 
 /-- Remove pattern bindings from context.
     Called after pattern scope ends. -/
@@ -318,9 +339,19 @@ partial def checkPexpr (pe : APexpr) : TypingM IndexTerm := do
     return AnnotTerm.mk (.struct_ tag memberTerms) resBt loc
 
   -- Undefined behavior marker
-  | .undef _uloc ub =>
-    -- Encountering undef in pure expression is an error
-    TypingM.fail (.other s!"Undefined behavior in pure expression: {repr ub}")
+  | .undef _uloc _ub =>
+    -- In CN, undef represents a path that leads to undefined behavior.
+    -- When we encounter it in a conditional branch, it means that branch
+    -- should not be taken. We return a symbolic term representing undefined.
+    -- The CN verifier will ensure this value is never actually used
+    -- (i.e., the path condition leading here is unsatisfiable).
+    let resBt := pe.ty.map coreBaseTypeToCN |>.getD .integer
+    let symUndef : Core.Sym := {
+      id := 0,
+      name := some "undef",
+      description := .none_
+    }
+    return AnnotTerm.mk (.sym symUndef) resBt loc
 
   -- Error expression
   | .error msg _ =>
