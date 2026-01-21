@@ -10,14 +10,14 @@
 -/
 
 import CerbLean.CN.TypeChecking.Monad
-import CerbLean.CN.Terms
+import CerbLean.CN.Types
 import CerbLean.Core.Expr
 import CerbLean.Core.Value
 
 namespace CerbLean.CN.TypeChecking
 
 open CerbLean.Core (Sym Identifier Pexpr APexpr Value Binop Pattern APattern ObjectValue)
-open CerbLean.CN
+open CerbLean.CN.Types
 
 /-! ## Helper Functions -/
 
@@ -348,7 +348,7 @@ partial def checkPexpr (pe : APexpr) : TypingM IndexTerm := do
     TypingM.fail (.other s!"Pure expression not yet supported")
 where
   /-- Convert Core APattern to CN Pattern -/
-  convertPattern (pat : APattern) (bt : BaseType) (loc : Core.Loc) : CerbLean.CN.Pattern :=
+  convertPattern (pat : APattern) (bt : BaseType) (loc : Core.Loc) : CerbLean.CN.Types.Pattern :=
     match pat.pat with
     | .base (some s) _ => .mk (.sym s) bt loc
     | .base none _ => .mk .wild bt loc

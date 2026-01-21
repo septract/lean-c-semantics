@@ -12,15 +12,14 @@
   This is used for displaying parsed CN specs in a human-readable format.
 -/
 
-import CerbLean.CN.Spec
-import CerbLean.CN.Terms
-import CerbLean.CN.Request
+import CerbLean.CN.Types
 import CerbLean.PrettyPrint
 
 namespace CerbLean.CN.PrettyPrint
 
 open CerbLean.Core (Sym Identifier Ctype)
 open CerbLean.PrettyPrint (ppSym ppCtype)
+open CerbLean.CN.Types
 
 /-! ## Basic Utilities -/
 

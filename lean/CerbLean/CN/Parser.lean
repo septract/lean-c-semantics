@@ -43,9 +43,7 @@
 
 import Std.Internal.Parsec
 import Std.Internal.Parsec.String
-import CerbLean.CN.Spec
-import CerbLean.CN.Terms
-import CerbLean.CN.Request
+import CerbLean.CN.Types
 import CerbLean.Core.Ctype
 
 namespace CerbLean.CN.Parser
@@ -53,6 +51,7 @@ namespace CerbLean.CN.Parser
 open Std.Internal.Parsec
 open Std.Internal.Parsec.String
 open CerbLean.Core (Sym Identifier Loc Ctype IntegerType IntBaseKind)
+open CerbLean.CN.Types
 
 /-! ## Parser Type and Utilities -/
 

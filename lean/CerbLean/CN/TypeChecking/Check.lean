@@ -11,13 +11,13 @@
 
 import CerbLean.CN.TypeChecking.Inference
 import CerbLean.CN.TypeChecking.Expr
-import CerbLean.CN.Spec
+import CerbLean.CN.Types
 import CerbLean.CN.Parser
 
 namespace CerbLean.CN.TypeChecking
 
 open CerbLean.Core (Sym Loc)
-open CerbLean.CN
+open CerbLean.CN.Types
 
 /-! ## Processing Specification Clauses
 

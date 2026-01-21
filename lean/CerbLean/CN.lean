@@ -5,22 +5,19 @@
   CN is a verification tool built on top of Cerberus that adds separation-logic
   refinement types to C programs.
 
-  Import this module to get access to all CN types.
+  Import this module to get access to all CN types and functionality.
 
-  Key types:
-  - BaseType: CN's type system for specifications
-  - IndexTerm: Expression language for specifications
-  - Request/Resource: Separation logic ownership predicates
-  - FunctionSpec: Function contracts (requires/ensures)
+  Module structure:
+  - Types/: Core type definitions (BaseType, IndexTerm, Resource, Spec)
+  - TypeChecking/: Type checking and verification
+  - Semantics/: Formal semantics and theorems
+  - Parser: CN annotation parser
+  - PrettyPrint: Pretty-printer for CN specs
 
   Reference: https://github.com/rems-project/cn
 -/
 
-import CerbLean.CN.BaseTypes
-import CerbLean.CN.Terms
-import CerbLean.CN.LogicalConstraints
-import CerbLean.CN.Request
-import CerbLean.CN.Spec
+import CerbLean.CN.Types
 import CerbLean.CN.Parser
 import CerbLean.CN.PrettyPrint
 import CerbLean.CN.Semantics

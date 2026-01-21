@@ -8,10 +8,10 @@
   Audited: 2026-01-20 against cn/coq/Cn/LogicalConstraints.v
 -/
 
-import CerbLean.CN.Terms
-import CerbLean.CN.BaseTypes
+import CerbLean.CN.Types.Term
+import CerbLean.CN.Types.Base
 
-namespace CerbLean.CN
+namespace CerbLean.CN.Types
 
 open CerbLean.Core (Sym)
 
@@ -58,4 +58,4 @@ def fromList (l : List LogicalConstraint) : LCSet := l
 
 end LCSet
 
-end CerbLean.CN
+end CerbLean.CN.Types

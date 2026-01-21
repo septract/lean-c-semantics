@@ -14,7 +14,7 @@ import CerbLean.CN.TypeChecking.Action
 namespace CerbLean.CN.TypeChecking
 
 open CerbLean.Core (Sym Expr AExpr APexpr APattern Name)
-open CerbLean.CN
+open CerbLean.CN.Types
 
 /-! ## Path Conditions
 

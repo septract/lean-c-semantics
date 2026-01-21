@@ -10,11 +10,11 @@
   Deviations: None significant
 -/
 
-import CerbLean.CN.BaseTypes
+import CerbLean.CN.Types.Base
 import CerbLean.Core.Ctype
 import CerbLean.Core.Annot
 
-namespace CerbLean.CN
+namespace CerbLean.CN.Types
 
 open CerbLean.Core (Sym Identifier Loc Ctype IntegerType)
 
@@ -331,4 +331,4 @@ Following CN convention, IndexTerms.t is the annotated term type.
     Corresponds to: IndexTerms.t in indexTerms.ml line 11 -/
 abbrev IndexTerm := AnnotTerm
 
-end CerbLean.CN
+end CerbLean.CN.Types
