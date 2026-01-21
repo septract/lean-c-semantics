@@ -21,46 +21,58 @@ open CerbLean.CN.Parser
 open CerbLean.CN.PrettyPrint
 open CerbLean.CN.TypeChecking
 
-/-! ## Unit Test Cases -/
+/-! ## Unit Test Cases
 
-def unitTestCases : List (String × String) := [
+Each test is (name, input, expectFail) where expectFail indicates
+whether type checking is expected to fail.
+-/
+
+def unitTestCases : List (String × String × Bool) := [
   -- Simple requires/ensures
   ("simple owned",
    " requires take v = Owned<int>(p);
      ensures take v2 = Owned<int>(p);
              v == v2;
-             return == v; "),
+             return == v; ",
+   false),
 
   -- Just requires
   ("requires only",
-   "requires take x = Owned<int>(ptr);"),
+   "requires take x = Owned<int>(ptr);",
+   false),
 
-  -- Just ensures
-  ("ensures only",
-   "ensures take y = Owned<int>(q); y > 0;"),
+  -- Just ensures (expected to fail - can't produce resources without having them)
+  ("ensures only (expect fail)",
+   "ensures take y = Owned<int>(q); y > 0;",
+   true),
 
   -- Constraint with binary ops
   ("binary ops",
-   "requires x > 0; x < 100;"),
+   "requires x > 0; x < 100;",
+   false),
 
   -- Function call in expression
   ("function call",
-   "ensures return == foo(x, y);"),
+   "ensures return == foo(x, y);",
+   false),
 
   -- Member access
   ("member access",
-   "requires p->field == 42;"),
+   "requires p->field == 42;",
+   false),
 
   -- Trusted function
   ("trusted",
-   "trusted;"),
+   "trusted;",
+   false),
 
   -- Not equal
   ("not equal",
-   "requires y != 0;"),
+   "requires y != 0;",
+   false),
 
   -- Empty spec
-  ("empty", "")
+  ("empty", "", false)
 ]
 
 /-! ## Unit Tests -/
@@ -75,7 +87,7 @@ def runUnitTests : IO UInt32 := do
   let mut checkPassed := 0
   let mut checkFailed := 0
 
-  for (name, input) in unitTestCases do
+  for (name, input, expectFail) in unitTestCases do
     IO.print s!"Test '{name}': "
     match parseFunctionSpec input with
     | .ok spec =>
@@ -89,17 +101,33 @@ def runUnitTests : IO UInt32 := do
       -- Run type checker
       let result := checkSpecStandalone spec .trivial
       if result.success then
-        checkPassed := checkPassed + 1
-        IO.println s!"  typecheck: PASS"
+        if expectFail then
+          -- Expected to fail but passed
+          checkFailed := checkFailed + 1
+          IO.println s!"  typecheck: UNEXPECTED PASS (expected failure)"
+        else
+          checkPassed := checkPassed + 1
+          IO.println s!"  typecheck: PASS"
       else
-        checkFailed := checkFailed + 1
-        IO.println s!"  typecheck: FAIL"
-        match result.error with
-        | some (.missingResource _ _) => IO.println s!"    error: missing resource"
-        | some (.unprovableConstraint _ _) => IO.println s!"    error: unprovable constraint"
-        | some (.unboundVariable sym) => IO.println s!"    error: unbound variable {sym.name.getD "<unknown>"}"
-        | some (.other msg) => IO.println s!"    error: {msg}"
-        | none => IO.println s!"    error: unknown"
+        if expectFail then
+          -- Expected failure
+          checkPassed := checkPassed + 1
+          IO.println s!"  typecheck: EXPECTED FAIL"
+          match result.error with
+          | some (.missingResource _ _) => IO.println s!"    (missing resource - as expected)"
+          | some (.unprovableConstraint _ _) => IO.println s!"    (unprovable constraint - as expected)"
+          | some (.unboundVariable sym) => IO.println s!"    (unbound variable {sym.name.getD "<unknown>"} - as expected)"
+          | some (.other msg) => IO.println s!"    ({msg} - as expected)"
+          | none => IO.println s!"    (unknown error - as expected)"
+        else
+          checkFailed := checkFailed + 1
+          IO.println s!"  typecheck: FAIL"
+          match result.error with
+          | some (.missingResource _ _) => IO.println s!"    error: missing resource"
+          | some (.unprovableConstraint _ _) => IO.println s!"    error: unprovable constraint"
+          | some (.unboundVariable sym) => IO.println s!"    error: unbound variable {sym.name.getD "<unknown>"}"
+          | some (.other msg) => IO.println s!"    error: {msg}"
+          | none => IO.println s!"    error: unknown"
     | .error e =>
       parseFailed := parseFailed + 1
       IO.println s!"PARSE FAILED: {e}"
