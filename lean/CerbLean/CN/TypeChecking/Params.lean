@@ -247,9 +247,8 @@ def checkFunctionWithParams
       , finalContext := Context.empty
       , error := some (.other msg) }
     | .ok (paramCtx, paramValueMap, nextFreshId) =>
-      -- Step 3: Set up initial resources from precondition
-      let precondResources := extractPreconditionResources spec
-      let initialCtx := { paramCtx with resources := precondResources }
+      -- Step 3: Initial context (resources will be added by processPrecondition)
+      let initialCtx := paramCtx
 
       -- Step 4: Create initial state with ParamValueMap
       let initialState : TypingState := {
@@ -272,6 +271,9 @@ def checkFunctionWithParams
 
         -- Verify all accumulated constraints
         verifyConstraints
+
+        -- Check no resources leaked (must all be consumed or returned)
+        checkNoLeakedResources
 
       match TypingM.run computation initialState with
       | .ok (_, finalState) =>
