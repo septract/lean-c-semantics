@@ -18,12 +18,14 @@
 
 import CerbLean.CN.TypeChecking.Context
 import CerbLean.CN.Types
+import CerbLean.CN.Verification.Obligation
 import Std.Data.HashMap
 
 namespace CerbLean.CN.TypeChecking
 
 open CerbLean.Core (Sym Loc)
 open CerbLean.CN.Types
+open CerbLean.CN.Verification
 
 /-! ## Proof Oracle
 
@@ -101,6 +103,16 @@ inductive TypeError where
   | other (msg : String)
   deriving Inhabited
 
+instance : ToString TypeError where
+  toString
+    | .missingResource req _ctx =>
+      match req with
+      | .p pred => s!"missing resource: predicate {repr pred.name}"
+      | .q qpred => s!"missing resource: quantified predicate {repr qpred.name}"
+    | .unprovableConstraint _lc _ctx => "unprovable constraint"
+    | .unboundVariable sym => s!"unbound variable: {sym.name.getD "?"}"
+    | .other msg => msg
+
 /-! ## Typing Monad State
 
 Corresponds to: cn/lib/typing.ml lines 11-17
@@ -137,17 +149,24 @@ abbrev ParamValueMap := Std.HashMap Nat IndexTerm
 
 /-- Typing monad state
     Corresponds to: s in typing.ml lines 11-17
-    Simplified: we omit sym_eqs, movable_indices, log for now -/
+    Simplified: we omit sym_eqs, movable_indices, log for now
+
+    Extended for proof obligations: accumulates obligations during type checking
+    instead of (or in addition to) checking constraints immediately. -/
 structure TypingState where
   /-- Current typing context -/
   context : Context
-  /-- Proof oracle for constraint checking -/
+  /-- Proof oracle for constraint checking (for backward compatibility) -/
   oracle : ProofOracle
   /-- Counter for generating fresh symbols -/
   freshCounter : Nat := 0
   /-- Parameter value mapping: stack slot ID → value term
       Corresponds to: C_vars state in cn/lib/compile.ml -/
   paramValues : ParamValueMap := {}
+  /-- Accumulated proof obligations (new: for post-hoc discharge) -/
+  obligations : ObligationSet := []
+  /-- Whether to accumulate obligations instead of checking immediately -/
+  accumulateObligations : Bool := false
   deriving Inhabited
 
 namespace TypingState
@@ -157,6 +176,20 @@ def empty (oracle : ProofOracle := .trivial) : TypingState :=
 
 def withContext (ctx : Context) (oracle : ProofOracle := .trivial) : TypingState :=
   { context := ctx, oracle := oracle, freshCounter := 0 }
+
+/-- Create state for obligation accumulation (no oracle checking) -/
+def forObligations : TypingState :=
+  { context := Context.empty
+  , oracle := .trivial  -- Not used when accumulating
+  , freshCounter := 0
+  , accumulateObligations := true }
+
+/-- Create state for obligation accumulation with initial context -/
+def forObligationsWithContext (ctx : Context) : TypingState :=
+  { context := ctx
+  , oracle := .trivial
+  , freshCounter := 0
+  , accumulateObligations := true }
 
 end TypingState
 
@@ -281,6 +314,59 @@ def ensureProvable (lc : LogicalConstraint) : TypingM Unit := do
   | .false_ _ =>
     let ctx ← getContext
     fail (.unprovableConstraint lc ctx)
+
+/-! ### Proof Obligation Operations
+
+These functions support the new proof obligation architecture where
+constraints are accumulated during type checking and discharged afterward.
+-/
+
+/-- Get accumulated obligations -/
+def getObligations : TypingM ObligationSet := do
+  let s ← getState
+  return s.obligations
+
+/-- Add a proof obligation -/
+def addObligation (ob : Obligation) : TypingM Unit := do
+  modifyState fun s => { s with obligations := ObligationSet.add ob s.obligations }
+
+/-- Add a constraint as a proof obligation.
+    If accumulateObligations is true, adds to the obligation set.
+    Otherwise, checks immediately with the oracle (legacy behavior).
+
+    When accumulating, the obligation captures the current constraints as
+    assumptions. This is crucial: the obligation semantically means
+    "under the current assumptions, the constraint holds". -/
+def requireConstraint (lc : LogicalConstraint) (loc : Loc) (desc : String := "constraint") : TypingM Unit := do
+  let s ← getState
+  if s.accumulateObligations then
+    -- New behavior: accumulate obligation for post-hoc discharge
+    -- Capture current constraints as assumptions
+    let assumptions ← getConstraints
+    let ob := Obligation.arithmetic desc lc assumptions loc
+    addObligation ob
+  else
+    -- Legacy behavior: check immediately
+    ensureProvable lc
+
+/-- Add multiple constraints as obligations.
+    All obligations capture the same assumptions (current constraints). -/
+def requireConstraints (lcs : LCSet) (loc : Loc) : TypingM Unit := do
+  for lc in lcs do
+    requireConstraint lc loc
+
+/-- Check if we're in obligation accumulation mode -/
+def isAccumulatingObligations : TypingM Bool := do
+  let s ← getState
+  return s.accumulateObligations
+
+/-- Enable obligation accumulation mode -/
+def enableObligationAccumulation : TypingM Unit := do
+  modifyState fun s => { s with accumulateObligations := true }
+
+/-- Disable obligation accumulation mode (use oracle instead) -/
+def disableObligationAccumulation : TypingM Unit := do
+  modifyState fun s => { s with accumulateObligations := false }
 
 /-! ### Resource Manipulation -/
 
