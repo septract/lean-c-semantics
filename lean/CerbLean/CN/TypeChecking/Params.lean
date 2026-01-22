@@ -263,7 +263,18 @@ def checkFunctionWithParams
 
         -- Check the body with a continuation that handles postcondition
         -- The continuation is called at each exit point of the function
-        let postconditionK (_returnVal : IndexTerm) : TypingM Unit := do
+        let postconditionK (returnVal : IndexTerm) : TypingM Unit := do
+          -- Bind 'return' to the actual return value
+          -- This allows postconditions to refer to the function's return value
+          let returnSym : Sym := { id := 999999, name := some "return" }
+          TypingM.addAValue returnSym returnVal loc "function return value"
+
+          -- Add the constraint `return = returnVal` to the context
+          -- This is crucial for SMT to know what 'return' equals
+          let returnTerm := AnnotTerm.mk (.sym returnSym) returnVal.bt loc
+          let eqConstraint := AnnotTerm.mk (.binop .eq returnTerm returnVal) .bool loc
+          TypingM.addC (.t eqConstraint)
+
           -- Process postcondition: consume final resources, generate obligations
           processPostcondition spec.ensures loc
           -- Check no resources leaked (must all be consumed or returned)
