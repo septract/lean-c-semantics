@@ -13,11 +13,13 @@ import CerbLean.CN.TypeChecking.Inference
 import CerbLean.CN.TypeChecking.Expr
 import CerbLean.CN.Types
 import CerbLean.CN.Parser
+import CerbLean.CN.Verification.Obligation
 
 namespace CerbLean.CN.TypeChecking
 
 open CerbLean.Core (Sym Loc)
 open CerbLean.CN.Types
+open CerbLean.CN.Verification (Obligation ObligationSet TypeCheckResult)
 
 /-! ## Processing Specification Clauses
 
@@ -52,10 +54,13 @@ def processPreClause (clause : Clause) (loc : Loc) : TypingM Unit := do
 
 /-- Process a single clause from a postcondition.
     - Resource clauses: CONSUME from context (verify function produces them)
-    - Constraint clauses: add to constraint set (obligations to prove)
+    - Constraint clauses: generate proof obligations (to be discharged later)
 
     When verifying a function, postcondition resources must be CONSUMED
     (verified to exist) - the function must produce these for the caller.
+
+    Postcondition constraints become proof OBLIGATIONS, not assumptions.
+    They are accumulated and discharged after type checking.
 
     Corresponds to: similar to bind_arguments but for return types -/
 def processPostClause (clause : Clause) (loc : Loc) : TypingM Unit := do
@@ -64,23 +69,16 @@ def processPostClause (clause : Clause) (loc : Loc) : TypingM Unit := do
     -- For postconditions, we VERIFY the resource exists (consume it)
     consumeResourceClause name resource loc
   | .constraint assertion =>
-    -- Add the constraint to be proved
-    TypingM.addC (.t assertion)
+    -- Postcondition constraints are OBLIGATIONS to prove, not assumptions
+    -- They are accumulated with current assumptions as context
+    TypingM.requireConstraint (.t assertion) loc "postcondition constraint"
 
 /-! ## Checking Function Specifications
 
 The main type checking function for a function specification.
+Uses TypeCheckResult from CN.Verification.Obligation which includes
+accumulated proof obligations.
 -/
-
-/-- Result of type checking -/
-structure TypeCheckResult where
-  /-- Whether type checking succeeded -/
-  success : Bool
-  /-- Final typing context after checking -/
-  finalContext : Context
-  /-- Any error that occurred -/
-  error : Option TypeError
-  deriving Inhabited
 
 /-- Process all precondition clauses (requires).
     Consumes resources and binds outputs.
@@ -98,21 +96,16 @@ def processPostcondition (post : Postcondition) (loc : Loc) : TypingM Unit := do
   for clause in post.clauses do
     processPostClause clause loc
 
-/-- Verify all constraints are provable.
-    Called after processing spec to check accumulated constraints. -/
-def verifyConstraints : TypingM Unit := do
-  let ctx ← TypingM.getContext
-  for lc in ctx.constraints do
-    TypingM.ensureProvable lc
-
 /-- Type check a function specification.
 
     The process:
     1. Start with initial resources (from caller)
-    2. Process precondition: consume resources, bind outputs
+    2. Process precondition: add resources as assumptions, bind outputs
     3. (Function body executes - not checked here)
-    4. Process postcondition: produce resources, add constraints
-    5. Verify all constraints are provable
+    4. Process postcondition: consume resources, generate constraint obligations
+
+    Returns TypeCheckResult with accumulated proof obligations.
+    Obligations are discharged separately (Phase 4).
 
     For a trusted function, we skip verification.
 
@@ -121,39 +114,30 @@ def checkFunctionSpec
     (spec : FunctionSpec)
     (initialResources : List Resource)
     (loc : Loc)
-    (oracle : ProofOracle := .trivial)
     : TypeCheckResult :=
   -- For trusted specs, skip verification
   if spec.trusted then
-    { success := true
-    , finalContext := Context.empty
-    , error := none }
+    TypeCheckResult.ok
   else
-    -- Run type checking
+    -- Run type checking with obligation accumulation enabled
     let initialState : TypingState := {
       context := { Context.empty with resources := initialResources }
-      oracle := oracle
+      oracle := .trivial  -- Not used when accumulating obligations
+      accumulateObligations := true
     }
 
     let computation : TypingM Unit := do
-      -- Process precondition
+      -- Process precondition (assumptions)
       processPrecondition spec.requires loc
 
-      -- Process postcondition
+      -- Process postcondition (generates obligations)
       processPostcondition spec.ensures loc
-
-      -- Verify all accumulated constraints
-      verifyConstraints
 
     match TypingM.run computation initialState with
     | .ok (_, finalState) =>
-      { success := true
-      , finalContext := finalState.context
-      , error := none }
+      TypeCheckResult.okWithObligations finalState.obligations
     | .error err =>
-      { success := false
-      , finalContext := Context.empty
-      , error := some err }
+      TypeCheckResult.fail (toString err)
 
 /-! ## Extract Initial Resources from Spec
 
@@ -191,31 +175,30 @@ def checkNoLeakedResources : TypingM Unit := do
 /-- Type check a function body against its specification (CPS style).
 
     The process:
-    1. Start with initial resources (from caller)
-    2. Process precondition: add resources to context
-    3. Check body expression with postcondition continuation
-    4. At each exit point, the continuation:
-       - Processes postcondition (verify final resources)
-       - Verifies all constraints
+    1. Process precondition: add resources to context as assumptions
+    2. Check body expression with postcondition continuation
+    3. At each exit point, the continuation:
+       - Processes postcondition (generates obligations for resources and constraints)
        - Checks no resources leaked
+
+    Returns TypeCheckResult with accumulated proof obligations.
+    Obligations are discharged separately (Phase 4).
 
     Corresponds to: check_procedure in check.ml lines 2377-2426 -/
 def checkFunction
     (spec : FunctionSpec)
     (body : Core.AExpr)
     (loc : Loc)
-    (oracle : ProofOracle := .trivial)
     : TypeCheckResult :=
   -- For trusted specs, skip verification
   if spec.trusted then
-    { success := true
-    , finalContext := Context.empty
-    , error := none }
+    TypeCheckResult.ok
   else
-    -- Run type checking (resources will be added by processPrecondition)
+    -- Run type checking with obligation accumulation enabled
     let initialState : TypingState := {
       context := Context.empty
-      oracle := oracle
+      oracle := .trivial  -- Not used when accumulating obligations
+      accumulateObligations := true
     }
 
     let computation : TypingM Unit := do
@@ -225,10 +208,8 @@ def checkFunction
       -- 2. Check the body with a continuation that handles postcondition
       --    The continuation is called at each exit point of the function
       let postconditionK (_returnVal : IndexTerm) : TypingM Unit := do
-        -- Process postcondition: consume final resources
+        -- Process postcondition: consume final resources, generate obligations
         processPostcondition spec.ensures loc
-        -- Verify all accumulated constraints
-        verifyConstraints
         -- Check no resources leaked (must all be consumed or returned)
         checkNoLeakedResources
 
@@ -236,62 +217,59 @@ def checkFunction
 
     match TypingM.run computation initialState with
     | .ok (_, finalState) =>
-      { success := true
-      , finalContext := finalState.context
-      , error := none }
+      TypeCheckResult.okWithObligations finalState.obligations
     | .error err =>
-      { success := false
-      , finalContext := Context.empty
-      , error := some err }
+      TypeCheckResult.fail (toString err)
 
 /-! ## Convenience Functions -/
 
 /-- Check if a function spec is well-typed given initial resources.
-    Returns true if type checking succeeds. -/
+    Returns true if structural type checking succeeds.
+    Note: Even if this returns true, obligations still need to be discharged. -/
 def isWellTyped
     (spec : FunctionSpec)
     (initialResources : List Resource)
-    (oracle : ProofOracle := .trivial)
     : Bool :=
-  let result := checkFunctionSpec spec initialResources .unknown oracle
+  let result := checkFunctionSpec spec initialResources .unknown
   result.success
 
-/-- Check a function spec and return any error.
-    Returns none if successful, some error otherwise. -/
+/-- Check a function spec and return any error message.
+    Returns none if structural checking succeeded, some error otherwise.
+    Note: Success here doesn't mean verification is complete - obligations
+    must still be discharged. -/
 def checkSpec
     (spec : FunctionSpec)
     (initialResources : List Resource)
-    (oracle : ProofOracle := .trivial)
-    : Option TypeError :=
-  let result := checkFunctionSpec spec initialResources .unknown oracle
+    : Option String :=
+  let result := checkFunctionSpec spec initialResources .unknown
   result.error
 
 /-- Run type checking on a spec in standalone mode.
     Synthesizes initial resources from the precondition.
-    Returns the TypeCheckResult. -/
+    Returns the TypeCheckResult with accumulated obligations. -/
 def checkSpecStandalone
     (spec : FunctionSpec)
-    (oracle : ProofOracle := .trivial)
     : TypeCheckResult :=
   let initialResources := extractPreconditionResources spec
-  checkFunctionSpec spec initialResources .unknown oracle
+  checkFunctionSpec spec initialResources .unknown
 
 /-- Parse and type check a CN annotation string.
+    Returns TypeCheckResult with accumulated obligations.
     This is the main entry point for checking CN specs. -/
 def parseAndCheck
     (input : String)
-    (oracle : ProofOracle := .trivial)
     : Except String TypeCheckResult :=
   match CerbLean.CN.Parser.parseFunctionSpec input with
   | .error e => .error s!"Parse error: {e}"
-  | .ok spec => .ok (checkSpecStandalone spec oracle)
+  | .ok spec => .ok (checkSpecStandalone spec)
 
-/-- Parse and type check, returning a simple success/failure. -/
+/-- Parse and type check, returning a simple success/failure.
+    Note: This only checks structural success. Obligations are not discharged.
+    Use parseAndCheck to get the full result with obligations. -/
 def parseAndCheckBool
     (input : String)
-    (oracle : ProofOracle := .trivial)
     : Bool :=
-  match parseAndCheck input oracle with
+  match parseAndCheck input with
   | .ok result => result.success
   | .error _ => false
 
