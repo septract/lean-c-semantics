@@ -242,7 +242,12 @@ theorem AnnotTerm.term_lt_of_mem_list
     (x : Identifier × AnnotTerm) (h : x ∈ members)
     [SizeOf Identifier] :
     sizeOf x.2.term < 1 + sizeOf tag + sizeOf members := by
-  sorry
+  -- Chain: x.2.term < x.2 < x < members ≤ 1 + tag + members
+  have h1 : sizeOf x.2.term < sizeOf x.2 := AnnotTerm.term_lt_self x.2
+  have h2 : sizeOf x < sizeOf members := List.sizeOf_lt_of_mem h
+  have h3 : sizeOf x.2 < sizeOf x := by
+    cases x with | mk a b => simp +arith [sizeOf, Prod._sizeOf_1]
+  omega
 
 /-- Evaluate an index term given a valuation.
     Returns None if the term cannot be evaluated (e.g., free variables, unsupported operations). -/
