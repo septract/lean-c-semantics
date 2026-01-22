@@ -271,9 +271,11 @@ Tests include: layout (sizeof/alignof), allocation, store/load roundtrip, null d
 **CN Verification Tests** (`make test-cn`):
 Tests for the CN separation logic type system implementation.
 ```bash
-make test-cn                              # Run all CN tests
-./scripts/test_cn.sh --all                # Run all tests in tests/cn/
+make test-cn                              # Run integration tests on tests/cn/
+make test-cn-unit                         # Run unit tests only (fast, no Cerberus)
+./scripts/test_cn.sh                      # Run all tests in tests/cn/
 ./scripts/test_cn.sh /path/to/test.c      # Run a specific test
+./scripts/test_cn.sh --unit               # Run unit tests only
 ```
 
 Test files in `tests/cn/` follow these conventions:

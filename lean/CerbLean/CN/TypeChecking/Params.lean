@@ -40,12 +40,14 @@ import CerbLean.Core
 import CerbLean.CN.Types
 import CerbLean.CN.TypeChecking.Check
 import CerbLean.CN.TypeChecking.Expr
+import CerbLean.CN.Verification.Obligation
 import Std.Data.HashMap
 
 namespace CerbLean.CN.TypeChecking
 
 open CerbLean.Core (Sym Loc)
 open CerbLean.CN.Types
+open CerbLean.CN.Verification (TypeCheckResult)
 
 /-! ## Type Aliases -/
 
@@ -192,13 +194,10 @@ def checkFunctionWithParams
     (body : Core.AExpr)
     (params : List (Core.Sym × Core.BaseType))
     (loc : Core.Loc)
-    (oracle : ProofOracle := .trivial)
     : TypeCheckResult :=
   -- For trusted specs, skip verification
   if spec.trusted then
-    { success := true
-    , finalContext := Context.empty
-    , error := none }
+    TypeCheckResult.ok
   else
     -- Step 1: Get parameter IDs and scan for aliases
     let paramIds := params.map (·.1.id)
@@ -243,19 +242,18 @@ def checkFunctionWithParams
 
     match setupResult with
     | .error msg =>
-      { success := false
-      , finalContext := Context.empty
-      , error := some (.other msg) }
+      TypeCheckResult.fail msg
     | .ok (paramCtx, paramValueMap, nextFreshId) =>
       -- Step 3: Initial context (resources will be added by processPrecondition)
       let initialCtx := paramCtx
 
-      -- Step 4: Create initial state with ParamValueMap
+      -- Step 4: Create initial state with ParamValueMap and obligation accumulation
       let initialState : TypingState := {
         context := initialCtx
-        oracle := oracle
+        oracle := .trivial  -- Not used when accumulating obligations
         freshCounter := nextFreshId
         paramValues := paramValueMap
+        accumulateObligations := true
       }
 
       -- Step 5: Run type checking (CPS style)
@@ -266,10 +264,8 @@ def checkFunctionWithParams
         -- Check the body with a continuation that handles postcondition
         -- The continuation is called at each exit point of the function
         let postconditionK (_returnVal : IndexTerm) : TypingM Unit := do
-          -- Process postcondition: consume final resources
+          -- Process postcondition: consume final resources, generate obligations
           processPostcondition spec.ensures loc
-          -- Verify all accumulated constraints
-          verifyConstraints
           -- Check no resources leaked (must all be consumed or returned)
           checkNoLeakedResources
 
@@ -277,12 +273,8 @@ def checkFunctionWithParams
 
       match TypingM.run computation initialState with
       | .ok (_, finalState) =>
-        { success := true
-        , finalContext := finalState.context
-        , error := none }
+        TypeCheckResult.okWithObligations finalState.obligations
       | .error err =>
-        { success := false
-        , finalContext := Context.empty
-        , error := some err }
+        TypeCheckResult.fail (toString err)
 
 end CerbLean.CN.TypeChecking

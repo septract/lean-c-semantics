@@ -1,9 +1,9 @@
 #!/bin/bash
-# Test CN specification parsing
+# Test CN type checking
 #
-# Usage: ./scripts/test_cn.sh              Run unit tests only
-#        ./scripts/test_cn.sh [file.c ...]  Test specific C files
-#        ./scripts/test_cn.sh --all         Test all files in tests/cn/
+# Usage: ./scripts/test_cn.sh              Run integration tests on tests/cn/
+#        ./scripts/test_cn.sh [file.c ...] Test specific C files
+#        ./scripts/test_cn.sh --unit       Run unit tests only (no Cerberus)
 
 set -e
 
@@ -21,16 +21,18 @@ if ! lake build test_cn 2>&1 | tail -5; then
 fi
 echo ""
 
-# No args: run unit tests only
-if [ $# -eq 0 ]; then
+# Handle --unit flag: run unit tests only
+if [ "$1" == "--unit" ]; then
     echo "=== CN Unit Tests ==="
     exec "$TEST_CN"
 fi
 
-# Handle --all flag
-if [ "$1" == "--all" ]; then
+# Determine test files
+if [ $# -eq 0 ]; then
+    # No args: run all integration tests in tests/cn/
     TEST_FILES=("$PROJECT_ROOT"/tests/cn/*.c)
 else
+    # Specific files provided
     TEST_FILES=("$@")
 fi
 
