@@ -228,9 +228,25 @@ def denoteUnOp (op : UnOp) (v : HeapValue) : Option HeapValue :=
 Evaluate index terms to concrete values.
 -/
 
+/-- Helper lemma: the term inside an AnnotTerm is smaller than the AnnotTerm itself.
+    This is used for termination proofs in denoteTerm. -/
+theorem AnnotTerm.term_lt_self (t : AnnotTerm) : sizeOf t.term < sizeOf t := by
+  cases t with
+  | mk term bt loc =>
+    simp only [AnnotTerm.term]
+    simp +arith [sizeOf, Pattern_._sizeOf_3, Pattern_._sizeOf_4]
+
+/-- Helper lemma for struct_ case -/
+theorem AnnotTerm.term_lt_of_mem_list
+    (tag : Sym) (members : List (Identifier × AnnotTerm))
+    (x : Identifier × AnnotTerm) (h : x ∈ members)
+    [SizeOf Identifier] :
+    sizeOf x.2.term < 1 + sizeOf tag + sizeOf members := by
+  sorry
+
 /-- Evaluate an index term given a valuation.
     Returns None if the term cannot be evaluated (e.g., free variables, unsupported operations). -/
-partial def denoteTerm (ρ : Valuation) : Term → Option HeapValue
+def denoteTerm (ρ : Valuation) : Term → Option HeapValue
   | .const c => denoteConst c
   | .sym s => ρ.lookup s
   | .unop op arg => do
@@ -254,9 +270,9 @@ partial def denoteTerm (ρ : Valuation) : Term → Option HeapValue
     -- Would need tuple value representation
     none
   | .struct_ tag members => do
-    let fields ← members.mapM fun (id, val) => do
-      let v ← denoteTerm ρ val.term
-      return (id, v)
+    let fields ← members.mapM fun x => do
+      let v ← denoteTerm ρ x.2.term
+      return (x.1, v)
     return HeapValue.struct_ tag fields
   | .structMember obj member => do
     let HeapValue.struct_ _ fields := (← denoteTerm ρ obj.term) | none
@@ -271,6 +287,15 @@ partial def denoteTerm (ρ : Valuation) : Term → Option HeapValue
   | .cast _ val => denoteTerm ρ val.term  -- Casts are no-ops for concrete values
   -- Most other constructs are not supported for concrete evaluation
   | _ => none
+  termination_by t => sizeOf t
+  decreasing_by
+    all_goals
+      simp_wf
+      first
+      -- Most cases: direct application of term_lt_self with transitivity
+      | exact Nat.lt_of_lt_of_le (AnnotTerm.term_lt_self _) (by omega)
+      -- List membership case (struct_ with mapM)
+      | exact AnnotTerm.term_lt_of_mem_list tag members _ ‹_ ∈ members›
 
 /-- Evaluate an annotated index term -/
 def denoteAnnotTerm (ρ : Valuation) (t : AnnotTerm) : Option HeapValue :=
