@@ -59,6 +59,31 @@ theorem boolToHeapValue_isTrue_iff (b : Bool) :
     heapValueIsTrue (boolToHeapValue b) ↔ b := by
   cases b <;> simp [boolToHeapValue, heapValueIsTrue]
 
+/-! ## Pure Valuation Extraction
+
+Extract a pure integer valuation from a HeapValue valuation.
+-/
+
+/-- Extract integer values from a HeapValue valuation.
+    Non-integer symbols default to 0. -/
+def extractPureVal (ρ : Valuation) : PureIntVal := fun s =>
+  match ρ.lookup s with
+  | some (.integer _ n) => n
+  | _ => 0
+
+/-- extractPureVal produces a compatible pure valuation -/
+theorem extractPureVal_compatible (ρ : Valuation) :
+    valuationCompatible ρ (extractPureVal ρ) := by
+  intro s
+  -- Goal: match ρ.lookup s with | some (.integer _ n) => extractPureVal ρ s = n | _ => True
+  simp only [extractPureVal]
+  cases h : ρ.lookup s with
+  | none => trivial
+  | some v =>
+    cases v with
+    | integer ty n => simp [h]
+    | _ => trivial
+
 /-! ## Integer Soundness
 
 termToInt matches denoteTerm for integer results.
