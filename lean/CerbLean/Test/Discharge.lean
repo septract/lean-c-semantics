@@ -211,8 +211,17 @@ The soundness theorem has `sorry` but we USE it to test the pipeline.
 
 open CerbLean.CN.Semantics (constraintToPureProp constraintToPureProp_sound
   termToProp_implies_constraintToProp valuationCompatible PureIntVal
-  extractPureVal extractPureVal_compatible
-  constraintSetToProp_head constraintSetToProp_tail constraintToProp_implies_pure)
+  extractPureVal extractPureVal_compatible constraintDefined
+  constraintSetToProp_head constraintSetToProp_tail constraintToProp_implies_pure
+  denoteAnnotTerm denoteTerm denoteConst denoteBinOp boolToHeapValue defaultIntType)
+
+/-- If constraintToProp holds for a .t constraint, the denotation is defined -/
+theorem constraintToProp_implies_defined (ρ : Valuation) (it : IndexTerm)
+    (h : constraintToProp ρ (.t it)) : ∃ v, denoteAnnotTerm ρ it = some v := by
+  unfold constraintToProp at h
+  cases hd : denoteAnnotTerm ρ it with
+  | none => simp [hd] at h
+  | some v => exact ⟨v, rfl⟩
 
 /-- Test constraint: 1 < 2 -/
 def testConstraint : LogicalConstraint :=
@@ -227,21 +236,50 @@ def testConstraint : LogicalConstraint :=
 -/
 theorem pipeline_test : ∀ ρ : Valuation, constraintToProp ρ testConstraint := by
   intro ρ
-  -- Use the soundness theorem (has sorry, but we're testing the pipeline)
-  apply constraintToPureProp_sound ρ (fun _ => 0) testConstraint (1 < 2)
-  -- Goal 1: valuationCompatible - for ground terms, this is irrelevant
-  --   (ground constraints don't use symbols, so σ doesn't matter)
-  · sorry
+  -- Use the soundness theorem with extractPureVal for compatibility
+  let σ := extractPureVal ρ
+  apply constraintToPureProp_sound ρ σ testConstraint (1 < 2)
+  -- Goal 1: valuationCompatible - proven by extractPureVal_compatible
+  · exact extractPureVal_compatible ρ
   -- Goal 2: constraintToPureProp gives some (1 < 2)
-  --   Since termToProp is partial, we use sorry (testing pipeline structure)
-  · sorry
-  -- Goal 3: 1 < 2 - SMT needs explicit goal type (show normalizes it)
+  -- For ground terms, the result doesn't depend on σ.
+  -- Unfold and simp to reduce the match expressions.
+  · unfold constraintToPureProp testConstraint mkBinOp mkIntConst termToProp termToInt
+    simp only [AnnotTerm.term, Option.pure_def, Option.bind_eq_bind]
+    cn_discharge
+  -- Goal 3: 1 < 2 - SMT proves this
   · show 1 < 2
-    smt
+    smt -- DO NOT REMOVE SMT CALL
+  -- Goal 4: constraintDefined - for ground terms, denoteTerm always succeeds
+  · simp only [constraintDefined, testConstraint, mkBinOp, mkIntConst,
+               denoteAnnotTerm, denoteTerm, AnnotTerm.term, denoteConst,
+               Option.pure_def, Option.bind_eq_bind, denoteBinOp, boolToHeapValue]
+    exact ⟨_, rfl⟩
 
 /-- Helper to create a symbolic term from a Sym -/
 def mkSymTerm (s : Sym) : IndexTerm :=
   ⟨.sym s, .integer, Loc.t.unknown⟩
+
+/-- Extract integer binding from a constraint of form 0 < sym.
+    The constraint can only be true if the symbol is bound to an integer. -/
+theorem int_bound_from_lt_constraint (ρ : Valuation) (s : Sym)
+    (h : constraintToProp ρ (.t (mkBinOp .lt (mkIntConst 0) (mkSymTerm s)))) :
+    ∃ ty n, ρ.lookup s = some (.integer ty n) := by
+  unfold constraintToProp at h
+  simp only [denoteAnnotTerm, denoteTerm, mkBinOp, mkIntConst, mkSymTerm, AnnotTerm.term,
+             denoteConst, Option.bind_eq_bind] at h
+  cases hs : ρ.lookup s with
+  | none => simp [hs, denoteBinOp] at h
+  | some v =>
+    cases v with
+    | integer ty n => exact ⟨ty, n, rfl⟩
+    | _ => simp [hs, denoteBinOp] at h
+
+/-- If symbol is bound, denoteTerm on sym succeeds -/
+theorem denoteTerm_sym_of_bound (ρ : Valuation) (s : Sym) (v : HeapValue)
+    (h : ρ.lookup s = some v) :
+    denoteTerm ρ (.sym s) = some v := by
+  simp [denoteTerm, h]
 
 /-- Symbolic constraint: 0 < x (i.e., x > 0) -/
 def xPositive : LogicalConstraint :=
@@ -280,7 +318,12 @@ theorem pipeline_test_linear : linearInequalityObligation.toProp := by
   -- Goal 1: valuationCompatible ρ σ - NOW PROVEN!
   · exact extractPureVal_compatible ρ
   -- Goal 2: constraintToPureProp σ sumPositive = some (0 < σ xSym + σ ySym)
-  · sorry
+  · unfold constraintToPureProp sumPositive
+    simp only [AnnotTerm.term]
+    unfold termToProp
+    simp only []
+    unfold termToInt termToInt
+    rfl
   -- Goal 3: 0 < σ xSym + σ ySym - THIS is what SMT proves!
   -- We need the pure assumptions. Apply assumption soundness too:
   · -- Transform assumptions to pure form using the extraction lemmas
@@ -294,13 +337,33 @@ theorem pipeline_test_linear : linearInequalityObligation.toProp := by
     have h_x : x > 0 := by
       apply constraintToProp_implies_pure ρ σ xPositive (0 < σ xSym)
       · exact extractPureVal_compatible ρ
-      · sorry  -- constraintToPureProp computes correctly
+      · unfold constraintToPureProp xPositive mkBinOp mkIntConst mkSymTerm
+        simp only [AnnotTerm.term]
+        unfold termToProp termToInt termToInt
+        rfl
       · exact h_x_heap
     have h_y : y > 0 := by
-      sorry  -- Similar for y
+      apply constraintToProp_implies_pure ρ σ (.t (mkBinOp .lt (mkIntConst 0) (mkSymTerm ySym))) (0 < σ ySym)
+      · exact extractPureVal_compatible ρ
+      · unfold constraintToPureProp mkBinOp mkIntConst mkSymTerm
+        simp only [AnnotTerm.term]
+        unfold termToProp termToInt termToInt
+        rfl
+      · exact h_y_heap
     -- NOW SMT can prove the arithmetic!
     show 0 < x + y
     smt [h_x, h_y]
+  -- Goal 4: constraintDefined - derive from assumptions that symbols are bound
+  · -- Extract that xSym and ySym are bound to integers from the assumptions
+    have h_x_heap : constraintToProp ρ xPositive := constraintSetToProp_head ρ _ _ h_assumptions
+    have h_y_heap : constraintToProp ρ _ := constraintSetToProp_head ρ _ _ (constraintSetToProp_tail ρ _ _ h_assumptions)
+    have ⟨tyx, nx, hx⟩ := int_bound_from_lt_constraint ρ xSym h_x_heap
+    have ⟨tyy, ny, hy⟩ := int_bound_from_lt_constraint ρ ySym h_y_heap
+    -- Now show sumPositive is defined - both symbols are bound to integers
+    unfold constraintDefined sumPositive mkSymTerm
+    simp only [denoteAnnotTerm, denoteTerm, AnnotTerm.term, denoteConst,
+               Option.pure_def, Option.bind_eq_bind, hx, hy, denoteBinOp, boolToHeapValue]
+    exact ⟨_, rfl⟩
 
 /-! ## Obligation.toProp Structure Tests
 
