@@ -88,13 +88,11 @@ theorem extractPureVal_compatible (ρ : Valuation) :
 
 termToInt matches denoteTerm for integer results.
 
-Note: Because `termToInt` and `termToBool` are `partial` (mutually recursive),
-we cannot unfold them or do structural induction directly. The soundness
-theorems below use `sorry` and would require either:
-1. Making termToInt/termToBool terminating (well-founded recursion), or
-2. Defining an auxiliary inductive predicate capturing the computation
-
-For now, the structure is in place for the SMT discharge strategy.
+Note: The `termToInt`, `termToBool`, and `termToProp` functions are now
+terminating (well-founded recursion on sizeOf). The soundness theorems
+below still use `sorry` because proving the correspondence between pure
+interpretation and HeapValue interpretation requires careful induction
+on the term structure.
 -/
 
 /-- For symbols: when valuations are compatible, integers match -/

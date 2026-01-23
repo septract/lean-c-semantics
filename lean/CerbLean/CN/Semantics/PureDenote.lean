@@ -58,13 +58,8 @@ that depend on boolean terms, and boolean terms compare integers.
 mutual
 
 /-- Interpret an integer term as Int.
-    Returns none for non-integer terms or unsupported operations.
-
-    Note: This is partial due to mutual recursion with termToBool.
-    Making it terminating requires well-founded recursion on a combined
-    measure, which is complex. For soundness proofs, we use sorry for
-    termination-dependent lemmas. -/
-partial def termToInt (σ : PureIntVal) : Term → Option Int
+    Returns none for non-integer terms or unsupported operations. -/
+def termToInt (σ : PureIntVal) : Term → Option Int
   | .const (.z n) => some n
   | .const (.bits _ _ n) => some n
   | .sym s => some (σ s)
@@ -93,10 +88,12 @@ partial def termToInt (σ : PureIntVal) : Term → Option Int
     let v ← termToInt σ binding.term
     termToInt (fun s => if s == var then v else σ s) body.term
   | _ => none
+  termination_by t => sizeOf t
+  decreasing_by all_goals simp_wf; exact Nat.lt_of_lt_of_le (AnnotTerm.term_lt_self _) (by omega)
 
 /-- Interpret a boolean term as Bool.
     Returns none for non-boolean terms or unsupported operations. -/
-partial def termToBool (σ : PureIntVal) : Term → Option Bool
+def termToBool (σ : PureIntVal) : Term → Option Bool
   | .const (.bool b) => some b
   | .const (.z n) => some (decide (n ≠ 0))  -- C-style: 0 is false, non-0 is true
   | .unop .not arg => do
@@ -138,6 +135,8 @@ partial def termToBool (σ : PureIntVal) : Term → Option Bool
     let v ← termToInt σ binding.term
     termToBool (fun s => if s == var then v else σ s) body.term
   | _ => none
+  termination_by t => sizeOf t
+  decreasing_by all_goals simp_wf; exact Nat.lt_of_lt_of_le (AnnotTerm.term_lt_self _) (by omega)
 
 end
 
@@ -148,7 +147,7 @@ Interpret boolean terms directly as Prop (for SMT).
 
 /-- Interpret a boolean term as Prop.
     This is what SMT will reason about. -/
-partial def termToProp (σ : PureIntVal) : Term → Option Prop
+def termToProp (σ : PureIntVal) : Term → Option Prop
   | .const (.bool true) => some True
   | .const (.bool false) => some False
   | .const (.z n) => some (n ≠ 0)
@@ -191,6 +190,8 @@ partial def termToProp (σ : PureIntVal) : Term → Option Prop
     let v ← termToInt σ binding.term
     termToProp (fun s => if s == var then v else σ s) body.term
   | _ => none
+  termination_by t => sizeOf t
+  decreasing_by all_goals simp_wf; exact Nat.lt_of_lt_of_le (AnnotTerm.term_lt_self _) (by omega)
 
 /-! ## Constraint Interpretation
 
