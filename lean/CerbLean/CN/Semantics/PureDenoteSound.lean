@@ -81,7 +81,7 @@ theorem extractPureVal_compatible (ρ : Valuation) :
   | none => trivial
   | some v =>
     cases v with
-    | integer ty n => simp [h]
+    | integer ty n => simp
     | _ => trivial
 
 /-! ## Integer Soundness
@@ -107,13 +107,19 @@ theorem termToInt_sym_matches
   exact hs
 
 /-- General soundness theorem for integer terms.
-    If termToInt succeeds with value n, then denoteTerm gives an integer with that value.
+    If termToInt succeeds with value n, AND denoteTerm succeeds,
+    then denoteTerm gives an integer with that value.
 
-    TODO: Requires termToInt to be terminating for full proof by induction. -/
+    The precondition h_defined is necessary because termToInt can succeed
+    even when denoteTerm fails (e.g., for symbols not bound in ρ but with
+    values in σ).
+
+    TODO: Proof by induction on term structure. -/
 theorem termToInt_matches_denoteTerm
     (ρ : Valuation) (σ : PureIntVal) (t : Term) (n : Int)
     (h_compat : valuationCompatible ρ σ)
-    (h_pure : termToInt σ t = some n) :
+    (h_pure : termToInt σ t = some n)
+    (h_defined : ∃ v, denoteTerm ρ t = some v) :
     ∃ ty, denoteTerm ρ t = some (.integer ty n) := by
   sorry
 
@@ -122,12 +128,19 @@ theorem termToInt_matches_denoteTerm
 termToProp matches constraintToProp.
 -/
 
-/-- If termToProp gives P, and P holds, then constraintToProp (.t term) holds -/
+/-- If termToProp gives P, and P holds, AND the HeapValue denotation succeeds,
+    then constraintToProp (.t term) holds.
+
+    The precondition h_defined is necessary because termToProp can succeed
+    even when denoteAnnotTerm fails (e.g., for terms with symbols not bound in ρ).
+    In practice, this precondition is satisfied when we have assumptions about
+    the symbols appearing in the term. -/
 theorem termToProp_implies_constraintToProp
     (ρ : Valuation) (σ : PureIntVal) (it : IndexTerm) (P : Prop)
     (h_compat : valuationCompatible ρ σ)
     (h_pure : termToProp σ it.term = some P)
-    (h_P : P) :
+    (h_P : P)
+    (h_defined : ∃ v, denoteAnnotTerm ρ it = some v) :
     constraintToProp ρ (.t it) := by
   sorry  -- TODO: induction on term structure
 
@@ -136,28 +149,46 @@ theorem termToProp_implies_constraintToProp
 The key theorem for SMT discharge.
 -/
 
-/-- Pure constraint soundness: if pure interpretation holds, HeapValue interpretation holds -/
+/-- Predicate: a constraint's HeapValue denotation is well-defined.
+    For .t constraints: the term can be evaluated.
+    For forall_ constraints: all instantiations can be evaluated. -/
+def constraintDefined (ρ : Valuation) : LogicalConstraint → Prop
+  | .t it => ∃ v, denoteAnnotTerm ρ it = some v
+  | .forall_ (x, _) body =>
+    ∀ v : HeapValue, ∃ hv, denoteAnnotTerm ((x, v) :: ρ) body = some hv
+
+/-- Pure constraint soundness: if pure interpretation holds, HeapValue interpretation holds.
+
+    The precondition h_defined ensures that the HeapValue denotation succeeds.
+    This is necessary because the pure interpretation can succeed even when
+    the HeapValue interpretation fails (due to unbound symbols). -/
 theorem constraintToPureProp_sound
     (ρ : Valuation) (σ : PureIntVal) (lc : LogicalConstraint) (P : Prop)
     (h_compat : valuationCompatible ρ σ)
     (h_pure : constraintToPureProp σ lc = some P)
-    (h_P : P) :
+    (h_P : P)
+    (h_defined : constraintDefined ρ lc) :
     constraintToProp ρ lc := by
   cases lc with
   | t it =>
     -- For .t case, use termToProp_implies_constraintToProp
     simp only [constraintToPureProp] at h_pure
-    exact termToProp_implies_constraintToProp ρ σ it P h_compat h_pure h_P
+    exact termToProp_implies_constraintToProp ρ σ it P h_compat h_pure h_P h_defined
   | forall_ binding body =>
     -- For forall case, need to show universal holds
     sorry  -- TODO: handle forall case
+
+/-- Predicate: all constraints in a set are well-defined -/
+def constraintSetDefined (ρ : Valuation) (lcs : LCSet) : Prop :=
+  ∀ lc ∈ lcs, constraintDefined ρ lc
 
 /-- Constraint set soundness -/
 theorem constraintSetToPureProp_sound
     (ρ : Valuation) (σ : PureIntVal) (lcs : LCSet) (P : Prop)
     (h_compat : valuationCompatible ρ σ)
     (h_pure : constraintSetToPureProp σ lcs = some P)
-    (h_P : P) :
+    (h_P : P)
+    (h_defined : constraintSetDefined ρ lcs) :
     constraintSetToProp ρ lcs := by
   sorry  -- TODO: induction on list
 
