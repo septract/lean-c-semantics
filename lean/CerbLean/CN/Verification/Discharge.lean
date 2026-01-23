@@ -183,13 +183,51 @@ def introAssumptions : TacticM Bool := do
 The main tactic that tries multiple strategies.
 -/
 
+/-- Try to derive a contradiction from the context -/
+def tryContradiction : TacticM Bool := do
+  try
+    evalTactic (← `(tactic| contradiction))
+    return true
+  catch _ =>
+    return false
+
+/-- Try simp with all hypotheses to find contradictions -/
+def trySimpAll : TacticM Bool := do
+  try
+    evalTactic (← `(tactic| simp_all))
+    return true
+  catch _ =>
+    return false
+
+/-- Try native_decide (for decidable computations like list membership) -/
+def tryNativeDecide : TacticM Bool := do
+  try
+    evalTactic (← `(tactic| native_decide))
+    return true
+  catch _ =>
+    return false
+
+/-- Try to close goal by showing the list is empty via native_decide,
+    then deriving contradiction from membership.
+    Pattern: h_mem : ob ∈ list where list.length = 0 -/
+def tryEmptyListContradiction : TacticM Bool := do
+  try
+    evalTactic (← `(tactic| simp only [*] at *; contradiction))
+    return true
+  catch _ =>
+    return false
+
 /-- Try all basic tactics in order -/
 def tryBasicTactics : TacticM Bool := do
-  -- Try simple tactics first (fast)
+  -- Try contradiction first (handles empty list membership, etc.)
+  if ← tryContradiction then return true
+  -- Try simple tactics (fast)
   if ← tryRfl then return true
   if ← tryTrivial then return true
   if ← tryDecide then return true
   if ← tryAssumption then return true
+  -- Try simp_all (can find contradictions and simplify)
+  if ← trySimpAll then return true
   -- Try simp
   if ← trySimp then return true
   -- Try omega for arithmetic
@@ -212,8 +250,16 @@ def tryPureSmt : TacticM Bool := do
 
 /-- Core discharge implementation -/
 def dischargeCore : TacticM Unit := do
+  -- First check for contradictions in current context
+  -- (e.g., h_mem : ob ∈ [] when the obligation list is empty)
+  if ← tryDecide then return ()
+  if ← tryNativeDecide then return ()
+  if ← tryContradiction then return ()
+  if ← tryEmptyListContradiction then return ()
+  if ← trySimpAll then return ()
+
   -- For obligation proofs of form: ∀ ρ, assumptions → constraint
-  -- First try to introduce the quantifier and hypothesis
+  -- Introduce the quantifier and hypothesis
   let _ ← introValuation
   let _ ← introAssumptions
 
@@ -239,15 +285,35 @@ elab_rules : tactic
 For discharging a full ObligationSet.
 -/
 
-/-- Try to discharge all obligations in a set -/
+/-- Try to discharge all obligations in a set.
+    Handles both empty lists (contradiction) and non-empty lists (prove each).
+
+    For empty lists, uses native_decide to show length = 0, then derives
+    contradiction from the membership hypothesis.
+
+    For non-empty lists, calls cn_discharge on each obligation. -/
 syntax "cn_discharge_all" : tactic
+
+/-- Version that takes the list expression explicitly for empty list handling -/
+syntax "cn_discharge_all_for" term : tactic
+
+macro_rules
+  | `(tactic| cn_discharge_all_for $list:term) =>
+    `(tactic| (
+      intro ob h_mem
+      first
+        | (have h_len : ($list).length = 0 := by native_decide
+           cases h_list : $list with
+           | nil => simp [h_list] at h_mem
+           | cons _ _ => simp [h_list] at h_len)
+        | cn_discharge))
 
 elab_rules : tactic
   | `(tactic| cn_discharge_all) => do
     -- This handles goals of the form: ObligationSet.allSatisfied obs
     -- which expands to: ∀ ob ∈ obs, ob.toProp
     evalTactic (← `(tactic| intro ob h_mem))
-    -- Try to discharge each case
+    -- Try to discharge - works for both empty and non-empty lists
     evalTactic (← `(tactic| cn_discharge))
 
 /-! ## Notes on Extending
