@@ -36,6 +36,9 @@ theorem in_range (x y : Int) (hx : 0 ≤ x) (hy : x ≤ y) (hbound : y < 1000) :
 theorem triangle_ineq (x y z : Int) (h1 : x ≤ y) (h2 : y ≤ z) : x ≤ z := by
   smt [h1, h2]
 
+theorem tests : 1 < 2 := by
+  smt
+
 /-! ## Comparison with native_decide -/
 
 -- native_decide: only works for CONCRETE values

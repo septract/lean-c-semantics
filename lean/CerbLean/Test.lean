@@ -7,6 +7,7 @@ import CerbLean.Test.Memory
 import CerbLean.Test.Parser
 import CerbLean.Test.PrettyPrint
 import CerbLean.Test.Batch
+import CerbLean.Test.CN
 
 namespace CerbLean.Test
 

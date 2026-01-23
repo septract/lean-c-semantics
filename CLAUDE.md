@@ -73,6 +73,60 @@ See `docs/2025-12-31_INTERPRETER_REFACTOR.md` for the audit checklist and corres
 
 See `docs/2026-01-01_MEMORY_AUDIT.md` for the memory model audit plan and Cerberus correspondence mapping.
 
+### 0.1 CRITICAL: CN Implementation Must Match CN EXACTLY
+
+**The Lean CN type system and type checker MUST mirror the CN implementation EXACTLY.**
+
+- Type definitions must match CN's OCaml types (in `lib/baseTypes.ml`, `lib/indexTerms.ml`, etc.)
+- Type checking functions must match CN's OCaml implementation - no "improvements" or alternative designs
+- Each type and function must be auditable against the corresponding CN code
+- Document correspondence with comments linking to CN source (file:lines)
+- This allows us to reuse CN's theory and proofs
+
+**Audit Comment Style** (same as Cerberus audit comments):
+```lean
+/-
+  CN Pure Expression Checking
+  Corresponds to: cn/lib/check.ml (check_pexpr parts)
+
+  Converts Core pure expressions (Pexpr) to CN index terms (IndexTerm).
+
+  Audited: 2026-01-20 against cn/lib/check.ml
+-/
+
+/-- Check a pure expression and convert to an IndexTerm.
+    Corresponds to: check_pexpr in cn/lib/check.ml -/
+partial def checkPexpr (pe : APexpr) : TypingM IndexTerm := do
+  ...
+```
+
+Every function implementing CN functionality should have:
+1. A module-level comment explaining what it corresponds to in CN
+2. A docstring linking to the specific CN function/location
+3. An "Audited: YYYY-MM-DD" note when verified against CN source
+
+Key CN source files for reference:
+| File | Purpose |
+|------|---------|
+| `cn/lib/baseTypes.ml` | CN base types |
+| `cn/lib/indexTerms.ml` | Index term representation |
+| `cn/lib/argumentTypes.ml` | Function spec structure |
+| `cn/lib/logicalReturnTypes.ml` | Postcondition structure |
+| `cn/lib/logicalConstraints.ml` | Constraint representation |
+| `cn/lib/resource.ml` | Ownership predicates |
+| `cn/lib/request.ml` | Resource requests |
+| `cn/lib/check.ml` | Main type checker |
+| `cn/lib/typing.ml` | Typing monad |
+| `cn/lib/wellTyped.ml` | Well-typedness checking |
+| `cn/lib/resourceInference.ml` | Resource inference |
+| `cn/lib/core_to_mucore.ml` | Core to muCore transformation |
+| `cn/lib/compile.ml` | Compilation/translation |
+
+**CN Repository**: The CN source is available at https://github.com/rems-project/cn. If needed for reference, clone it to `tmp/cn/`:
+```bash
+mkdir -p tmp && cd tmp && git clone --depth 1 https://github.com/rems-project/cn.git
+```
+
 ### 1. Manual Translation (not Lem/Ott backends)
 We manually translate Cerberus Core semantics to Lean rather than creating automated backends because:
 - Allows idiomatic Lean 4 code
@@ -213,6 +267,35 @@ make test-memory                           # Run memory model unit tests
 cd lean && .lake/build/bin/cerblean_memtest # Run directly
 ```
 Tests include: layout (sizeof/alignof), allocation, store/load roundtrip, null dereference detection, use-after-free detection, double-free detection, out-of-bounds detection, read-only protection, pointer arithmetic.
+
+**CN Verification Tests** (`make test-cn`):
+Tests for the CN separation logic type system implementation.
+```bash
+make test-cn                              # Run integration tests on tests/cn/
+make test-cn-unit                         # Run unit tests only (fast, no Cerberus)
+./scripts/test_cn.sh                      # Run all tests in tests/cn/
+./scripts/test_cn.sh /path/to/test.c      # Run a specific test
+./scripts/test_cn.sh --unit               # Run unit tests only
+```
+
+Test files in `tests/cn/` follow these conventions:
+- `NNN-description.c` - Tests expected to pass
+- `NNN-description.fail.c` - Tests expected to fail (e.g., double-free, use-after-free)
+
+The `.fail.c` suffix indicates the test should fail verification. The test infrastructure automatically passes `--expect-fail` to the test runner for these files.
+
+Example test structure:
+```c
+// tests/cn/001-simple-owned.c
+int read(int *p)
+/*@ requires take v = Owned<signed int>(p);
+    ensures take v2 = Owned<signed int>(p);
+            v == v2;
+            return == v; @*/
+{ return *p; }
+```
+
+See `docs/2026-01-20_CN_TYPECHECKING_AUDIT.md` for known issues and implementation status.
 
 **Investigating Pretty-Printer Mismatches**:
 The test script outputs files to a temp directory. To investigate a specific mismatch:
@@ -494,6 +577,46 @@ Silent error swallowing hides bugs. We discovered the parser was completely brok
 ### CRITICAL: Never Undo Changes Without Permission
 **NEVER revert, undo, or `git checkout` any changes without explicit user confirmation.** Even if you think a change caused a problem, ASK FIRST before reverting. The user may have made intentional changes you're not aware of.
 
+### CRITICAL: Never Commit Without Running Tests
+**NEVER commit changes without first running `make test`.** This ensures the build succeeds and all tests pass. A commit that breaks tests is unacceptable.
+
+### ABSOLUTE RULE: NEVER Modify Tests to Achieve a Pass
+
+**NEVER modify, weaken, or remove a test in order to make it pass. NEVER. UNDER ANY CIRCUMSTANCES.**
+
+Tests are targets that define expected behavior. If a test fails:
+- Fix the implementation to make the test pass
+- Do NOT change the test to match broken implementation
+- Do NOT mark a test as "trusted" or "expected fail" just to avoid fixing the real issue
+- Do NOT delete a test because it's inconvenient
+
+The ONLY acceptable reasons to modify a test are:
+1. The test itself has a bug (wrong expected behavior)
+2. Requirements have genuinely changed (confirmed by user)
+3. Adding MORE coverage to an existing test
+
+If you're tempted to weaken a test, STOP and fix the actual problem instead.
+
+### Always Use Build Targets for Testing
+**Always use Makefile targets** (e.g., `make test`, `make test-cn`) rather than invoking test binaries directly. Build targets ensure proper dependencies are built first and use the correct invocation.
+
+### Aristotle-Generated Proofs
+[Aristotle](https://aristotle.harmonic.fun) is a proof AI that can automatically generate Lean 4 proofs. When using Aristotle to generate proofs, always add a comment at the start of the proof block indicating:
+1. That the proof was generated by Aristotle
+2. The project ID for traceability
+
+Example:
+```lean
+theorem my_theorem : P := by
+  -- Proof generated by Aristotle (project: cf869c1a-b686-4f52-8389-f70b841a907c)
+  induction x with
+  | ... => ...
+```
+
+This allows us to trace proofs back to their source and regenerate them if needed.
+
+MCP server for Claude Code integration: https://github.com/septract/lean-aristotle-mcp
+
 ### Shell Commands
 **IMPORTANT**: Do NOT use `sed`, `awk`, `tr`, or similar shell string manipulation tools for ad-hoc text processing. These commands are error-prone and often fail silently or produce unexpected results across different platforms.
 
@@ -502,6 +625,8 @@ Silent error swallowing hides bugs. We discovered the parser was completely brok
 If string manipulation is needed:
 - Write a proper Lean program to do the transformation
 - Or wrap the shell commands in a well-designed, tested shell script in `scripts/`
+
+Always run long-running commands in the background, and work on other tasks. Do not wait for a task unless it is blocking further progress. 
 
 ### Building
 
