@@ -58,7 +58,12 @@ that depend on boolean terms, and boolean terms compare integers.
 mutual
 
 /-- Interpret an integer term as Int.
-    Returns none for non-integer terms or unsupported operations. -/
+    Returns none for non-integer terms or unsupported operations.
+
+    Note: This is partial due to mutual recursion with termToBool.
+    Making it terminating requires well-founded recursion on a combined
+    measure, which is complex. For soundness proofs, we use sorry for
+    termination-dependent lemmas. -/
 partial def termToInt (σ : PureIntVal) : Term → Option Int
   | .const (.z n) => some n
   | .const (.bits _ _ n) => some n

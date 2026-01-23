@@ -15,6 +15,7 @@ import CerbLean.CN.Verification.Obligation
 import CerbLean.CN.Types
 import CerbLean.CN.Semantics.Heap
 import CerbLean.CN.Semantics.Denote
+import CerbLean.CN.Semantics.PureDenoteSound
 
 namespace CerbLean.Test.Discharge
 
@@ -209,7 +210,8 @@ The soundness theorem has `sorry` but we USE it to test the pipeline.
 -/
 
 open CerbLean.CN.Semantics (constraintToPureProp constraintToPureProp_sound
-  termToProp_implies_constraintToProp valuationCompatible PureIntVal)
+  termToProp_implies_constraintToProp valuationCompatible PureIntVal
+  extractPureVal extractPureVal_compatible)
 
 /-- Test constraint: 1 < 2 -/
 def testConstraint : LogicalConstraint :=
@@ -268,34 +270,30 @@ def linearInequalityObligation : Obligation :=
   , category := .arithmetic
   }
 
-/-- Extract integer from HeapValue, default to 0 -/
-def extractInt : Valuation → Sym → Int
-  | ρ, s => match ρ.lookup s with
-    | some (.integer _ n) => n
-    | _ => 0
-
 theorem pipeline_test_linear : linearInequalityObligation.toProp := by
   unfold Obligation.toProp
   intro ρ h_assumptions
-  -- Apply soundness theorem with σ = extractInt ρ
-  -- The pure proposition is: 0 < (extractInt ρ xSym) + (extractInt ρ ySym)
-  let σ := extractInt ρ
+  -- Apply soundness theorem with σ = extractPureVal ρ
+  let σ := extractPureVal ρ
   apply constraintToPureProp_sound ρ σ sumPositive (0 < σ xSym + σ ySym)
-  -- Goal 1: valuationCompatible ρ σ
-  · sorry
+  -- Goal 1: valuationCompatible ρ σ - NOW PROVEN!
+  · exact extractPureVal_compatible ρ
   -- Goal 2: constraintToPureProp σ sumPositive = some (0 < σ xSym + σ ySym)
   · sorry
   -- Goal 3: 0 < σ xSym + σ ySym - THIS is what SMT proves!
   -- We need the pure assumptions. Apply assumption soundness too:
   · -- Transform assumptions to pure form
-    have h_x : σ xSym > 0 := by
+    -- Introduce local names for the pure values
+    let x := σ xSym
+    let y := σ ySym
+    have h_x : x > 0 := by
       -- From h_assumptions we know constraintToProp ρ xPositive
       -- By soundness (sorry), this gives us σ xSym > 0
       sorry
-    have h_y : σ ySym > 0 := by
+    have h_y : y > 0 := by
       sorry
     -- NOW SMT can prove the arithmetic!
-    show 0 < σ xSym + σ ySym
+    show 0 < x + y
     smt [h_x, h_y]
 
 /-! ## Obligation.toProp Structure Tests
