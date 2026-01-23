@@ -163,6 +163,49 @@ theorem constraintSetToPureProp_sound
     constraintSetToProp ρ lcs := by
   sorry  -- TODO: induction on list
 
+/-! ## Constraint Set Decomposition
+
+Lemmas for extracting individual constraints from a constraint set.
+-/
+
+/-- Extract head constraint from a non-empty set -/
+theorem constraintSetToProp_cons (ρ : Valuation) (lc : LogicalConstraint) (rest : LCSet)
+    (h : constraintSetToProp ρ (lc :: rest)) :
+    constraintToProp ρ lc ∧ constraintSetToProp ρ rest := by
+  unfold constraintSetToProp at h
+  simp at h
+  exact h
+
+/-- Get head constraint -/
+theorem constraintSetToProp_head (ρ : Valuation) (lc : LogicalConstraint) (rest : LCSet)
+    (h : constraintSetToProp ρ (lc :: rest)) :
+    constraintToProp ρ lc :=
+  (constraintSetToProp_cons ρ lc rest h).1
+
+/-- Get tail constraints -/
+theorem constraintSetToProp_tail (ρ : Valuation) (lc : LogicalConstraint) (rest : LCSet)
+    (h : constraintSetToProp ρ (lc :: rest)) :
+    constraintSetToProp ρ rest :=
+  (constraintSetToProp_cons ρ lc rest h).2
+
+/-! ## Completeness Direction (constraintToProp → pure)
+
+For extracting pure assumptions from HeapValue assumptions.
+This is the reverse direction of soundness.
+-/
+
+/-- Completeness: if HeapValue constraint holds, and pure interpretation succeeds,
+    then the pure prop holds.
+
+    Note: This requires the constraint to be "well-formed" (evaluates successfully). -/
+theorem constraintToProp_implies_pure
+    (ρ : Valuation) (σ : PureIntVal) (lc : LogicalConstraint) (P : Prop)
+    (h_compat : valuationCompatible ρ σ)
+    (h_pure : constraintToPureProp σ lc = some P)
+    (h_constraint : constraintToProp ρ lc) :
+    P := by
+  sorry  -- TODO: requires showing pure interp matches HeapValue interp
+
 /-! ## Obligation Soundness
 
 Connect to Obligation.toProp.

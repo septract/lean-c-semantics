@@ -211,7 +211,8 @@ The soundness theorem has `sorry` but we USE it to test the pipeline.
 
 open CerbLean.CN.Semantics (constraintToPureProp constraintToPureProp_sound
   termToProp_implies_constraintToProp valuationCompatible PureIntVal
-  extractPureVal extractPureVal_compatible)
+  extractPureVal extractPureVal_compatible
+  constraintSetToProp_head constraintSetToProp_tail constraintToProp_implies_pure)
 
 /-- Test constraint: 1 < 2 -/
 def testConstraint : LogicalConstraint :=
@@ -282,16 +283,21 @@ theorem pipeline_test_linear : linearInequalityObligation.toProp := by
   · sorry
   -- Goal 3: 0 < σ xSym + σ ySym - THIS is what SMT proves!
   -- We need the pure assumptions. Apply assumption soundness too:
-  · -- Transform assumptions to pure form
+  · -- Transform assumptions to pure form using the extraction lemmas
     -- Introduce local names for the pure values
     let x := σ xSym
     let y := σ ySym
+    -- Extract individual constraints from h_assumptions
+    have h_x_heap : constraintToProp ρ xPositive := constraintSetToProp_head ρ _ _ h_assumptions
+    have h_y_heap : constraintToProp ρ _ := constraintSetToProp_head ρ _ _ (constraintSetToProp_tail ρ _ _ h_assumptions)
+    -- Use completeness to get pure form (sorry - needs terminating pure interp)
     have h_x : x > 0 := by
-      -- From h_assumptions we know constraintToProp ρ xPositive
-      -- By soundness (sorry), this gives us σ xSym > 0
-      sorry
+      apply constraintToProp_implies_pure ρ σ xPositive (0 < σ xSym)
+      · exact extractPureVal_compatible ρ
+      · sorry  -- constraintToPureProp computes correctly
+      · exact h_x_heap
     have h_y : y > 0 := by
-      sorry
+      sorry  -- Similar for y
     -- NOW SMT can prove the arithmetic!
     show 0 < x + y
     smt [h_x, h_y]
