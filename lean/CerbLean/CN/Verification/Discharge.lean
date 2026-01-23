@@ -33,6 +33,8 @@
 import CerbLean.CN.Verification.Obligation
 import CerbLean.CN.Semantics.Denote
 import CerbLean.CN.Semantics.Theorems
+import CerbLean.CN.Semantics.PureDenote
+import CerbLean.CN.Semantics.PureDenoteSound
 import Smt
 
 namespace CerbLean.CN.Verification
@@ -112,6 +114,49 @@ def trySmt : TacticM Bool := do
   catch _ =>
     return false
 
+/-! ## Pure Transformation Tactics
+
+These tactics transform HeapValue-based goals to pure arithmetic goals
+that SMT can handle. The transformation is justified by soundness theorems
+in PureDenoteSound.lean.
+
+The key insight: For arithmetic constraints, we can work entirely with
+`PureIntVal = Sym → Int` instead of `Valuation = List (Sym × HeapValue)`.
+This gives SMT pure arithmetic goals like `∀ x : Int, x > 0 → x > 0`.
+-/
+
+open CerbLean.CN.Semantics (PureIntVal termToInt termToProp
+  constraintToPureProp valuationCompatible)
+
+/-- Transform a goal to use pure valuation instead of HeapValue valuation.
+    This handles goals of the form:
+      ∀ ρ : Valuation, ... → constraintToProp ρ lc
+    and transforms them to:
+      ∀ σ : PureIntVal, ... → (pure version)
+
+    The transformation is sound because:
+    1. For arithmetic constraints, only integer values matter
+    2. For any HeapValue valuation ρ, we can extract a compatible PureIntVal σ
+    3. The pure version implies the HeapValue version (via soundness theorems)
+
+    Note: Currently uses sorry-based soundness theorems. The structure is
+    correct; the proofs need to be completed (requires making termToInt terminating).
+-/
+def tryToPure : TacticM Bool := do
+  -- For now, this is a placeholder that just tries to unfold and simplify
+  -- The full implementation would:
+  -- 1. Detect constraintToProp/constraintSetToProp in the goal
+  -- 2. Apply the pure transformation
+  -- 3. Unfold pure interpretation to bare arithmetic
+  try
+    -- Unfold the CN-specific definitions to expose the arithmetic
+    evalTactic (← `(tactic|
+      unfold Obligation.toProp constraintToProp constraintSetToProp
+             heapValueIsTrue denoteAnnotTerm denoteTerm))
+    return true
+  catch _ =>
+    return false
+
 /-! ## Obligation-Specific Tactics
 
 These handle the structure of obligation proofs.
@@ -153,6 +198,18 @@ def tryBasicTactics : TacticM Bool := do
   if ← trySmt then return true
   return false
 
+/-- Try to transform and close with SMT.
+    This is the main strategy for arithmetic obligations:
+    1. Unfold CN definitions to expose arithmetic
+    2. Call SMT on the resulting goal -/
+def tryPureSmt : TacticM Bool := do
+  if ← tryToPure then
+    -- After unfolding, try SMT
+    if ← trySmt then return true
+    -- If SMT failed, try omega
+    if ← tryOmega then return true
+  return false
+
 /-- Core discharge implementation -/
 def dischargeCore : TacticM Unit := do
   -- For obligation proofs of form: ∀ ρ, assumptions → constraint
@@ -162,6 +219,10 @@ def dischargeCore : TacticM Unit := do
 
   -- Now try to close the goal
   if ← tryBasicTactics then
+    return ()
+
+  -- Try the pure transformation + SMT strategy
+  if ← tryPureSmt then
     return ()
 
   -- If nothing worked, fail with helpful message
@@ -210,6 +271,22 @@ macro_rules
     `(tactic|
       unfold Obligation.toProp constraintToProp constraintSetToProp
       cn_discharge)
+
+/-- Transform CN constraints to pure arithmetic form for SMT.
+    This unfolds CN-specific definitions to expose bare arithmetic that
+    SMT solvers can understand.
+
+    Example:
+      Goal: constraintToProp ρ (.t (lt_term x y))
+      After cn_to_pure: (denoteTerm result interpretation → arithmetic) -/
+syntax "cn_to_pure" : tactic
+
+macro_rules
+  | `(tactic| cn_to_pure) =>
+    `(tactic|
+      unfold Obligation.toProp constraintToProp constraintSetToProp
+             heapValueIsTrue denoteAnnotTerm denoteTerm
+             denoteConst denoteUnOp denoteBinOp boolToHeapValue)
 
 /-! ## Unit Tests
 
