@@ -74,12 +74,14 @@
 import CerbLean.CN.Types
 import CerbLean.CN.Semantics.Heap
 import CerbLean.CN.Semantics.Denote
+import CerbLean.CN.Semantics.PureDenote
 
 namespace CerbLean.CN.Verification
 
 open CerbLean.Core (Sym Loc)
 open CerbLean.CN.Types
-open CerbLean.CN.Semantics (Valuation constraintToProp constraintSetToProp)
+open CerbLean.CN.Semantics (Valuation constraintToProp constraintSetToProp
+  PureIntVal constraintToPureProp constraintSetToPureProp)
 
 /-! ## Obligation Categories
 
@@ -177,6 +179,22 @@ def toProp (ob : Obligation) : Prop :=
     constraintSetToProp ρ ob.assumptions →
     constraintToProp ρ ob.constraint
 
+/-- Pure version of obligation that SMT can handle directly.
+    Uses PureIntVal = Sym → Int instead of Valuation.
+
+    This is the key to generic obligation discharge:
+    - For concrete obligations, the match expressions COMPUTE to specific Props
+    - SMT sees pure arithmetic: ∀ σ : (Sym → Int), P(σ) → Q(σ)
+    - The none → True cases handle malformed constraints (vacuously satisfied) -/
+def pureToProp (ob : Obligation) : Prop :=
+  ∀ σ : PureIntVal,
+    (match constraintSetToPureProp σ ob.assumptions with
+     | some P => P
+     | none => True) →
+    (match constraintToPureProp σ ob.constraint with
+     | some Q => Q
+     | none => True)
+
 end Obligation
 
 /-! ## Obligation Set
@@ -195,15 +213,49 @@ def add (ob : Obligation) (s : ObligationSet) : ObligationSet := ob :: s
 
 def union (s1 s2 : ObligationSet) : ObligationSet := s1 ++ s2
 
-/-- All obligations in the set hold.
+/-- All obligations in the set hold (recursive definition).
     Each obligation is already universally quantified over valuations,
-    so this doesn't take a valuation parameter. -/
-def allSatisfied (s : ObligationSet) : Prop :=
-  ∀ ob ∈ s, ob.toProp
+    so this doesn't take a valuation parameter.
+
+    Note: We use a recursive definition instead of `∀ ob ∈ s, ob.toProp`
+    so that simp can reduce it for computed lists. -/
+def allSatisfied : ObligationSet → Prop
+  | [] => True
+  | ob :: obs => ob.toProp ∧ allSatisfied obs
+
+/-- Equivalent characterization using membership -/
+theorem allSatisfied_iff_forall (s : ObligationSet) :
+    allSatisfied s ↔ ∀ ob ∈ s, ob.toProp := by
+  induction s with
+  | nil =>
+    simp only [allSatisfied]
+    constructor
+    · intro _ ob h; cases h
+    · intro _; trivial
+  | cons ob obs ih =>
+    simp only [allSatisfied, List.mem_cons]
+    constructor
+    · intro ⟨h1, h2⟩ ob' h'
+      rcases h' with rfl | h'
+      · exact h1
+      · exact ih.mp h2 ob' h'
+    · intro h
+      exact ⟨h ob (Or.inl rfl), ih.mpr (fun ob' h' => h ob' (Or.inr h'))⟩
 
 /-- Filter obligations by category -/
 def filterCategory (cat : ObligationCategory) (s : ObligationSet) : ObligationSet :=
   s.filter (·.category == cat)
+
+/-! ## allSatisfied Simp Lemmas
+
+With the recursive definition, allSatisfied now COMPUTES directly for concrete lists.
+These simp lemmas expose that for tactics.
+-/
+
+@[simp] theorem allSatisfied_nil : ObligationSet.allSatisfied [] = True := rfl
+
+@[simp] theorem allSatisfied_cons (ob : Obligation) (obs : ObligationSet) :
+    ObligationSet.allSatisfied (ob :: obs) = (ob.toProp ∧ ObligationSet.allSatisfied obs) := rfl
 
 end ObligationSet
 
