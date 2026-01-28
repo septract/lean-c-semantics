@@ -1,10 +1,12 @@
 /-
   CN specification tests
-  Tests the CN parser and pretty-printer.
+  Tests the CN parser, type checker, and verification pipeline.
 
   Usage:
-    test_cn                 Run unit tests
-    test_cn <json_file>     Test CN annotations from Cerberus JSON output
+    test_cn                      Run unit tests (parse + typecheck)
+    test_cn --verify             Run SMT verification smoke test
+    test_cn <json_file>          Parse and type-check CN annotations from Cerberus JSON
+    test_cn --verify <json_file> Full verification with SMT solver
 -/
 
 import CerbLean.Parser
@@ -13,6 +15,7 @@ import CerbLean.CN.Parser
 import CerbLean.CN.PrettyPrint
 import CerbLean.CN.TypeChecking
 import CerbLean.CN.Verification.Obligation
+import CerbLean.CN.Verification.Verify
 
 namespace CerbLean.Test.CN
 
@@ -22,6 +25,7 @@ open CerbLean.CN.Parser
 open CerbLean.CN.PrettyPrint
 open CerbLean.CN.TypeChecking
 open CerbLean.CN.Verification
+open CerbLean.CN.Verification.SmtSolver (checkObligation checkObligations SolverKind)
 
 /-! ## Unit Test Cases
 
@@ -422,7 +426,210 @@ def runJsonTest (jsonPath : String) (expectFail : Bool := false) : IO UInt32 := 
         else
           return 0
 
+/-! ## SMT Verification Tests -/
+
+open CerbLean.Core (Sym Loc)
+open CerbLean.CN.Types (Term AnnotTerm BaseType LogicalConstraint)
+
+/-- Run SMT solver smoke test -/
+def runSmtSmokeTest : IO UInt32 := do
+  IO.println "=== SMT Solver Smoke Test ==="
+  IO.println ""
+
+  let mut passed := 0
+  let mut failed := 0
+
+  -- Test 1: Trivial obligation (True)
+  IO.print "Test 'trivial (True)': "
+  let trueTerm : AnnotTerm := .mk (.const (.bool true)) .bool .unknown
+  let trivialOb : Obligation := {
+    description := "trivial (True)"
+    constraint := .t trueTerm
+    assumptions := []
+    loc := .unknown
+    category := .arithmetic
+  }
+  let result1 ← checkObligation .z3 trivialOb
+  match result1.result with
+  | .valid =>
+    passed := passed + 1
+    IO.println "PASS (valid)"
+  | other =>
+    failed := failed + 1
+    IO.println s!"FAIL (got {other})"
+
+  -- Test 2: Simple arithmetic (x > 0 → x > 0)
+  IO.print "Test 'x > 0 → x > 0': "
+  let sym : Sym := { id := 1, name := some "x" }
+  let xAnnot : AnnotTerm := .mk (.sym sym) .integer .unknown
+  let zeroAnnot : AnnotTerm := .mk (.const (.z 0)) .integer .unknown
+  let xGtZeroTerm : Term := .binop .lt zeroAnnot xAnnot  -- 0 < x means x > 0
+  let xGtZero : AnnotTerm := .mk xGtZeroTerm .bool .unknown
+
+  let arithmeticOb : Obligation := {
+    description := "x > 0 → x > 0"
+    constraint := .t xGtZero
+    assumptions := [.t xGtZero]
+    loc := .unknown
+    category := .arithmetic
+  }
+  let result2 ← checkObligation .z3 arithmeticOb
+  match result2.result with
+  | .valid =>
+    passed := passed + 1
+    IO.println "PASS (valid)"
+  | other =>
+    failed := failed + 1
+    IO.println s!"FAIL (got {other})"
+
+  -- Test 3: Invalid obligation (should fail)
+  IO.print "Test 'False (should be invalid)': "
+  let falseTerm : AnnotTerm := .mk (.const (.bool false)) .bool .unknown
+  let invalidOb : Obligation := {
+    description := "false (should be invalid)"
+    constraint := .t falseTerm
+    assumptions := []
+    loc := .unknown
+    category := .arithmetic
+  }
+  let result3 ← checkObligation .z3 invalidOb
+  match result3.result with
+  | .invalid =>
+    passed := passed + 1
+    IO.println "PASS (correctly invalid)"
+  | other =>
+    failed := failed + 1
+    IO.println s!"FAIL (expected invalid, got {other})"
+
+  IO.println ""
+  IO.println s!"=== SMT Summary: {passed} passed, {failed} failed ==="
+
+  if failed > 0 then return 1 else return 0
+
+/-- Run JSON test with full SMT verification -/
+def runJsonTestWithVerify (jsonPath : String) (expectFail : Bool := false) : IO UInt32 := do
+  let content ← IO.FS.readFile jsonPath
+  match parseFileFromString content with
+  | .error e =>
+    IO.eprintln s!"Parse error: {e}"
+    return 1
+  | .ok file =>
+    IO.println "=== CN Verification (with SMT) ==="
+    if expectFail then
+      IO.println "(expecting failure)"
+    IO.println ""
+
+    let mut count := 0
+    let mut parseSuccess := 0
+    let mut parseFail := 0
+    let mut verifySuccess := 0
+    let mut verifyFail := 0
+
+    for (sym, funInfo) in file.funinfo.toList do
+      if !funInfo.cnMagic.isEmpty then
+        count := count + 1
+        let funName := sym.name.getD "<unnamed>"
+        IO.println s!"Function: {funName}"
+
+        for ann in funInfo.cnMagic do
+          IO.println "--- Spec ---"
+          match parseFunctionSpec ann.text with
+          | .ok spec =>
+            parseSuccess := parseSuccess + 1
+            IO.println (ppFunctionSpec spec)
+
+            IO.println "--- Verification ---"
+            match findFunctionInfo file sym.name with
+            | some info =>
+              -- Type check first
+              let tcResult := checkFunctionWithParams spec info.body info.params Core.Loc.t.unknown
+              if !tcResult.success then
+                verifyFail := verifyFail + 1
+                IO.println "  TYPECHECK FAIL"
+                match tcResult.error with
+                | some msg => IO.println s!"    error: {msg}"
+                | none => IO.println "    error: unknown"
+              else if tcResult.obligations.isEmpty then
+                verifySuccess := verifySuccess + 1
+                IO.println "  PASS (no obligations)"
+              else
+                -- Verify obligations with SMT
+                let obResults ← checkObligations .z3 tcResult.obligations (some 10)
+                let allValid := obResults.all fun r => r.result matches .valid
+                if allValid then
+                  verifySuccess := verifySuccess + 1
+                  IO.println s!"  PASS ({obResults.length} obligations verified)"
+                else
+                  verifyFail := verifyFail + 1
+                  IO.println s!"  FAIL (some obligations not verified)"
+                  for r in obResults do
+                    IO.println s!"    - {r.obligation.description}: {r.result}"
+                    if let some q := r.query then
+                      IO.println "    SMT query:"
+                      IO.println q
+
+            | none =>
+              -- No body found - spec-only check
+              IO.println "  (no body found, checking spec only)"
+              let tcResult := checkSpecStandalone spec
+              if !tcResult.success then
+                verifyFail := verifyFail + 1
+                IO.println "  TYPECHECK FAIL"
+              else if tcResult.obligations.isEmpty then
+                verifySuccess := verifySuccess + 1
+                IO.println "  PASS (no obligations)"
+              else
+                let obResults ← checkObligations .z3 tcResult.obligations (some 10)
+                let allValid := obResults.all fun r => r.result matches .valid
+                if allValid then
+                  verifySuccess := verifySuccess + 1
+                  IO.println s!"  PASS ({obResults.length} obligations verified)"
+                else
+                  verifyFail := verifyFail + 1
+                  IO.println s!"  FAIL"
+
+          | .error e =>
+            parseFail := parseFail + 1
+            IO.println s!"  PARSE ERROR: {e}"
+          IO.println "--- End ---"
+        IO.println ""
+
+    if count == 0 then
+      IO.println "(No CN annotations found)"
+      IO.println "Note: Use --switches=at_magic_comments when running Cerberus"
+      return 1
+    else
+      IO.println s!"Total: {count} function(s) with CN annotations"
+      IO.println s!"Parse: {parseSuccess} success, {parseFail} failures"
+      IO.println s!"Verify: {verifySuccess} success, {verifyFail} failures"
+
+      if expectFail then
+        if verifyFail > 0 then
+          IO.println "=== EXPECTED FAILURE - TEST PASSED ==="
+          return 0
+        else
+          IO.eprintln "=== EXPECTED FAILURE BUT PASSED - TEST FAILED ==="
+          return 1
+      else
+        if verifyFail > 0 then
+          return 1
+        else
+          return 0
+
 /-! ## Main Entry Point -/
+
+def printUsage : IO Unit := do
+  IO.println "Usage: test_cn [options] [<json_file>]"
+  IO.println ""
+  IO.println "Modes:"
+  IO.println "  (no args)              Run unit tests (parse + typecheck)"
+  IO.println "  --verify               Run SMT verification smoke test"
+  IO.println "  <json_file>            Type-check CN annotations from Cerberus JSON"
+  IO.println "  --verify <json_file>   Full verification with SMT solver"
+  IO.println ""
+  IO.println "Options:"
+  IO.println "  --obligations          Run only obligation generation tests"
+  IO.println "  --expect-fail          Expect verification to fail (for .fail.c tests)"
 
 def main (args : List String) : IO UInt32 := do
   match args with
@@ -438,17 +645,37 @@ def main (args : List String) : IO UInt32 := do
     if r2 != 0 then exitCode := 1
 
     return exitCode
+
+  | ["--verify"] =>
+    -- SMT verification smoke test
+    runSmtSmokeTest
+
+  | ["--verify", jsonPath] =>
+    -- Full verification with SMT
+    runJsonTestWithVerify jsonPath
+
+  | ["--verify", "--expect-fail", jsonPath] | ["--expect-fail", "--verify", jsonPath] =>
+    -- Full verification with SMT, expecting failure
+    runJsonTestWithVerify jsonPath (expectFail := true)
+
   | ["--obligations"] =>
     -- Run only obligation tests
     runAllObligationTests
+
   | ["--expect-fail", jsonPath] =>
-    -- Expected failure mode for .fail.c tests
+    -- Expected failure mode for .fail.c tests (type-check only)
     runJsonTest jsonPath (expectFail := true)
+
+  | ["--help"] | ["-h"] =>
+    printUsage
+    return 0
+
   | [jsonPath] =>
-    -- JSON file provided: run integration test
+    -- JSON file provided: run type-check integration test
     runJsonTest jsonPath
+
   | _ =>
-    IO.eprintln "Usage: test_cn [--obligations] [--expect-fail] [<json_file>]"
+    printUsage
     return 1
 
 end CerbLean.Test.CN
