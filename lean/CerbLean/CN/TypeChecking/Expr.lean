@@ -215,10 +215,27 @@ partial def checkExprK (e : AExpr) (k : IndexTerm → TypingM Unit) : TypingM Un
           { ctx with logical := ctx.logical.filter (·.1.id != sym.id) }
       k result
 
-  | .run _label args =>
-    for arg in args do
-      checkPexprK arg fun _ => pure ()
-    k (mkUnitTermExpr loc)
+  -- Run (call a label/continuation)
+  -- For return continuations (name starts with "ret_"), this is a return statement.
+  -- The argument is the return value, which we pass to the continuation.
+  -- Corresponds to: Erun handling in check.ml line 2304-2315
+  --
+  -- Note: In CN's muCore, `Erun` for return labels calls `Spine.calltype_lt`
+  -- which doesn't return (returns False/uninhabited). For our CPS-style checking,
+  -- we pass the return value to the continuation `k`, which handles postcondition.
+  | .run label args =>
+    -- Check if this is a return continuation (by naming convention: "ret_")
+    let isReturnLabel := label.name.map (·.startsWith "ret_") |>.getD false
+    if isReturnLabel && args.length == 1 then
+      -- This is a return statement - evaluate the argument and pass as return value
+      let arg := args.head!
+      checkPexprK arg fun returnVal =>
+        k returnVal  -- Pass actual return value to continuation
+    else
+      -- Non-return label or multiple args - just evaluate args and return unit
+      for arg in args do
+        checkPexprK arg fun _ => pure ()
+      k (mkUnitTermExpr loc)
 
   -- Concurrency constructs (not fully supported)
   | .par es =>

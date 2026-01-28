@@ -37,9 +37,11 @@
 -/
 
 import CerbLean.Core
+import CerbLean.Core.Ctype
 import CerbLean.CN.Types
 import CerbLean.CN.TypeChecking.Check
 import CerbLean.CN.TypeChecking.Expr
+import CerbLean.CN.TypeChecking.Resolve
 import CerbLean.CN.Verification.Obligation
 import Std.Data.HashMap
 
@@ -169,6 +171,23 @@ def tryCoreBaseTypeToCN (bt : Core.BaseType) : Option BaseType :=
   | .object (.union_ _) => none
   | .storable => none
 
+/-- Convert C type (Ctype) to CN base type.
+    This gives the actual VALUE type, not the stack slot pointer type.
+    Corresponds to: CN's type conversion for parameter values. -/
+def tryCtypeToCN (ct : Core.Ctype) : Option BaseType :=
+  match ct.ty with
+  | .void => some .unit
+  | .basic (.integer _) => some .integer
+  | .basic (.floating _) => some .real
+  | .pointer _ _ => some .loc
+  | .struct_ tag => some (.struct_ tag)
+  | .union_ _ => none  -- Unsupported
+  | .array _ _ => none
+  | .function _ _ _ _ => none
+  | .functionNoParams _ _ => none
+  | .atomic _ => none
+  | .byte => none
+
 /-! ## Main Function: Check Function With Parameters
 
 This is the main entry point for checking a function with its parameters.
@@ -180,19 +199,27 @@ It sets up the lazy muCore transformation by:
 
 /-- Check a function with parameters using lazy muCore transformation.
 
-    For each pointer parameter:
-    1. Create a fresh value symbol representing the parameter value
+    For each parameter:
+    1. Create a value term representing the parameter value
     2. Map the stack slot symbol (and its aliases) to this value
     3. When loads from these symbols are encountered, return the value directly
 
     This corresponds to CN's make_function_args in core_to_mucore.ml lines 745-786.
 
     The spec's parameter names (e.g., `p` in `Owned<int>(p)`) refer to the
-    parameter VALUES, which is what this transformation achieves. -/
+    parameter VALUES, which is what this transformation achieves.
+
+    Parameters:
+    - `spec`: The CN specification for the function
+    - `body`: The Core IR body of the function
+    - `params`: Core parameters (sym × BaseType), where BaseType is always pointer (stack slot)
+    - `cParams`: C-level parameter types from funinfo (sym × Ctype), giving actual value types
+    - `loc`: Source location for error reporting -/
 def checkFunctionWithParams
     (spec : FunctionSpec)
     (body : Core.AExpr)
     (params : List (Core.Sym × Core.BaseType))
+    (cParams : List (Option Core.Sym × Core.Ctype))
     (loc : Core.Loc)
     : TypeCheckResult :=
   -- For trusted specs, skip verification
@@ -204,79 +231,81 @@ def checkFunctionWithParams
     let aliases := scanForAliases paramIds {} body
 
     -- Step 2: Build ParamValueMap and Context
-    -- For each pointer parameter, create a value term and add mapping
-    let setupResult : Except String (Context × ParamValueMap × Nat) :=
-      params.foldlM (init := (Context.empty, ({} : ParamValueMap), 0)) fun (ctx, pvm, nextId) (sym, bt) =>
-        match bt with
-        | .object .pointer =>
-          -- Pointer parameter: create value term and add to mapping
-          -- The value term represents the loaded value (the pointer the caller passed)
-          match tryCoreBaseTypeToCN bt with
+    -- We use Core params for symbol IDs and C params for value types.
+    -- In Core, all parameters are stack slot pointers. In CN, parameters are direct values.
+    -- The C type tells us what type the VALUE has (e.g., int, not pointer-to-stack-slot).
+    let setupResult : Except String (Context × ParamValueMap × Nat × List (Sym × BaseType)) :=
+      params.zip cParams |>.foldlM
+        (init := (Context.empty, ({} : ParamValueMap), 0, []))
+        fun (ctx, pvm, nextId, cnParamAcc) ((coreSym, _coreBt), (_, ctype)) =>
+          -- Use C type to get the actual value type
+          match tryCtypeToCN ctype with
           | some cnBt =>
-            -- Create a fresh symbol for the parameter value
-            let valueSym : Core.Sym := { id := nextId, name := sym.name.map (· ++ "_val") }
-            let valueTerm : IndexTerm := AnnotTerm.mk (.sym valueSym) cnBt loc
+            -- Create value term using the SAME symbol as the Core parameter.
+            -- This ensures that when the spec refers to `x`, it matches the
+            -- value we return when loading from x's stack slot.
+            -- The key insight: CN's name resolution gives spec identifiers
+            -- the Core parameter's symbol ID, and we use that same ID here.
+            let valueTerm : IndexTerm := AnnotTerm.mk (.sym coreSym) cnBt loc
 
             -- Map the stack slot to the value term
-            let pvm' := pvm.insert sym.id valueTerm
+            let pvm' := pvm.insert coreSym.id valueTerm
 
             -- Also map all aliases of this parameter
             let pvm'' := aliases.fold (init := pvm') fun acc aliasId targetId =>
-              if targetId == sym.id then acc.insert aliasId valueTerm else acc
+              if targetId == coreSym.id then acc.insert aliasId valueTerm else acc
 
             -- Add the parameter to the computational context
-            -- The parameter name in the context refers to the VALUE (the pointer)
-            let ctx' := ctx.addA sym cnBt ⟨loc, s!"parameter {sym.name.getD ""}"⟩
+            -- The parameter name in the context refers to the VALUE
+            let ctx' := ctx.addA coreSym cnBt ⟨loc, s!"parameter {coreSym.name.getD ""}"⟩
 
-            Except.ok (ctx', pvm'', nextId + 1)
+            -- Accumulate CN-level params for resolution (using coreSym for ID, cnBt for type)
+            let cnParamAcc' := (coreSym, cnBt) :: cnParamAcc
+
+            Except.ok (ctx', pvm'', nextId, cnParamAcc')
           | none =>
-            Except.error s!"Unsupported parameter type for {sym.name.getD "<unknown>"}: {repr bt}"
-        | _ =>
-          -- Non-pointer parameter: simple binding, no mapping needed
-          match tryCoreBaseTypeToCN bt with
-          | some cnBt =>
-            let ctx' := ctx.addA sym cnBt ⟨loc, s!"parameter {sym.name.getD ""}"⟩
-            Except.ok (ctx', pvm, nextId)
-          | none =>
-            Except.error s!"Unsupported parameter type for {sym.name.getD "<unknown>"}: {repr bt}"
+            Except.error s!"Unsupported parameter type for {coreSym.name.getD "<unknown>"}: {repr ctype}"
 
     match setupResult with
     | .error msg =>
       TypeCheckResult.fail msg
-    | .ok (paramCtx, paramValueMap, nextFreshId) =>
-      -- Step 3: Initial context (resources will be added by processPrecondition)
+    | .ok (paramCtx, paramValueMap, nextFreshId, cnParams) =>
+      -- Step 3: Resolve the spec - convert parsed identifiers to proper symbols
+      -- This is the CN-matching approach: resolve names to symbols before type checking.
+      -- Corresponds to: CN's Cabs_to_ail.desugar_cn_* functions
+      let resolvedSpec := Resolve.resolveFunctionSpec spec cnParams.reverse nextFreshId
+
+      -- Step 4: Initial context (resources will be added by processPrecondition)
       let initialCtx := paramCtx
 
-      -- Step 4: Create initial state with ParamValueMap and obligation accumulation
+      -- Step 5: Create initial state with ParamValueMap and obligation accumulation
       let initialState : TypingState := {
         context := initialCtx
         oracle := .trivial  -- Not used when accumulating obligations
-        freshCounter := nextFreshId
+        freshCounter := nextFreshId + 1000  -- Leave room for resolution IDs
         paramValues := paramValueMap
         accumulateObligations := true
       }
 
-      -- Step 5: Run type checking (CPS style)
+      -- Step 6: Run type checking (CPS style)
       let computation : TypingM Unit := do
         -- Process precondition: add resources to context, bind outputs
-        processPrecondition spec.requires loc
+        processPrecondition resolvedSpec.requires loc
 
         -- Check the body with a continuation that handles postcondition
         -- The continuation is called at each exit point of the function
         let postconditionK (returnVal : IndexTerm) : TypingM Unit := do
-          -- Bind 'return' to the actual return value
-          -- This allows postconditions to refer to the function's return value
-          let returnSym : Sym := { id := 999999, name := some "return" }
-          TypingM.addAValue returnSym returnVal loc "function return value"
+          -- Substitute the return symbol with the actual return value in postcondition.
+          -- This is how CN handles return values: the postcondition constraints
+          -- reference resolvedSpec.returnSym, and we substitute it with returnVal.
+          --
+          -- Corresponds to: check.ml line 2323
+          --   let lrt = LRT.subst (IT.make_subst [ (return_s, lvt) ]) lrt in
+          let σ := Subst.single resolvedSpec.returnSym returnVal
+          let substitutedPost := resolvedSpec.ensures.subst σ
 
-          -- Add the constraint `return = returnVal` to the context
-          -- This is crucial for SMT to know what 'return' equals
-          let returnTerm := AnnotTerm.mk (.sym returnSym) returnVal.bt loc
-          let eqConstraint := AnnotTerm.mk (.binop .eq returnTerm returnVal) .bool loc
-          TypingM.addC (.t eqConstraint)
-
-          -- Process postcondition: consume final resources, generate obligations
-          processPostcondition spec.ensures loc
+          -- Process the substituted postcondition
+          processPostcondition substitutedPost loc
           -- Check no resources leaked (must all be consumed or returned)
           checkNoLeakedResources
 
