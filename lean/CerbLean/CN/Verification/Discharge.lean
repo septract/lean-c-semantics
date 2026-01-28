@@ -283,18 +283,24 @@ elab_rules : tactic
 /-! ## Tactic for Discharging All Obligations
 
 For discharging a full ObligationSet.
+
+The key insight: Don't introduce an abstract `ob` variable. Instead, use `simp`
+with allSatisfied_cons/allSatisfied_nil to COMPUTE the conjunction for the
+concrete obligation list. This gives us concrete obligations that SMT can handle.
 -/
 
 /-- Try to discharge all obligations in a set.
-    Handles both empty lists (contradiction) and non-empty lists (prove each).
 
-    For empty lists, uses native_decide to show length = 0, then derives
-    contradiction from the membership hypothesis.
+    This is the GENERIC tactic that works for ANY list of obligations:
+    1. Rewrites allSatisfied to a conjunction using cons/nil lemmas
+    2. Splits the conjunction into separate goals
+    3. For each CONCRETE obligation, applies soundness + SMT
 
-    For non-empty lists, calls cn_discharge on each obligation. -/
+    The key: we never introduce an abstract `ob` variable. The list structure
+    is computed by simp, giving us concrete obligations directly. -/
 syntax "cn_discharge_all" : tactic
 
-/-- Version that takes the list expression explicitly for empty list handling -/
+/-- Version that takes the list expression explicitly (legacy, for compatibility) -/
 syntax "cn_discharge_all_for" term : tactic
 
 macro_rules
@@ -308,13 +314,52 @@ macro_rules
            | cons _ _ => simp [h_list] at h_len)
         | cn_discharge))
 
+/-- Helper tactic to discharge a single concrete obligation using pure transformation -/
+def dischargePureObligation : TacticM Unit := do
+  -- Try the soundness approach: prove pureToProp, then apply soundness
+  try
+    evalTactic (← `(tactic| apply CerbLean.CN.Semantics.Obligation.toProp_of_pureToProp))
+    evalTactic (← `(tactic| intro σ h_assm))
+    -- The goal is now pure arithmetic - try various tactics
+    if ← tryTrivial then return ()
+    if ← trySmt then return ()
+    if ← tryOmega then return ()
+    evalTactic (← `(tactic| simp_all))
+    if ← trySmt then return ()
+    throwError "dischargePureObligation: could not prove pure goal"
+  catch _ =>
+    -- Fall back to cn_discharge if soundness approach fails
+    dischargeCore
+
 elab_rules : tactic
   | `(tactic| cn_discharge_all) => do
-    -- This handles goals of the form: ObligationSet.allSatisfied obs
-    -- which expands to: ∀ ob ∈ obs, ob.toProp
-    evalTactic (← `(tactic| intro ob h_mem))
-    -- Try to discharge - works for both empty and non-empty lists
-    evalTactic (← `(tactic| cn_discharge))
+    -- Step 1: Rewrite allSatisfied to conjunction using cons/nil lemmas
+    -- For concrete list [ob1, ob2], this becomes: ob1.toProp ∧ ob2.toProp ∧ True
+    try
+      evalTactic (← `(tactic|
+        simp only [ObligationSet.allSatisfied_cons, ObligationSet.allSatisfied_nil]))
+    catch _ =>
+      -- If simp fails, try the old approach
+      evalTactic (← `(tactic| intro ob h_mem; cn_discharge))
+      return
+
+    -- Step 2: Split conjunction into separate goals
+    -- repeat' constructor handles any number of conjuncts
+    evalTactic (← `(tactic| repeat' (first | trivial | constructor)))
+
+    -- Step 3: Each goal is now ob.toProp for a CONCRETE ob
+    -- Apply soundness theorem to transform to pure version, then discharge
+    let goals ← getGoals
+    for goal in goals do
+      setGoals [goal]
+      -- Check if goal is already solved
+      if ← goal.isAssigned then continue
+      -- Try the pure transformation approach
+      dischargePureObligation
+    -- Keep only unsolved goals (there shouldn't be any if successful)
+    let remainingGoals ← getGoals
+    let unsolved ← remainingGoals.filterM (fun g => do return !(← g.isAssigned))
+    setGoals unsolved
 
 /-! ## Notes on Extending
 

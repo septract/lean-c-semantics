@@ -67,14 +67,12 @@ theorem trusted_tc_success : trustedResult.success = true := by
 /-- All obligations satisfied (vacuously true - no obligations from spec-only check).
     Note: With an actual program, checkFunction would generate UB obligations. -/
 theorem trusted_obs_satisfied : trustedResult.obligations.allSatisfied := by
-  -- trustedResult.obligations is [], so this is vacuously true
-  -- (checkSpecStandalone only checks spec structure, not program execution)
-  intro ob h_mem
-  -- For spec-only checking, obligations = []
-  simp only [trustedResult, checkSpecStandalone, checkFunctionSpec, trustedSpec,
-             TypeCheckResult.ok] at h_mem
-  -- h_mem : ob ∈ [] which is false
-  contradiction
+  -- trustedResult.obligations is [], so allSatisfied [] = True
+  have h_len : trustedResult.obligations.length = 0 := by native_decide
+  have h_nil : trustedResult.obligations = [] := List.length_eq_zero_iff.mp h_len
+  rw [h_nil]
+  -- allSatisfied [] = True by definition
+  trivial
 
 /-! ## Example 2: Empty Spec (No Obligations)
 
@@ -98,13 +96,12 @@ theorem empty_tc_success : emptyResult.success = true := by
   native_decide
 
 theorem empty_obs_satisfied : emptyResult.obligations.allSatisfied := by
-  intro ob h_mem
-  -- Need to show the obligation list is empty after running type checker
-  simp only [emptyResult, checkSpecStandalone, checkFunctionSpec, emptySpec] at h_mem
-  -- After unfolding, we should see obligations = []
-  simp only [TypingM.run, processPrecondition, processPostcondition] at h_mem
-  -- The computation returns ok with empty obligations
-  sorry  -- TODO: need to trace through Except.ok to see obligations = []
+  -- emptyResult.obligations is [], so allSatisfied [] = True
+  have h_len : emptyResult.obligations.length = 0 := by native_decide
+  have h_nil : emptyResult.obligations = [] := List.length_eq_zero_iff.mp h_len
+  rw [h_nil]
+  -- allSatisfied [] = True by definition
+  trivial
 
 /-! ## Example 3: Precondition Only (No Obligations)
 
@@ -145,9 +142,12 @@ theorem preOnly_tc_success : preOnlyResult.success = true := by
   native_decide
 
 theorem preOnly_obs_satisfied : preOnlyResult.obligations.allSatisfied := by
-  intro ob h_mem
-  -- Precondition constraints don't generate obligations
-  sorry  -- TODO: trace through to show obligations = []
+  -- preOnlyResult.obligations is [], so allSatisfied [] = True
+  have h_len : preOnlyResult.obligations.length = 0 := by native_decide
+  have h_nil : preOnlyResult.obligations = [] := List.length_eq_zero_iff.mp h_len
+  rw [h_nil]
+  -- allSatisfied [] = True by definition
+  trivial
 
 /-! ## Example 4: Postcondition Constraint (One Obligation)
 
@@ -225,25 +225,31 @@ theorem obligation_holds_if_constraint_in_assumptions
     We prove this by showing the constraint is in the assumptions.
 -/
 theorem simplePost_obs_satisfied : simplePostResult.obligations.allSatisfied := by
-  intro ob h_mem
-  -- Use the helper lemma: show constraint ∈ assumptions
-  apply obligation_holds_if_constraint_in_assumptions
-  -- Now we need to show: ob.constraint ∈ ob.assumptions
-  -- This requires knowing what 'ob' is from the type checker output.
-  --
-  -- The type checker generates an obligation where:
-  -- - constraint = the postcondition constraint (x > 0)
-  -- - assumptions = the precondition constraints [x > 0]
-  --
-  -- Since they're the same, the constraint is in the assumptions.
-  -- However, proving this requires either:
-  -- 1. Tracing through the monad computation (complex)
-  -- 2. Decidable equality on LogicalConstraint (we need BEq instance)
-  -- 3. Reflection to compare the terms
-
-  -- For now, we demonstrate the pipeline structure is correct
-  -- and leave the computational extraction as future work.
-  sorry
+  -- simplePostResult.obligations has 1 element: [ob]
+  -- allSatisfied [ob] = ob.toProp ∧ allSatisfied [] = ob.toProp ∧ True
+  have h_len : simplePostResult.obligations.length = 1 := by native_decide
+  match h_list : simplePostResult.obligations with
+  | [] => simp [h_list] at h_len
+  | ob :: rest =>
+    -- Show rest is empty (length was 1 means rest.length = 0)
+    have h_rest_len : rest.length = 0 := by
+      have h : (ob :: rest).length = 1 := by rw [← h_list]; exact h_len
+      simp only [List.length_cons] at h
+      omega
+    have h_rest_nil : rest = [] := List.length_eq_zero_iff.mp h_rest_len
+    -- Now show allSatisfied (ob :: [])
+    rw [h_rest_nil]
+    -- Goal: allSatisfied [ob] = allSatisfied (ob :: [])
+    -- Unfold to ob.toProp ∧ allSatisfied []
+    simp only [ObligationSet.allSatisfied]
+    -- Now goal should be: ob.toProp ∧ True
+    constructor
+    · -- Prove ob.toProp
+      apply obligation_holds_if_constraint_in_assumptions
+      -- Need: ob.constraint ∈ ob.assumptions
+      -- This is program-specific; keep sorry for now
+      sorry
+    · trivial
 
 /-- Alternative proof using the same technique as Test/Discharge.lean.
 
@@ -358,11 +364,78 @@ theorem noop_obligation_count : noopResult.obligations.length = 0 := by
   native_decide
 
 /-- All obligations satisfied for the no-op program.
-    cn_discharge_all_for handles both empty and non-empty obligation lists:
-    - Empty list: derives contradiction from h_mem : ob ∈ []
-    - Non-empty list: proves each ob.toProp using cn_discharge -/
+    The obligation list is empty, so allSatisfied [] = True. -/
 theorem noop_obs_satisfied : noopResult.obligations.allSatisfied := by
-  cn_discharge_all_for noopResult.obligations
+  have h_len : noopResult.obligations.length = 0 := by native_decide
+  have h_nil : noopResult.obligations = [] := List.length_eq_zero_iff.mp h_len
+  rw [h_nil]
+  -- allSatisfied [] = True by definition
+  trivial
+
+/-! ## Example 6: Noop with Precondition/Postcondition
+
+A noop program with matching precondition and postcondition.
+This generates an obligation: given precondition, prove postcondition.
+Since they're the same (x > 0), the obligation is trivially satisfied.
+-/
+
+/-- Spec with precondition and postcondition: requires x > 0; ensures x > 0 -/
+def prePostSpec : FunctionSpec :=
+  { requires := { clauses := [.constraint (mkBinOp .lt (mkIntConst 0) (mkSymTerm xSym))] }
+  , ensures := { clauses := [.constraint (mkBinOp .lt (mkIntConst 0) (mkSymTerm xSym))] }
+  , trusted := false
+  }
+
+/-- Run the type checker on noop program with pre/post spec -/
+def prePostResult : TypeCheckResult :=
+  checkFunction prePostSpec noopProgram Loc.t.unknown
+
+-- Check what happens
+#eval prePostResult.success
+#eval prePostResult.obligations.length
+#eval prePostResult.error
+-- Debug: show the obligation
+#eval prePostResult.obligations.map (·.description)
+#eval prePostResult.obligations.map (·.assumptions.length)
+
+/-- Type checking succeeds -/
+theorem prePost_tc_success : prePostResult.success = true := by
+  native_decide
+
+/-- One obligation is generated (postcondition must hold given precondition) -/
+theorem prePost_obligation_count : prePostResult.obligations.length = 1 := by
+  native_decide
+
+/-- All obligations satisfied.
+    The obligation is: given (x > 0), prove (x > 0).
+
+    Proof approach: show the obligation list has 1 element, then prove that element's
+    toProp using the fact that constraint = assumption (they're both x > 0). -/
+theorem prePost_obs_satisfied : prePostResult.obligations.allSatisfied := by
+  -- prePostResult.obligations has 1 element
+  have h_len : prePostResult.obligations.length = 1 := by native_decide
+  match h_list : prePostResult.obligations with
+  | [] => simp [h_list] at h_len
+  | ob :: rest =>
+    -- Show rest is empty (length was 1 means rest.length = 0)
+    have h_rest_len : rest.length = 0 := by
+      have h : (ob :: rest).length = 1 := by rw [← h_list]; exact h_len
+      simp only [List.length_cons] at h
+      omega
+    have h_rest_nil : rest = [] := List.length_eq_zero_iff.mp h_rest_len
+    -- Now show allSatisfied [ob]
+    rw [h_rest_nil]
+    -- Goal: allSatisfied [ob] = allSatisfied (ob :: [])
+    -- Unfold to ob.toProp ∧ allSatisfied []
+    simp only [ObligationSet.allSatisfied]
+    -- Now goal should be: ob.toProp ∧ True
+    constructor
+    · -- Prove ob.toProp: the constraint is the same as the assumption
+      apply obligation_holds_if_constraint_in_assumptions
+      -- Need: ob.constraint ∈ ob.assumptions
+      -- This is true because precondition = postcondition for this spec
+      sorry
+    · trivial
 
 /-! ## What a Real Verification Looks Like
 
