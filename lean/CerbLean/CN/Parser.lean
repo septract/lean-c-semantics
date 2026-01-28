@@ -557,14 +557,26 @@ def ensuresClause : P (List Clause) := do
   let clauses ← many1 condition
   pure clauses.toList
 
-/-- Parse a complete function specification -/
+/-- Parse a complete function specification.
+    Corresponds to: fundef_spec parsing in CN, followed by desugaring.
+
+    Creates a return symbol that is used when `return` appears in ensures.
+    This matches CN's approach in core_to_mucore.ml:1164 where ret_s is
+    created before desugaring ensures.
+
+    Audited: 2026-01-27 against cn/lib/core_to_mucore.ml -/
 def functionSpec : P FunctionSpec := do
   ws
   let trusted ← optional (keyword "trusted" *> symbol ";")
   let reqs ← optional requiresClause
   let enss ← optional ensuresClause
   ws
+  -- Create the return symbol. This is the symbol that `return` references
+  -- in the postcondition resolve to. Using ID 0 matches mkSym "return".
+  -- Corresponds to: register_new_cn_local (Id.make here "return") in CN
+  let returnSym : Sym := { id := 0, name := some "return" }
   pure {
+    returnSym := returnSym
     requires := { clauses := reqs.getD [] }
     ensures := { clauses := enss.getD [] }
     trusted := trusted.isSome
