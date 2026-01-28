@@ -331,4 +331,90 @@ Following CN convention, IndexTerms.t is the annotated term type.
     Corresponds to: IndexTerms.t in indexTerms.ml line 11 -/
 abbrev IndexTerm := AnnotTerm
 
+/-! ## Term Substitution
+
+Substitution replaces occurrences of a symbol with a term.
+Corresponds to: IT.subst and IT.make_subst in cn/lib/indexTerms.ml
+
+Audited: 2026-01-27 against cn/lib/indexTerms.ml
+-/
+
+/-- Substitution: maps symbols to replacement terms.
+    Corresponds to: Subst.t in indexTerms.ml -/
+structure Subst where
+  /-- Mapping from symbol IDs to replacement terms -/
+  mapping : List (Nat × IndexTerm)
+  deriving Inhabited
+
+namespace Subst
+
+/-- Create a substitution from a single symbol → term mapping -/
+def single (s : Sym) (t : IndexTerm) : Subst :=
+  { mapping := [(s.id, t)] }
+
+/-- Look up a symbol in the substitution -/
+def lookup (subst : Subst) (s : Sym) : Option IndexTerm :=
+  subst.mapping.lookup s.id
+
+end Subst
+
+mutual
+
+/-- Substitute in a term.
+    Corresponds to: IT.subst in indexTerms.ml -/
+partial def Term.subst (σ : Subst) (t : Term) : Term :=
+  match t with
+  | .const c => .const c
+  | .sym s =>
+    match σ.lookup s with
+    | some replacement => replacement.term
+    | none => .sym s
+  | .unop op arg => .unop op (arg.subst σ)
+  | .binop op l r => .binop op (l.subst σ) (r.subst σ)
+  | .ite c t e => .ite (c.subst σ) (t.subst σ) (e.subst σ)
+  | .eachI lo v hi body => .eachI lo v hi (body.subst σ)
+  | .tuple elems => .tuple (elems.map (·.subst σ))
+  | .nthTuple n tup => .nthTuple n (tup.subst σ)
+  | .struct_ tag members => .struct_ tag (members.map fun (id, t) => (id, t.subst σ))
+  | .structMember obj member => .structMember (obj.subst σ) member
+  | .structUpdate obj member value => .structUpdate (obj.subst σ) member (value.subst σ)
+  | .record members => .record (members.map fun (id, t) => (id, t.subst σ))
+  | .recordMember obj member => .recordMember (obj.subst σ) member
+  | .recordUpdate obj member value => .recordUpdate (obj.subst σ) member (value.subst σ)
+  | .constructor constr args => .constructor constr (args.map fun (id, t) => (id, t.subst σ))
+  | .memberShift ptr tag member => .memberShift (ptr.subst σ) tag member
+  | .arrayShift base ct idx => .arrayShift (base.subst σ) ct (idx.subst σ)
+  | .copyAllocId addr loc => .copyAllocId (addr.subst σ) (loc.subst σ)
+  | .hasAllocId ptr => .hasAllocId (ptr.subst σ)
+  | .sizeOf ct => .sizeOf ct
+  | .offsetOf tag member => .offsetOf tag member
+  | .nil bt => .nil bt
+  | .cons head tail => .cons (head.subst σ) (tail.subst σ)
+  | .head list => .head (list.subst σ)
+  | .tail list => .tail (list.subst σ)
+  | .representable ct value => .representable ct (value.subst σ)
+  | .good ct value => .good ct (value.subst σ)
+  | .aligned ptr align => .aligned (ptr.subst σ) (align.subst σ)
+  | .wrapI intTy value => .wrapI intTy (value.subst σ)
+  | .mapConst keyTy value => .mapConst keyTy (value.subst σ)
+  | .mapSet m k v => .mapSet (m.subst σ) (k.subst σ) (v.subst σ)
+  | .mapGet m k => .mapGet (m.subst σ) (k.subst σ)
+  | .mapDef var body => .mapDef var (body.subst σ)
+  | .apply fn args => .apply fn (args.map (·.subst σ))
+  | .let_ var binding body => .let_ var (binding.subst σ) (body.subst σ)
+  | .match_ scrutinee cases => .match_ (scrutinee.subst σ) (cases.map fun (p, t) => (p, t.subst σ))
+  | .cast targetTy value => .cast targetTy (value.subst σ)
+  | .cnNone bt => .cnNone bt
+  | .cnSome value => .cnSome (value.subst σ)
+  | .isSome opt => .isSome (opt.subst σ)
+  | .getOpt opt => .getOpt (opt.subst σ)
+
+/-- Substitute in an annotated term.
+    Corresponds to: IT.subst on annot in indexTerms.ml -/
+partial def AnnotTerm.subst (σ : Subst) (at_ : AnnotTerm) : AnnotTerm :=
+  match at_ with
+  | .mk t bt loc => .mk (t.subst σ) bt loc
+
+end
+
 end CerbLean.CN.Types
