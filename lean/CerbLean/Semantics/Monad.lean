@@ -72,6 +72,9 @@ structure InterpState where
   stdout : String := ""
   /-- Captured stderr -/
   stderr : String := ""
+  /-- Next exclusion ID for negative polarity annotations
+      (matches E.fresh_excluded_id in core_reduction.lem) -/
+  nextExclusionId : Nat := 0
   deriving Inhabited
 
 /-! ## Interpreter Monad -/
@@ -138,6 +141,14 @@ def liftMem (m : ConcreteMemM α) : InterpM α := do
     pure result
   | .error err =>
     throw (.memoryError err)
+
+/-- Get a fresh exclusion ID for negative polarity annotations.
+    Matches E.fresh_excluded_id in core_reduction.lem -/
+def freshExclusionId : InterpM Nat := do
+  let st ← get
+  let id := st.nextExclusionId
+  set { st with nextExclusionId := id + 1 }
+  pure id
 
 /-- Catch returnFromSave exception and extract the return value.
     This should be used at function call boundaries to catch returns via save/run. -/

@@ -241,6 +241,18 @@ structure Footprint where
   size : Nat
   deriving Repr, BEq, Inhabited
 
+/-- Check if two footprints overlap (and at least one is a write).
+    Two reads never race; otherwise check if address ranges intersect.
+    Corresponds to: overlapping in impl_mem.ml:527-532
+    Audited: 2026-01-28
+    Deviations: None -/
+def Footprint.overlaps (fp1 fp2 : Footprint) : Bool :=
+  match fp1.kind, fp2.kind with
+  | .read, .read => false
+  | _, _ =>
+    -- Ranges overlap if NOT (fp1 ends before fp2 starts OR fp2 ends before fp1 starts)
+    not (fp1.base + fp1.size <= fp2.base || fp2.base + fp2.size <= fp1.base)
+
 /-! ## Memory Errors
 
 Corresponds to: error types in mem_common.lem:21-76 and mem_error in mem_common.lem:129-162

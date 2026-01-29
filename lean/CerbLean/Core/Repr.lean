@@ -50,6 +50,8 @@ mutual
       .group (.text ".run " ++ repr label ++ .text " " ++ reprAPexprList args)
     | .par es => .group (.text ".par " ++ reprAExprList es)
     | .wait tid => .group (.text ".wait " ++ repr tid)
+    | .annot dynAnnots inner =>
+      .group (.text ".annot " ++ repr dynAnnots ++ .text " " ++ reprAExpr inner)
 
   partial def reprAExpr (e : AExpr) : Std.Format :=
     .group (.text "{ annots := " ++ repr e.annots ++ .text ", expr := " ++ reprExpr e.expr ++ .text " }")
