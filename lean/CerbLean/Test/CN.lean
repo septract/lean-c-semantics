@@ -378,7 +378,7 @@ def runJsonTest (jsonPath : String) (expectFail : Bool := false) : IO UInt32 := 
             match findFunctionInfo file sym.name with
             | some info =>
               -- Full verification: check body against spec with parameters bound
-              let result := checkFunctionWithParams spec info.body info.params info.cParams Core.Loc.t.unknown
+              let result := checkFunctionWithParams spec info.body info.params info.cParams info.retTy Core.Loc.t.unknown
               if result.success then
                 verifySuccess := verifySuccess + 1
                 IO.println "  PASS (body verified with trivial oracle)"
@@ -522,7 +522,7 @@ def runJsonTestWithVerify (jsonPath : String) (expectFail : Bool := false) : IO 
     IO.eprintln s!"Parse error: {e}"
     return 1
   | .ok file =>
-    IO.println "=== CN Verification (with SMT) ==="
+    IO.println "=== CN Verification ==="
     if expectFail then
       IO.println "(expecting failure)"
     IO.println ""
@@ -550,7 +550,7 @@ def runJsonTestWithVerify (jsonPath : String) (expectFail : Bool := false) : IO 
             match findFunctionInfo file sym.name with
             | some info =>
               -- Type check first
-              let tcResult := checkFunctionWithParams spec info.body info.params info.cParams Core.Loc.t.unknown
+              let tcResult := checkFunctionWithParams spec info.body info.params info.cParams info.retTy Core.Loc.t.unknown
               if !tcResult.success then
                 verifyFail := verifyFail + 1
                 IO.println "  TYPECHECK FAIL"
@@ -630,10 +630,8 @@ def printUsage : IO Unit := do
   IO.println "Usage: test_cn [options] [<json_file>]"
   IO.println ""
   IO.println "Modes:"
-  IO.println "  (no args)              Run unit tests (parse + typecheck)"
-  IO.println "  --verify               Run SMT verification smoke test"
-  IO.println "  <json_file>            Type-check CN annotations from Cerberus JSON"
-  IO.println "  --verify <json_file>   Full verification with SMT solver"
+  IO.println "  (no args)              Run unit tests (parse + typecheck + SMT smoke)"
+  IO.println "  <json_file>            Verify CN annotations from Cerberus JSON (with SMT)"
   IO.println ""
   IO.println "Options:"
   IO.println "  --obligations          Run only obligation generation tests"
@@ -642,7 +640,7 @@ def printUsage : IO Unit := do
 def main (args : List String) : IO UInt32 := do
   match args with
   | [] =>
-    -- No arguments: run all unit tests
+    -- No arguments: run all unit tests including SMT smoke test
     let mut exitCode : UInt32 := 0
 
     let r1 ← runUnitTests
@@ -652,35 +650,27 @@ def main (args : List String) : IO UInt32 := do
     let r2 ← runAllObligationTests
     if r2 != 0 then exitCode := 1
 
+    IO.println ""
+    let r3 ← runSmtSmokeTest
+    if r3 != 0 then exitCode := 1
+
     return exitCode
-
-  | ["--verify"] =>
-    -- SMT verification smoke test
-    runSmtSmokeTest
-
-  | ["--verify", jsonPath] =>
-    -- Full verification with SMT
-    runJsonTestWithVerify jsonPath
-
-  | ["--verify", "--expect-fail", jsonPath] | ["--expect-fail", "--verify", jsonPath] =>
-    -- Full verification with SMT, expecting failure
-    runJsonTestWithVerify jsonPath (expectFail := true)
 
   | ["--obligations"] =>
     -- Run only obligation tests
     runAllObligationTests
 
   | ["--expect-fail", jsonPath] =>
-    -- Expected failure mode for .fail.c tests (type-check only)
-    runJsonTest jsonPath (expectFail := true)
+    -- Expected failure mode for .fail.c tests
+    runJsonTestWithVerify jsonPath (expectFail := true)
 
   | ["--help"] | ["-h"] =>
     printUsage
     return 0
 
   | [jsonPath] =>
-    -- JSON file provided: run type-check integration test
-    runJsonTest jsonPath
+    -- JSON file provided: run full verification with SMT
+    runJsonTestWithVerify jsonPath
 
   | _ =>
     printUsage

@@ -38,6 +38,7 @@
 
 import CerbLean.Core
 import CerbLean.Core.Ctype
+import CerbLean.Core.MuCore
 import CerbLean.CN.Types
 import CerbLean.CN.TypeChecking.Check
 import CerbLean.CN.TypeChecking.Expr
@@ -46,6 +47,8 @@ import CerbLean.CN.Verification.Obligation
 import Std.Data.HashMap
 
 namespace CerbLean.CN.TypeChecking
+
+open CerbLean.Core.MuCore (transformProc)
 
 open CerbLean.Core (Sym Loc)
 open CerbLean.CN.Types
@@ -214,12 +217,16 @@ It sets up the lazy muCore transformation by:
     - `body`: The Core IR body of the function
     - `params`: Core parameters (sym × BaseType), where BaseType is always pointer (stack slot)
     - `cParams`: C-level parameter types from funinfo (sym × Ctype), giving actual value types
-    - `loc`: Source location for error reporting -/
+    - `retTy`: Core return type of the function
+    - `loc`: Source location for error reporting
+
+    Corresponds to: WProc.check_procedure in wellTyped.ml lines 2467-2520 -/
 def checkFunctionWithParams
     (spec : FunctionSpec)
     (body : Core.AExpr)
     (params : List (Core.Sym × Core.BaseType))
     (cParams : List (Option Core.Sym × Core.Ctype))
+    (retTy : Core.BaseType)
     (loc : Core.Loc)
     : TypeCheckResult :=
   -- For trusted specs, skip verification
@@ -270,46 +277,50 @@ def checkFunctionWithParams
     | .error msg =>
       TypeCheckResult.fail msg
     | .ok (paramCtx, paramValueMap, nextFreshId, cnParams) =>
-      -- Step 3: Resolve the spec - convert parsed identifiers to proper symbols
+      -- Step 3: Convert return type to CN BaseType
+      -- Corresponds to: WProc extracting return_bt from function type
+      let returnBt := match tryCoreBaseTypeToCN retTy with
+        | some bt => bt
+        | none => .unit  -- Fall back to unit for unsupported types
+
+      -- Step 4: Transform body to muCore form
+      -- This extracts label definitions and replaces Esave with Erun.
+      -- Corresponds to: core_to_micore__funmap_decl in milicore.ml
+      let muProc := transformProc body
+
+      -- Step 5: Resolve the spec - convert parsed identifiers to proper symbols
       -- This is the CN-matching approach: resolve names to symbols before type checking.
       -- Corresponds to: CN's Cabs_to_ail.desugar_cn_* functions
       let resolvedSpec := Resolve.resolveFunctionSpec spec cnParams.reverse nextFreshId
 
-      -- Step 4: Initial context (resources will be added by processPrecondition)
+      -- Step 6: Create label context from label definitions
+      -- Corresponds to: WProc.label_context in wellTyped.ml line 2474
+      -- Maps each label symbol to its type (LT) and kind (return, loop, other)
+      let labels := LabelContext.ofLabelDefs resolvedSpec returnBt muProc.labels
+
+      -- Step 7: Initial context (resources will be added by processPrecondition)
       let initialCtx := paramCtx
 
-      -- Step 5: Create initial state with ParamValueMap and obligation accumulation
+      -- Step 8: Create initial state with ParamValueMap, LabelDefs, and obligation accumulation
       let initialState : TypingState := {
         context := initialCtx
         oracle := .trivial  -- Not used when accumulating obligations
         freshCounter := nextFreshId + 1000  -- Leave room for resolution IDs
         paramValues := paramValueMap
+        labelDefs := muProc.labels  -- Label definitions from transformation
         accumulateObligations := true
       }
 
-      -- Step 6: Run type checking (CPS style)
+      -- Step 9: Run type checking on transformed body
+      -- Corresponds to: check_expr_top in check.ml lines 2317-2330
       let computation : TypingM Unit := do
         -- Process precondition: add resources to context, bind outputs
         processPrecondition resolvedSpec.requires loc
 
-        -- Check the body with a continuation that handles postcondition
-        -- The continuation is called at each exit point of the function
-        let postconditionK (returnVal : IndexTerm) : TypingM Unit := do
-          -- Substitute the return symbol with the actual return value in postcondition.
-          -- This is how CN handles return values: the postcondition constraints
-          -- reference resolvedSpec.returnSym, and we substitute it with returnVal.
-          --
-          -- Corresponds to: check.ml line 2323
-          --   let lrt = LRT.subst (IT.make_subst [ (return_s, lvt) ]) lrt in
-          let σ := Subst.single resolvedSpec.returnSym returnVal
-          let substitutedPost := resolvedSpec.ensures.subst σ
-
-          -- Process the substituted postcondition
-          processPostcondition substitutedPost loc
-          -- Check no resources leaked (must all be consumed or returned)
-          checkNoLeakedResources
-
-        checkExprK body postconditionK
+        -- Check the body using check_expr_top
+        -- This handles return labels via Spine.calltype_lt and
+        -- fallthrough via Spine.subtype (for void functions)
+        checkExprTop loc labels resolvedSpec returnBt muProc.body
 
       match TypingM.run computation initialState with
       | .ok (_, finalState) =>
