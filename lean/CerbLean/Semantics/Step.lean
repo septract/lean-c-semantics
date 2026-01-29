@@ -215,6 +215,24 @@ def contToContext (cont : Continuation) : Context :=
     | .annot annots dynAnnots => Context.annot_ annots dynAnnots acc
     | .bound annots => Context.bound annots acc
 
+/-- Convert a Context to a list of ContElems (continuation).
+    Flattens the nested context structure into a flat continuation.
+    The innermost context becomes the first element (closest to the hole).
+    Corresponds to: converting Cerberus evaluation contexts to continuation elements -/
+def contextToContElems : Context → List ContElem
+  | .ctx => []
+  | .unseq annots before inner after =>
+      -- Innermost first, so recurse then append this element
+      contextToContElems inner ++ [.unseq annots before after]
+  | .wseq annots pat inner e2 =>
+      contextToContElems inner ++ [.wseq annots pat e2]
+  | .sseq annots pat inner e2 =>
+      contextToContElems inner ++ [.sseq annots pat e2]
+  | .annot_ annots dynAnnots inner =>
+      contextToContElems inner ++ [.annot annots dynAnnots]
+  | .bound annots inner =>
+      contextToContElems inner ++ [.bound annots]
+
 /-! ## Value Conversion Helpers
 
 See Eval.lean for memValueFromValue and valueFromMemValue.
@@ -974,25 +992,34 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
             pure (.continue_ { st with arena := resultExpr })
         | .error err => throw err
       else
-        -- Not all irreducible: find first reducible and focus on it
-        -- This is deterministic left-to-right execution, but now with proper
-        -- isIrreducible check that handles annotated values correctly.
-        -- Full non-deterministic exploration requires a different driver (Phase 7).
-        --
-        -- Find first non-irreducible expression
-        match es.findIdx? (fun e => !isIrreducible e) with
-        | some idx =>
-          let e := es[idx]!
-          let done := es.take idx
-          let remaining := es.drop (idx + 1)
-          let contElem := ContElem.unseq arenaAnnots done remaining
-          pure (.continue_ { st with
-            arena := e
-            stack := .cons currentProcOpt (contElem :: cont) parent
-          })
-        | none =>
+        -- Not all irreducible: use contextual decomposition to find ALL reducible sub-expressions
+        -- Corresponds to: get_ctx_unseq_aux in core_reduction.lem:576-588
+        -- Returns StepResult.branches with all possible next states for non-deterministic exploration
+        let ctxPairs := getCtxUnseqAux arenaAnnots [] [] es
+        match ctxPairs with
+        | [] =>
           -- Should not happen if not all are irreducible
-          throw (.illformedProgram "unseq: inconsistent state")
+          throw (.illformedProgram "unseq: no reducible expressions found")
+        | [(ctx, reducibleExpr)] =>
+          -- Single reducible expression: continue deterministically
+          -- Convert context to continuation elements and focus on the reducible expression
+          let ctxContElems := contextToContElems ctx
+          pure (.continue_ { st with
+            arena := reducibleExpr
+            stack := .cons currentProcOpt (ctxContElems ++ cont) parent
+          })
+        | pairs =>
+          -- Multiple reducible expressions: return all possible branches
+          -- Each branch focuses on a different reducible sub-expression
+          -- The driver will choose which to explore (exhaustive, random, or pick first)
+          let branchStates := pairs.map fun (ctx, reducibleExpr) =>
+            -- Convert context to continuation elements
+            let ctxContElems := contextToContElems ctx
+            { st with
+              arena := reducibleExpr
+              stack := .cons currentProcOpt (ctxContElems ++ cont) parent
+            }
+          pure (.branches branchStates)
 
   | .unseq _, .empty =>
     throw (.illformedProgram "reached empty stack with Eunseq")
@@ -1310,12 +1337,12 @@ def runUntilDone (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym
   match ← step st file allLabeledConts with
   | .done v => pure v
   | .continue_ st' => runUntilDone st' file allLabeledConts fuel'
-  | .branches arenas =>
+  | .branches states =>
     -- Deterministic mode: pick first branch
     -- For exhaustive exploration, use NDDriver instead
-    match arenas with
+    match states with
     | [] => throw (.illformedProgram "empty branches")
-    | arena :: _ => runUntilDone { st with arena } file allLabeledConts fuel'
+    | st' :: _ => runUntilDone st' file allLabeledConts fuel'
   | .error err => throw err
   termination_by fuel
 
