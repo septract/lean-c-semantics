@@ -203,10 +203,20 @@ def resolveClause (ctx : ResolveContext) (c : Clause) : ResolveContext × Clause
   match c with
   | .resource name r =>
     -- Resource clause introduces a new binding
-    -- First resolve the resource (uses current context)
-    let resolvedResource := resolveResource ctx r
-    -- Then create a fresh symbol for the output binding
+    -- IMPORTANT: We must create the fresh symbol FIRST, then use it for the output
+    -- Otherwise the resource's output.value won't match the binding symbol
     let (ctx', freshSym) := ctx.fresh (name.name.getD "anon")
+
+    -- Now resolve the resource's request with the ORIGINAL context
+    -- (the request can reference symbols defined earlier, but not this binding)
+    let resolvedRequest := resolveRequest ctx r.request
+
+    -- Create the resource with the fresh symbol as its output value
+    -- This ensures the output.value matches the binding symbol
+    let resolvedResource : Resource := {
+      request := resolvedRequest
+      output := { value := AnnotTerm.mk (.sym freshSym) r.output.value.bt r.output.value.loc }
+    }
     (ctx', .resource freshSym resolvedResource)
   | .constraint assertion =>
     -- Constraint uses current context, doesn't add bindings

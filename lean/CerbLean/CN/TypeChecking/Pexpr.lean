@@ -87,6 +87,57 @@ def ctypeToBaseTypeSimple (ct : Core.Ctype) : BaseType :=
   | .struct_ tag => .struct_ tag
   | _ => .unit  -- fallback for complex types
 
+/-- Get the bit width for an integer base kind -/
+def intBaseKindWidth (kind : Core.IntBaseKind) : Nat :=
+  match kind with
+  | .ichar => 8
+  | .short => 16
+  | .int_ => 32
+  | .long => 64      -- platform-dependent, assume LP64
+  | .longLong => 64
+  | .intN n => n
+  | .intLeastN n => n
+  | .intFastN n => n
+  | .intmax => 64
+  | .intptr => 64
+
+/-- Convert Ctype_ (inner type) to CN BaseType for conv_int/conv_loaded_int.
+    Corresponds to: Memory.bt_of_sct in CN's memory.ml
+    For integers, returns Bits type with appropriate sign and width. -/
+def ctypeInnerToBaseType (ty : Core.Ctype_) : BaseType :=
+  match ty with
+  | .void => .unit
+  | .basic (.integer ity) =>
+    -- Convert integer type to Bits with appropriate sign and width
+    -- This matches CN's Memory.bt_of_sct behavior
+    match ity with
+    | .bool => .bool
+    | .char => .integer  -- char signedness is implementation-defined
+    | .signed kind => .bits .signed (intBaseKindWidth kind)
+    | .unsigned kind => .bits .unsigned (intBaseKindWidth kind)
+    | .size_t => .bits .unsigned 64  -- platform-dependent, assume 64-bit
+    | .ptrdiff_t => .bits .signed 64
+    | .wchar_t => .bits .signed 32   -- platform-dependent
+    | .wint_t => .bits .signed 32
+    | .ptraddr_t => .bits .unsigned 64
+    | .enum _ => .bits .signed 32    -- enums are typically int-sized
+  | .basic (.floating _) => .real
+  | .pointer _ _ => .loc
+  | .struct_ tag => .struct_ tag
+  | .union_ tag => .struct_ tag  -- unions use same representation
+  | .array _ _ => .loc  -- array decays to pointer
+  | .function _ _ _ _ => .loc  -- function pointer
+  | .functionNoParams _ _ => .loc  -- function pointer (K&R style)
+  | .atomic ty' => ctypeInnerToBaseType ty'
+  | .byte => .memByte
+
+/-- Convert Ctype to CN BaseType for conv_int/conv_loaded_int.
+    This is a pure version that doesn't use the monad and handles
+    the Bits type properly for conv_int semantics.
+    Corresponds to: Memory.bt_of_sct in CN's memory.ml -/
+def ctypeToBaseTypeBits (ct : Core.Ctype) : BaseType :=
+  ctypeInnerToBaseType ct.ty
+
 /-- Convert a Core Value to a CN IndexTerm. -/
 def valueToTerm (v : Value) (loc : Core.Loc) : Except TypeError IndexTerm := do
   match valueToConst v loc with
@@ -367,14 +418,80 @@ partial def checkPexpr (pe : APexpr) : TypingM IndexTerm := do
 
   -- Function call (pure)
   | .call name args =>
-    let argTerms ← args.mapM fun arg => do
-      let peArg : APexpr := ⟨[], none, arg⟩
-      checkPexpr peArg
-    let fnSym := match name with
-      | .sym s => s
-      | .impl _ => { id := 0, name := some "impl_const" : Sym }  -- Placeholder
-    let resBt := pe.ty.map coreBaseTypeToCN |>.getD .unit
-    return AnnotTerm.mk (.apply fnSym argTerms) resBt loc
+    -- Handle Core builtin functions that CN treats specially
+    let fnName := match name with
+      | .sym s => s.name
+      | .impl _ => none
+
+    -- conv_loaded_int/conv_int: integer type conversion
+    -- Corresponds to: check_conv_int in cn/lib/check.ml lines 394-431
+    -- and PEconv_int/PEcall handling in check.ml lines 822-833
+    --
+    -- CN's behavior:
+    -- - Bool: ite(arg == 0, 0, 1)
+    -- - Unsigned: cast to target type
+    -- - Signed: check representable, then cast (fail if not representable)
+    if fnName == some "conv_loaded_int" || fnName == some "conv_int" then
+      match args with
+      | [tyArg, valArg] =>
+        -- First arg is the ctype, second arg is the value
+        let peVal : APexpr := ⟨[], none, valArg⟩
+        let argVal ← checkPexpr peVal
+
+        -- Extract the target ctype from the first argument
+        -- The tyArg should be PEval(Vctype(ct))
+        match tyArg with
+        | .val (.ctype ct) =>
+          let targetBt := ctypeToBaseTypeBits ct
+          -- Check what kind of integer type this is
+          match ct.ty with
+          | .basic (.integer .bool) =>
+            -- Bool: ite(arg == 0, 0, 1)
+            -- Corresponds to: check_conv_int lines 413-420
+            let zero := AnnotTerm.mk (.const (.z 0)) targetBt loc
+            let one := AnnotTerm.mk (.const (.z 1)) targetBt loc
+            let argBt := argVal.bt
+            let zeroArg := AnnotTerm.mk (.const (.z 0)) argBt loc
+            let eqZero := AnnotTerm.mk (.binop .eq argVal zeroArg) .bool loc
+            return AnnotTerm.mk (.ite eqZero zero one) targetBt loc
+
+          | .basic (.integer (.unsigned _)) =>
+            -- Unsigned: cast to target type
+            -- Corresponds to: check_conv_int lines 421-423
+            return AnnotTerm.mk (.cast targetBt argVal) targetBt loc
+
+          | .basic (.integer (.signed _)) =>
+            -- Signed: CN checks representable, then casts (lines 424-429)
+            -- Add representability constraint as obligation
+            let reprTerm := AnnotTerm.mk (.representable ct argVal) .bool loc
+            TypingM.requireConstraint (.t reprTerm) loc "integer representability"
+            return AnnotTerm.mk (.cast targetBt argVal) targetBt loc
+
+          | _ =>
+            -- Other integer types not yet supported
+            TypingM.fail (.other s!"conv_int for integer type {repr ct.ty} not yet supported")
+
+        | _ =>
+          -- Cannot extract ctype from argument
+          TypingM.fail (.other "conv_int: could not extract ctype from first argument")
+      | _ =>
+        -- Fallback: treat as normal function call
+        let argTerms ← args.mapM fun arg => do
+          let peArg : APexpr := ⟨[], none, arg⟩
+          checkPexpr peArg
+        let fnSym : Sym := { id := 0, name := fnName }
+        let resBt := pe.ty.map coreBaseTypeToCN |>.getD .integer
+        return AnnotTerm.mk (.apply fnSym argTerms) resBt loc
+    else
+      -- General function call
+      let argTerms ← args.mapM fun arg => do
+        let peArg : APexpr := ⟨[], none, arg⟩
+        checkPexpr peArg
+      let fnSym := match name with
+        | .sym s => s
+        | .impl _ => { id := 0, name := some "impl_const" : Sym }  -- Placeholder
+      let resBt := pe.ty.map coreBaseTypeToCN |>.getD .unit
+      return AnnotTerm.mk (.apply fnSym argTerms) resBt loc
 
   -- Case/match expression
   | .case_ scrut branches =>
