@@ -72,7 +72,13 @@ partial def exploreAll (st : ThreadState) (file : File) (allLabeledConts : AllLa
     -- Explore ALL branches and combine results
     -- If any branch has a race, return race
     -- If all succeed, combine all values
-    let results ← states.mapM fun st' =>
+    --
+    -- CRITICAL: Each branch must start from the SAME interpreter state.
+    -- Without this, branch 2 would see memory modifications from branch 1, etc.
+    -- We save state before the loop and restore it before each branch exploration.
+    let savedState ← get
+    let results ← states.mapM fun st' => do
+      set savedState  -- Restore to saved state before this branch
       exploreAll st' file allLabeledConts (fuel - 1)
     -- Check for any races first
     for result in results do

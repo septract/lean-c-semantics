@@ -878,8 +878,83 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
       | _, _ =>
         throw (.typeError "load (excluded): expected ctype and pointer")
 
-    -- Other actions in Eexcluded - not expected but handle gracefully
-    | _ => throw (.notImplemented "excluded wrapper on non-store/load action")
+    -- Create inside Eexcluded: execute but no footprint (allocation, not memory access)
+    -- Corresponds to: these actions don't produce footprints for race detection
+    | .create alignPe sizePe prefix_ =>
+      let alignVal ← evalPexpr defaultPexprFuel st.env alignPe
+      let sizeVal ← evalPexpr defaultPexprFuel st.env sizePe
+      match alignVal, sizeVal with
+      | .object (.integer alignIv), .ctype ty =>
+        let typeEnv ← InterpM.getTypeEnv
+        let size := sizeof typeEnv ty
+        let prefixName := prefix_.val
+        let ptr ← InterpM.liftMem (allocateImpl prefixName size (some ty) alignIv.val.toNat .writable none)
+        let resultVal := Value.object (.pointer ptr)
+        -- No footprint annotations for allocation operations
+        pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
+      | _, _ =>
+        throw (.typeError "create (excluded): expected integer alignment and ctype size")
+
+    -- CreateReadonly inside Eexcluded: execute but no footprint
+    | .createReadonly alignPe sizePe initPe prefix_ =>
+      let alignVal ← evalPexpr defaultPexprFuel st.env alignPe
+      let sizeVal ← evalPexpr defaultPexprFuel st.env sizePe
+      let initVal ← evalPexpr defaultPexprFuel st.env initPe
+      match alignVal, sizeVal with
+      | .object (.integer alignIv), .ctype ty =>
+        let typeEnv ← InterpM.getTypeEnv
+        let size := sizeof typeEnv ty
+        let prefixName := prefix_.val
+        match memValueFromValue ty initVal with
+        | some mval =>
+          let ptr ← InterpM.liftMem (allocateImpl prefixName size (some ty) alignIv.val.toNat (.readonly .constQualified) (some mval))
+          let resultVal := Value.object (.pointer ptr)
+          pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
+        | none =>
+          throw (.typeError "createReadonly (excluded): value doesn't match type")
+      | _, _ =>
+        throw (.typeError "createReadonly (excluded): expected integer alignment and ctype size")
+
+    -- Alloc inside Eexcluded: execute but no footprint (allocation, not memory access)
+    | .alloc alignPe sizePe prefix_ =>
+      let alignVal ← evalPexpr defaultPexprFuel st.env alignPe
+      let sizeVal ← evalPexpr defaultPexprFuel st.env sizePe
+      match alignVal, sizeVal with
+      | .object (.integer alignIv), .object (.integer sizeIv) =>
+        let prefixName := prefix_.val
+        let ptr ← InterpM.liftMem (allocateImpl prefixName sizeIv.val.toNat none alignIv.val.toNat .writable none)
+        let resultVal := Value.object (.pointer ptr)
+        pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
+      | _, _ =>
+        throw (.typeError "alloc (excluded): expected integer alignment and size")
+
+    -- Kill inside Eexcluded: execute but no footprint (deallocation, not memory access)
+    | .kill kind ptrPe =>
+      let ptrVal ← evalPexpr defaultPexprFuel st.env ptrPe
+      match ptrVal with
+      | .object (.pointer ptr) =>
+        let isDynamic := match kind with
+          | .dynamic => true
+          | .static _ => false
+        InterpM.liftMem (killImpl isDynamic ptr)
+        let resultVal := Value.unit
+        pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
+      | .loaded (.specified (.pointer ptr)) =>
+        let isDynamic := match kind with
+          | .dynamic => true
+          | .static _ => false
+        InterpM.liftMem (killImpl isDynamic ptr)
+        let resultVal := Value.unit
+        pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
+      | _ =>
+        throw (.typeError "kill (excluded): expected pointer value")
+
+    -- Atomic operations in Eexcluded - complex semantics, not yet implemented
+    | .rmw _ _ _ _ _ _ => throw (.notImplemented "excluded wrapper on rmw action")
+    | .compareExchangeStrong _ _ _ _ _ _ => throw (.notImplemented "excluded wrapper on CAS action")
+    | .compareExchangeWeak _ _ _ _ _ _ => throw (.notImplemented "excluded wrapper on CAS action")
+    | .fence _ => throw (.notImplemented "excluded wrapper on fence action")
+    | .seqRmw _ _ _ _ _ => throw (.notImplemented "seqRmw forbidden for neg polarity")
 
   -- Eccall: C function call through pointer
   -- Corresponds to: core_run.lem:926-999
@@ -979,17 +1054,12 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
         -- Corresponds to: one_step_unseq_aux in core_reduction.lem:244-261
         match collectValuesCheckRace es with
         | .ok (cvals, combinedAnnots) =>
-          -- Create tuple value, preserving combined annotations
+          -- Create tuple value wrapped in annotations
+          -- Cerberus ALWAYS wraps in Eannot fps even if fps is empty (core_reduction.lem:370)
           -- The annotations must propagate outward for race detection in nested contexts
           let tupleVal := Value.tuple cvals
-          if combinedAnnots.isEmpty then
-            -- No annotations to preserve
-            let resultExpr := mkValueExpr arenaAnnots tupleVal
-            pure (.continue_ { st with arena := resultExpr })
-          else
-            -- Wrap result in combined annotations for outer race checking
-            let resultExpr := mkAnnotatedValueExpr arenaAnnots combinedAnnots tupleVal
-            pure (.continue_ { st with arena := resultExpr })
+          let resultExpr := mkAnnotatedValueExpr arenaAnnots combinedAnnots tupleVal
+          pure (.continue_ { st with arena := resultExpr })
         | .error err => throw err
       else
         -- Not all irreducible: use contextual decomposition to find ALL reducible sub-expressions
