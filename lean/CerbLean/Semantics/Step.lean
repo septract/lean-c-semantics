@@ -170,6 +170,51 @@ def mkAnnotatedValueExpr (annots : Annots) (dynAnnots : DynAnnotations) (v : Val
   let innerExpr := mkValueExpr [] v
   { annots, expr := .annot dynAnnots innerExpr }
 
+/-! ## Expression Builders for Neg Action Transformation
+
+These helpers are used to construct the transformed expression when a neg action
+is encountered. The transformation creates:
+  wseq sym = unseq [Eexcluded n act; apply_ctx ctxA' (pure ())] in sym
+
+Corresponds to: core_reduction.lem:1285-1302 neg action transformation
+-/
+
+/-- Create an Eexcluded wrapper around an action.
+    Corresponds to: Eexcluded in core.lem:337 -/
+def mkExcludedExpr (exclId : Nat) (paction : Paction) : AExpr :=
+  { annots := [], expr := .excluded exclId paction }
+
+/-- Create a pure unit expression.
+    Used as the base expression when applying context. -/
+def mkPureUnit : AExpr :=
+  { annots := [], expr := .pure { annots := [], ty := some .unit, expr := .val .unit } }
+
+/-- Create an unseq expression from a list of expressions. -/
+def mkUnseqExpr (es : List AExpr) : AExpr :=
+  { annots := [], expr := .unseq es }
+
+/-- Create a wseq expression: let weak pat = e1 in e2 -/
+def mkWseqExpr (sym : Sym) (e1 : AExpr) (e2 : AExpr) : AExpr :=
+  let pat : APattern := { annots := [], pat := .base (some sym) .unit }
+  { annots := [], expr := .wseq pat e1 e2 }
+
+/-- Create a pure symbol reference expression. -/
+def mkPureSym (sym : Sym) : AExpr :=
+  { annots := [], expr := .pure { annots := [], ty := none, expr := .sym sym } }
+
+/-- Convert a continuation to a Context type for use with applyCtx.
+    This inverts the continuation (which is inside-out) to create
+    a context (which is outside-in).
+    Corresponds to: the relationship between Continuation and Context in Cerberus -/
+def contToContext (cont : Continuation) : Context :=
+  cont.foldl (init := Context.ctx) fun acc elem =>
+    match elem with
+    | .wseq annots pat e2 => Context.wseq annots pat acc e2
+    | .sseq annots pat e2 => Context.sseq annots pat acc e2
+    | .unseq annots done remaining => Context.unseq annots done acc remaining
+    | .annot annots dynAnnots => Context.annot_ annots dynAnnots acc
+    | .bound annots => Context.bound annots acc
+
 /-! ## Value Conversion Helpers
 
 See Eval.lean for memValueFromValue and valueFromMemValue.
@@ -226,22 +271,49 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
         let env' := match st.env with
           | [] => [{}]  -- Should not happen
           | _ :: rest => if rest.isEmpty then [{}] else rest
-        -- Apply continuation to wrap the result
-        let wrappedExpr := applyContinuation parentCont (mkValueExpr arenaAnnots cval)
+        -- Continue with parent's continuation (value passes to parent frame)
         pure (.continue_ { st with
-          arena := wrappedExpr
-          stack := .cons parentProcOpt [] parentStack
+          arena := mkValueExpr arenaAnnots cval
+          stack := .cons parentProcOpt parentCont parentStack
           env := env'
         })
 
-      -- Non-empty continuation -> apply it
-      -- Corresponds to: core_run.lem:1599-1605
-      | _, _ =>
-        let wrappedExpr := applyContinuation cont (mkValueExpr arenaAnnots cval)
-        pure (.continue_ { st with
-          arena := wrappedExpr
-          stack := .cons currentProcOpt [] parent
-        })
+      -- Non-empty continuation -> handle ONE element at a time
+      -- This avoids rebuilding the entire expression (which caused infinite loops with bounds)
+      -- Corresponds to: core_reduction.lem reduction rules for values in contexts
+      | elem :: rest, _ =>
+        match elem with
+        | .wseq _annots pat e2 =>
+            -- Bind value to pattern, continue with e2
+            match st.updateEnv pat cval with
+            | some st' => pure (.continue_ { st' with arena := e2, stack := .cons currentProcOpt rest parent })
+            | none => throw .patternMatchFailed
+        | .sseq _annots pat e2 =>
+            -- Same as wseq (strong vs weak doesn't matter for values)
+            match st.updateEnv pat cval with
+            | some st' => pure (.continue_ { st' with arena := e2, stack := .cons currentProcOpt rest parent })
+            | none => throw .patternMatchFailed
+        | .unseq annots done remaining =>
+            -- Add value to done list, continue with remaining or complete
+            let newDone := done ++ [mkValueExpr arenaAnnots cval]
+            match remaining with
+            | [] =>
+                -- All branches done: rebuild unseq with all values and continue
+                -- The unseq case in the stepper will then check for races
+                let unseqExpr : AExpr := { annots, expr := .unseq newDone }
+                pure (.continue_ { st with arena := unseqExpr, stack := .cons currentProcOpt rest parent })
+            | next :: moreRemaining =>
+                -- More branches to evaluate
+                let newElem := ContElem.unseq annots newDone moreRemaining
+                pure (.continue_ { st with arena := next, stack := .cons currentProcOpt (newElem :: rest) parent })
+        | .bound _ =>
+            -- CRITICAL: bound(v) → v (pass value through, matching Cerberus core_reduction.lem)
+            -- The bound is consumed - we don't rebuild Ebound around the value
+            pure (.continue_ { st with arena := mkValueExpr arenaAnnots cval, stack := .cons currentProcOpt rest parent })
+        | .annot annots dynAnnots =>
+            -- Wrap value in annotation
+            let annotatedExpr := mkAnnotatedValueExpr annots dynAnnots cval
+            pure (.continue_ { st with arena := annotatedExpr, stack := .cons currentProcOpt rest parent })
 
     | none =>
       -- Need to evaluate the pure expression
@@ -293,9 +365,13 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
       match valueFromExpr innerE with
       | some cval =>
         -- {A}v case: propagate annotation to e2
+        -- Apply neg-to-pos conversion: DA_neg(id, es, fp) → DA_pos([id] ++ es, fp)
+        -- This adds the neg ID to the exclusion set, preventing races with later ops
+        -- Corresponds to: dyn_annot_neg_to_pos in core_reduction.lem
+        let xs' := dynAnnotsNegToPos xs
         match st.updateEnv pat cval with
         | some st' =>
-          let wrappedE2 : AExpr := { annots := [], expr := .annot xs e2 }
+          let wrappedE2 : AExpr := { annots := [], expr := .annot xs' e2 }
           pure (.continue_ { st' with arena := wrappedE2 })
         | none => throw .patternMatchFailed
       | none =>
@@ -303,9 +379,10 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
         | .pure pe1 =>
           -- {A}(pure e) - evaluate and propagate annotation
           let cval ← evalPexpr defaultPexprFuel st.env pe1
+          let xs' := dynAnnotsNegToPos xs
           match st.updateEnv pat cval with
           | some st' =>
-            let wrappedE2 : AExpr := { annots := [], expr := .annot xs e2 }
+            let wrappedE2 : AExpr := { annots := [], expr := .annot xs' e2 }
             pure (.continue_ { st' with arena := wrappedE2 })
           | none => throw .patternMatchFailed
         | _ =>
@@ -453,239 +530,338 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
   -- Eaction: execute memory action
   -- Corresponds to: core_action_step in core_run.lem:275-650
   -- For polarity handling, see core_reduction.lem:1280-1327:
-  --   Pos actions → DA_pos [] fp
-  --   Neg actions → DA_neg excl_id [] fp (via Eexcluded mechanism)
-  | .action paction, _ =>
-    let act := paction.action.action
-    let pol := paction.polarity
-    match act with
-    -- Create: allocate memory for a typed object
-    -- Corresponds to: core_run.lem:297-338 (Create case)
-    | .create alignPe sizePe prefix_ =>
-      let alignVal ← evalPexpr defaultPexprFuel st.env alignPe
-      let sizeVal ← evalPexpr defaultPexprFuel st.env sizePe
-      match alignVal, sizeVal with
-      | .object (.integer alignIv), .ctype ty =>
-        let typeEnv ← InterpM.getTypeEnv
-        let size := sizeof typeEnv ty
-        let prefixName := prefix_.val
-        let ptr ← InterpM.liftMem (allocateImpl prefixName size (some ty) alignIv.val.toNat .writable none)
-        let resultVal := Value.object (.pointer ptr)
-        pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
-      | _, _ =>
-        throw (.typeError "create: expected integer alignment and ctype size")
-
-    -- CreateReadonly: allocate read-only memory with initial value
-    -- Corresponds to: core_run.lem:340-408 (CreateReadOnly case)
-    | .createReadonly alignPe sizePe initPe prefix_ =>
-      let alignVal ← evalPexpr defaultPexprFuel st.env alignPe
-      let sizeVal ← evalPexpr defaultPexprFuel st.env sizePe
-      let initVal ← evalPexpr defaultPexprFuel st.env initPe
-      match alignVal, sizeVal with
-      | .object (.integer alignIv), .ctype ty =>
-        let typeEnv ← InterpM.getTypeEnv
-        let size := sizeof typeEnv ty
-        let prefixName := prefix_.val
-        -- Convert Core value to MemValue
-        match memValueFromValue ty initVal with
-        | some mval =>
-          let ptr ← InterpM.liftMem (allocateImpl prefixName size (some ty) alignIv.val.toNat (.readonly .constQualified) (some mval))
+  --   Pos actions → DA_pos [] fp (execute directly)
+  --   Neg actions → NEG ACTION TRANSFORMATION (create unseq structure)
+  --
+  -- NEG ACTION TRANSFORMATION (core_reduction.lem:1285-1302):
+  -- When a neg action is encountered:
+  -- 1. break_at_bound_and_sseq ctx → (ctx_bound, ctxA)
+  -- 2. n ← fresh_excluded_id
+  -- 3. ctxA' = add_exclusion n ctxA  -- Add n to all exclusion sets
+  -- 4. expr' = wseq sym = unseq [Eexcluded n act; apply_ctx ctxA' (pure ())] in sym
+  -- 5. return apply_ctx ctx_bound expr'
+  | .action paction, stack =>
+    match paction.polarity with
+    | .neg =>
+      -- NEG ACTION TRANSFORMATION
+      match stack with
+      | .cons currentProcOpt cont parent =>
+        match Stack.breakAtBound cont with
+        | .noBound =>
+          -- No bound found - this is unexpected for neg actions
+          let contStr := cont.map fun elem => match elem with
+            | .wseq _ _ _ => "wseq"
+            | .sseq _ _ _ => "sseq"
+            | .unseq _ _ _ => "unseq"
+            | .annot _ _ => "annot"
+            | .bound _ => "BOUND"
+          dbg_trace s!"NEG NO BOUND: cont = {contStr}"
+          throw (.illformedProgram "neg action without bound in continuation")
+        | .boundNoSseq _boundElem ctxA =>
+          dbg_trace s!"NEG TRANSFORM: ctxA has {ctxA.length} elements"
+          -- Step 2: Generate fresh exclusion ID
+          let n ← InterpM.freshExclusionId
+          -- Step 3: Add exclusion ID to all annotations in ctxA
+          let ctxA' := Stack.addExclusionToCont n ctxA
+          -- Step 4: Create the transformed expression
+          -- wseq sym = unseq [Eexcluded n act; apply_ctx ctxA' (pure ())] in sym
+          let sym : Sym := { name := some s!"_unseq_{n}", id := n }
+          let excludedExpr := mkExcludedExpr n paction
+          -- Convert continuation to context and apply to pure ()
+          let ctx' := contToContext ctxA'
+          let ctxExpr := applyCtx ctx' mkPureUnit
+          -- Create unseq [excluded_action, context_expr]
+          let unseqExpr := mkUnseqExpr [excludedExpr, ctxExpr]
+          -- Create wseq sym = unseq in sym
+          let wseqExpr := mkWseqExpr sym unseqExpr (mkPureSym sym)
+          -- Step 5: Apply ctx_bound (drop ctxA, keep bound onwards)
+          let newCont := Stack.dropUntilBound cont
+          pure (.continue_ { st with
+            arena := wseqExpr
+            stack := .cons currentProcOpt newCont parent
+          })
+      | .empty =>
+        throw (.illformedProgram "neg action with empty stack")
+    | .pos =>
+      -- POSITIVE POLARITY: Execute the action directly
+      let act := paction.action.action
+      match act with
+      -- Create: allocate memory for a typed object
+      -- Corresponds to: core_run.lem:297-338 (Create case)
+      | .create alignPe sizePe prefix_ =>
+        let alignVal ← evalPexpr defaultPexprFuel st.env alignPe
+        let sizeVal ← evalPexpr defaultPexprFuel st.env sizePe
+        match alignVal, sizeVal with
+        | .object (.integer alignIv), .ctype ty =>
+          let typeEnv ← InterpM.getTypeEnv
+          let size := sizeof typeEnv ty
+          let prefixName := prefix_.val
+          let ptr ← InterpM.liftMem (allocateImpl prefixName size (some ty) alignIv.val.toNat .writable none)
           let resultVal := Value.object (.pointer ptr)
           pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
-        | none =>
-          throw (.typeError s!"createReadonly: value doesn't match type")
-      | _, _ =>
-        throw (.typeError "createReadonly: expected integer alignment and ctype size")
+        | _, _ =>
+          throw (.typeError "create: expected integer alignment and ctype size")
 
-    -- Alloc: allocate raw memory region (malloc-style)
-    -- Corresponds to: core_run.lem:409-449 (Alloc case)
-    | .alloc alignPe sizePe prefix_ =>
-      let alignVal ← evalPexpr defaultPexprFuel st.env alignPe
-      let sizeVal ← evalPexpr defaultPexprFuel st.env sizePe
-      match alignVal, sizeVal with
-      | .object (.integer alignIv), .object (.integer sizeIv) =>
-        let prefixName := prefix_.val
-        let ptr ← InterpM.liftMem (allocateImpl prefixName sizeIv.val.toNat none alignIv.val.toNat .writable none)
-        let resultVal := Value.object (.pointer ptr)
-        pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
-      | _, _ =>
-        throw (.typeError "alloc: expected integer alignment and size")
+      -- CreateReadonly: allocate read-only memory with initial value
+      -- Corresponds to: core_run.lem:340-408 (CreateReadOnly case)
+      | .createReadonly alignPe sizePe initPe prefix_ =>
+        let alignVal ← evalPexpr defaultPexprFuel st.env alignPe
+        let sizeVal ← evalPexpr defaultPexprFuel st.env sizePe
+        let initVal ← evalPexpr defaultPexprFuel st.env initPe
+        match alignVal, sizeVal with
+        | .object (.integer alignIv), .ctype ty =>
+          let typeEnv ← InterpM.getTypeEnv
+          let size := sizeof typeEnv ty
+          let prefixName := prefix_.val
+          -- Convert Core value to MemValue
+          match memValueFromValue ty initVal with
+          | some mval =>
+            let ptr ← InterpM.liftMem (allocateImpl prefixName size (some ty) alignIv.val.toNat (.readonly .constQualified) (some mval))
+            let resultVal := Value.object (.pointer ptr)
+            pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
+          | none =>
+            throw (.typeError s!"createReadonly: value doesn't match type")
+        | _, _ =>
+          throw (.typeError "createReadonly: expected integer alignment and ctype size")
 
-    -- Kill: deallocate memory
-    -- Corresponds to: core_run.lem:451-477 (Kill case)
-    | .kill kind ptrPe =>
-      let ptrVal ← evalPexpr defaultPexprFuel st.env ptrPe
-      match ptrVal with
-      | .object (.pointer ptr) =>
-        let isDynamic := match kind with
-          | .dynamic => true
-          | .static _ => false
-        InterpM.liftMem (killImpl isDynamic ptr)
-        let resultVal := Value.unit
-        pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
-      | .loaded (.specified (.pointer ptr)) =>
-        let isDynamic := match kind with
-          | .dynamic => true
-          | .static _ => false
-        InterpM.liftMem (killImpl isDynamic ptr)
-        let resultVal := Value.unit
-        pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
-      | _ =>
-        throw (.typeError "kill: expected pointer value")
+      -- Alloc: allocate raw memory region (malloc-style)
+      -- Corresponds to: core_run.lem:409-449 (Alloc case)
+      | .alloc alignPe sizePe prefix_ =>
+        let alignVal ← evalPexpr defaultPexprFuel st.env alignPe
+        let sizeVal ← evalPexpr defaultPexprFuel st.env sizePe
+        match alignVal, sizeVal with
+        | .object (.integer alignIv), .object (.integer sizeIv) =>
+          let prefixName := prefix_.val
+          let ptr ← InterpM.liftMem (allocateImpl prefixName sizeIv.val.toNat none alignIv.val.toNat .writable none)
+          let resultVal := Value.object (.pointer ptr)
+          pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
+        | _, _ =>
+          throw (.typeError "alloc: expected integer alignment and size")
 
-    -- Store: store value to memory
-    -- Corresponds to: core_reduction.lem:689-698 (Store case)
-    -- Creates: Expr [] (Eannot [DA_pos/DA_neg exclusionSet fp] (mk_value_e Vunit))
-    -- Polarity determines annotation type (core_reduction.lem:691-695)
-    -- Exclusion set comes from enclosing annotation contexts (add_exclusion)
+      -- Kill: deallocate memory
+      -- Corresponds to: core_run.lem:451-477 (Kill case)
+      | .kill kind ptrPe =>
+        let ptrVal ← evalPexpr defaultPexprFuel st.env ptrPe
+        match ptrVal with
+        | .object (.pointer ptr) =>
+          let isDynamic := match kind with
+            | .dynamic => true
+            | .static _ => false
+          InterpM.liftMem (killImpl isDynamic ptr)
+          let resultVal := Value.unit
+          pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
+        | .loaded (.specified (.pointer ptr)) =>
+          let isDynamic := match kind with
+            | .dynamic => true
+            | .static _ => false
+          InterpM.liftMem (killImpl isDynamic ptr)
+          let resultVal := Value.unit
+          pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
+        | _ =>
+          throw (.typeError "kill: expected pointer value")
+
+      -- Store: store value to memory (POSITIVE POLARITY ONLY)
+      -- Corresponds to: core_reduction.lem:689-698 (Store case)
+      -- Creates: Expr [] (Eannot [DA_pos exclusionSet fp] (mk_value_e Vunit))
+      --
+      -- Note: Neg polarity is handled by the neg action transformation above,
+      -- which wraps the action in Eexcluded and creates an unseq structure.
+      -- This branch only executes for pos polarity actions.
+      | .store isLocking tyPe ptrPe valPe _order =>
+        let tyVal ← evalPexpr defaultPexprFuel st.env tyPe
+        let ptrVal ← evalPexpr defaultPexprFuel st.env ptrPe
+        let cval ← evalPexpr defaultPexprFuel st.env valPe
+        -- Get exclusion context from continuation stack
+        let exclusionSet := match st.stack with
+          | .cons _ cont _ => Stack.getExclusionContext cont
+          | .empty => []
+        match tyVal, ptrVal with
+        | .ctype ty, .object (.pointer ptr) =>
+          match memValueFromValue ty cval with
+          | some mval =>
+            let fp ← InterpM.liftMem (storeImpl ty isLocking ptr mval)
+            let resultVal := Value.unit
+            -- Create DA_pos annotation (this is a pos polarity action)
+            let dynAnnots : DynAnnotations := [.pos exclusionSet fp]
+            pure (.continue_ { st with arena := mkAnnotatedValueExpr arenaAnnots dynAnnots resultVal })
+          | none =>
+            throw (.typeError s!"store: value doesn't match type")
+        | .ctype ty, .loaded (.specified (.pointer ptr)) =>
+          match memValueFromValue ty cval with
+          | some mval =>
+            let fp ← InterpM.liftMem (storeImpl ty isLocking ptr mval)
+            let resultVal := Value.unit
+            -- Create DA_pos annotation (this is a pos polarity action)
+            let dynAnnots : DynAnnotations := [.pos exclusionSet fp]
+            pure (.continue_ { st with arena := mkAnnotatedValueExpr arenaAnnots dynAnnots resultVal })
+          | none =>
+            throw (.typeError s!"store: value doesn't match type")
+        | _, _ =>
+          throw (.typeError "store: expected ctype and pointer")
+
+      -- Load: load value from memory (POSITIVE POLARITY ONLY)
+      -- Corresponds to: core_reduction.lem:724-734 (Load case)
+      -- Creates: Expr [] (Eannot [DA_pos exclusionSet fp] (mk_value_e cval))
+      --
+      -- Note: Neg polarity is handled by the neg action transformation above,
+      -- which wraps the action in Eexcluded and creates an unseq structure.
+      -- This branch only executes for pos polarity actions.
+      | .load tyPe ptrPe _order =>
+        let tyVal ← evalPexpr defaultPexprFuel st.env tyPe
+        let ptrVal ← evalPexpr defaultPexprFuel st.env ptrPe
+        -- Get exclusion context from continuation stack
+        let exclusionSet := match st.stack with
+          | .cons _ cont _ => Stack.getExclusionContext cont
+          | .empty => []
+        match tyVal, ptrVal with
+        | .ctype ty, .object (.pointer ptr) =>
+          let (fp, mval) ← InterpM.liftMem (loadImpl ty ptr)
+          let resultVal := valueFromMemValue mval
+          -- Create DA_pos annotation (this is a pos polarity action)
+          let dynAnnots : DynAnnotations := [.pos exclusionSet fp]
+          pure (.continue_ { st with arena := mkAnnotatedValueExpr arenaAnnots dynAnnots resultVal })
+        | .ctype ty, .loaded (.specified (.pointer ptr)) =>
+          let (fp, mval) ← InterpM.liftMem (loadImpl ty ptr)
+          let resultVal := valueFromMemValue mval
+          -- Create DA_pos annotation (this is a pos polarity action)
+          let dynAnnots : DynAnnotations := [.pos exclusionSet fp]
+          pure (.continue_ { st with arena := mkAnnotatedValueExpr arenaAnnots dynAnnots resultVal })
+        | _, _ =>
+          throw (.typeError "load: expected ctype and pointer")
+
+      -- SeqRMW: sequential read-modify-write (increment/decrement)
+      -- Corresponds to: core_reduction.lem:1214-1276 and driver.lem:704-714
+      -- Creates: Expr [] (Eannot [DA_pos [] fp_load; DA_pos [] fp_store] (mk_value_e cval))
+      -- NOTE: Negative SeqRMW is forbidden by typecheck (core_reduction.lem:1215-1216)
+      --
+      -- Algorithm (matching SeqRMWRequest2 in driver.lem:704-714):
+      -- 1. Evaluate pe1 (type) and pe2 (pointer)
+      -- 2. Load current value from memory: mval ← Mem.load ty ptrval
+      -- 3. Bind sym to loaded value (valueFromMemValue mval) in environment
+      -- 4. Evaluate pe3 (update expression) with sym bound
+      -- 5. Convert result to mval': memValueFromValue ty cval3
+      -- 6. Store new value: Mem.store ty false ptrval mval'
+      -- 7. Return old value (if not with_forward) or new value (if with_forward)
+      --    with annotations for both load and store footprints
+      | .seqRmw withForward tyPe ptrPe sym valPe =>
+        -- Note: Negative SeqRMW is forbidden (core_reduction.lem:1215-1216)
+        -- If we're here, we're in the .pos branch, so polarity is already positive.
+        -- Negative SeqRMW would have been caught by the outer neg action transformation.
+        let tyVal ← evalPexpr defaultPexprFuel st.env tyPe
+        let ptrVal ← evalPexpr defaultPexprFuel st.env ptrPe
+        match tyVal, ptrVal with
+        | .ctype ty, .object (.pointer ptr) =>
+          -- Step 2: Load current value (capture footprint)
+          let (fpLoad, mval) ← InterpM.liftMem (loadImpl ty ptr)
+          -- Step 3: Bind sym to loaded value in environment
+          let loadedVal := valueFromMemValue mval
+          let newEnv := bindInEnv sym loadedVal st.env
+          -- Step 4: Evaluate update expression with sym bound
+          let cval3 ← evalPexpr defaultPexprFuel newEnv valPe
+          -- Step 5: Convert to MemValue
+          let ty' : Ctype := { annots := [], ty := unatomic_ ty.ty }
+          match memValueFromValue ty' cval3 with
+          | some mval' =>
+            -- Step 6: Store new value (capture footprint)
+            let fpStore ← InterpM.liftMem (storeImpl ty false ptr mval')
+            -- Step 7: Return appropriate value with combined footprints
+            let resultVal := if withForward then valueFromMemValue mval' else loadedVal
+            -- SeqRMW always uses DA_pos (only Pos polarity allowed)
+            let dynAnnots : DynAnnotations := [.pos [] fpLoad, .pos [] fpStore]
+            pure (.continue_ { st with arena := mkAnnotatedValueExpr arenaAnnots dynAnnots resultVal })
+          | none =>
+            throw (.typeError "seq_rmw: update expression doesn't match lvalue type")
+        | .ctype ty, .loaded (.specified (.pointer ptr)) =>
+          -- Same as above but pointer is loaded value
+          let (fpLoad, mval) ← InterpM.liftMem (loadImpl ty ptr)
+          let loadedVal := valueFromMemValue mval
+          let newEnv := bindInEnv sym loadedVal st.env
+          let cval3 ← evalPexpr defaultPexprFuel newEnv valPe
+          let ty' : Ctype := { annots := [], ty := unatomic_ ty.ty }
+          match memValueFromValue ty' cval3 with
+          | some mval' =>
+            let fpStore ← InterpM.liftMem (storeImpl ty false ptr mval')
+            let resultVal := if withForward then valueFromMemValue mval' else loadedVal
+            -- SeqRMW always uses DA_pos (only Pos polarity allowed)
+            let dynAnnots : DynAnnotations := [.pos [] fpLoad, .pos [] fpStore]
+            pure (.continue_ { st with arena := mkAnnotatedValueExpr arenaAnnots dynAnnots resultVal })
+          | none =>
+            throw (.typeError "seq_rmw: update expression doesn't match lvalue type")
+        | _, _ =>
+          throw (.typeError "seq_rmw: expected ctype and pointer")
+
+      -- Fence, RMW, CompareExchange - not implemented yet
+      | .fence _ =>
+          throw (.notImplemented "fence")
+      | .rmw _ _ _ _ _ _ =>
+          throw (.notImplemented "rmw")
+      | .compareExchangeStrong _ _ _ _ _ _ =>
+          throw (.notImplemented "compare_exchange_strong")
+      | .compareExchangeWeak _ _ _ _ _ _ =>
+          throw (.notImplemented "compare_exchange_weak")
+
+  -- Eexcluded: wrapper for neg actions that enforces DA_neg annotation
+  -- Corresponds to: core_reduction.lem:1326-1327 (Eexcluded n action case)
+  -- When a neg action is transformed, it gets wrapped in Eexcluded(n, ...)
+  -- which ensures the resulting annotation is DA_neg n [] fp regardless of
+  -- the action's original polarity.
+  --
+  -- This is a key part of the neg action transformation mechanism:
+  -- 1. Neg action encountered → transformed to unseq [Eexcluded n act; ctx]
+  -- 2. Eexcluded n act executes → produces DA_neg n [] fp
+  -- 3. At unseq completion, race detection checks DA_neg n vs other annotations
+  | .excluded exclId paction, _ =>
+    let act := paction.action.action
+    match act with
+    -- Store inside Eexcluded: always produces DA_neg exclId [] fp
     | .store isLocking tyPe ptrPe valPe _order =>
       let tyVal ← evalPexpr defaultPexprFuel st.env tyPe
       let ptrVal ← evalPexpr defaultPexprFuel st.env ptrPe
       let cval ← evalPexpr defaultPexprFuel st.env valPe
-      -- Get exclusion context from continuation stack
-      let exclusionSet := match st.stack with
-        | .cons _ cont _ => Stack.getExclusionContext cont
-        | .empty => []
       match tyVal, ptrVal with
       | .ctype ty, .object (.pointer ptr) =>
         match memValueFromValue ty cval with
         | some mval =>
           let fp ← InterpM.liftMem (storeImpl ty isLocking ptr mval)
           let resultVal := Value.unit
-          -- Create annotation based on polarity (core_reduction.lem:691-695)
-          let dynAnnots : DynAnnotations ← match pol with
-            | .pos => pure [.pos exclusionSet fp]
-            | .neg =>
-              let exclId ← InterpM.freshExclusionId
-              pure [.neg exclId exclusionSet fp]
+          -- ALWAYS produce DA_neg with the exclusion ID from Eexcluded wrapper
+          let dynAnnots : DynAnnotations := [.neg exclId [] fp]
           pure (.continue_ { st with arena := mkAnnotatedValueExpr arenaAnnots dynAnnots resultVal })
         | none =>
-          throw (.typeError s!"store: value doesn't match type")
+          throw (.typeError s!"store (excluded): value doesn't match type")
       | .ctype ty, .loaded (.specified (.pointer ptr)) =>
         match memValueFromValue ty cval with
         | some mval =>
           let fp ← InterpM.liftMem (storeImpl ty isLocking ptr mval)
           let resultVal := Value.unit
-          -- Create annotation based on polarity (core_reduction.lem:691-695)
-          let dynAnnots : DynAnnotations ← match pol with
-            | .pos => pure [.pos exclusionSet fp]
-            | .neg =>
-              let exclId ← InterpM.freshExclusionId
-              pure [.neg exclId exclusionSet fp]
+          let dynAnnots : DynAnnotations := [.neg exclId [] fp]
           pure (.continue_ { st with arena := mkAnnotatedValueExpr arenaAnnots dynAnnots resultVal })
         | none =>
-          throw (.typeError s!"store: value doesn't match type")
+          throw (.typeError s!"store (excluded): value doesn't match type")
       | _, _ =>
-        throw (.typeError "store: expected ctype and pointer")
+        throw (.typeError "store (excluded): expected ctype and pointer")
 
-    -- Load: load value from memory
-    -- Corresponds to: core_reduction.lem:724-734 (Load case)
-    -- Creates: Expr [] (Eannot [DA_pos/DA_neg exclusionSet fp] (mk_value_e cval))
-    -- Polarity determines annotation type (core_reduction.lem:726-730)
-    -- Exclusion set comes from enclosing annotation contexts (add_exclusion)
+    -- Load inside Eexcluded: always produces DA_neg exclId [] fp
     | .load tyPe ptrPe _order =>
       let tyVal ← evalPexpr defaultPexprFuel st.env tyPe
       let ptrVal ← evalPexpr defaultPexprFuel st.env ptrPe
-      -- Get exclusion context from continuation stack
-      let exclusionSet := match st.stack with
-        | .cons _ cont _ => Stack.getExclusionContext cont
-        | .empty => []
       match tyVal, ptrVal with
       | .ctype ty, .object (.pointer ptr) =>
         let (fp, mval) ← InterpM.liftMem (loadImpl ty ptr)
         let resultVal := valueFromMemValue mval
-        -- Create annotation based on polarity (core_reduction.lem:726-730)
-        let dynAnnots : DynAnnotations ← match pol with
-          | .pos => pure [.pos exclusionSet fp]
-          | .neg =>
-            let exclId ← InterpM.freshExclusionId
-            pure [.neg exclId exclusionSet fp]
+        -- ALWAYS produce DA_neg with the exclusion ID from Eexcluded wrapper
+        let dynAnnots : DynAnnotations := [.neg exclId [] fp]
         pure (.continue_ { st with arena := mkAnnotatedValueExpr arenaAnnots dynAnnots resultVal })
       | .ctype ty, .loaded (.specified (.pointer ptr)) =>
         let (fp, mval) ← InterpM.liftMem (loadImpl ty ptr)
         let resultVal := valueFromMemValue mval
-        -- Create annotation based on polarity (core_reduction.lem:726-730)
-        let dynAnnots : DynAnnotations ← match pol with
-          | .pos => pure [.pos exclusionSet fp]
-          | .neg =>
-            let exclId ← InterpM.freshExclusionId
-            pure [.neg exclId exclusionSet fp]
+        let dynAnnots : DynAnnotations := [.neg exclId [] fp]
         pure (.continue_ { st with arena := mkAnnotatedValueExpr arenaAnnots dynAnnots resultVal })
       | _, _ =>
-        throw (.typeError "load: expected ctype and pointer")
+        throw (.typeError "load (excluded): expected ctype and pointer")
 
-    -- SeqRMW: sequential read-modify-write (increment/decrement)
-    -- Corresponds to: core_reduction.lem:1214-1276 and driver.lem:704-714
-    -- Creates: Expr [] (Eannot [DA_pos [] fp_load; DA_pos [] fp_store] (mk_value_e cval))
-    -- NOTE: Negative SeqRMW is forbidden by typecheck (core_reduction.lem:1215-1216)
-    --
-    -- Algorithm (matching SeqRMWRequest2 in driver.lem:704-714):
-    -- 1. Evaluate pe1 (type) and pe2 (pointer)
-    -- 2. Load current value from memory: mval ← Mem.load ty ptrval
-    -- 3. Bind sym to loaded value (valueFromMemValue mval) in environment
-    -- 4. Evaluate pe3 (update expression) with sym bound
-    -- 5. Convert result to mval': memValueFromValue ty cval3
-    -- 6. Store new value: Mem.store ty false ptrval mval'
-    -- 7. Return old value (if not with_forward) or new value (if with_forward)
-    --    with annotations for both load and store footprints
-    | .seqRmw withForward tyPe ptrPe sym valPe =>
-      -- Negative SeqRMW is forbidden (core_reduction.lem:1215-1216)
-      match pol with
-      | .neg =>
-        throw (.illformedProgram "negative SeqRMW should be forbidden by typecheck")
-      | .pos =>
-      let tyVal ← evalPexpr defaultPexprFuel st.env tyPe
-      let ptrVal ← evalPexpr defaultPexprFuel st.env ptrPe
-      match tyVal, ptrVal with
-      | .ctype ty, .object (.pointer ptr) =>
-        -- Step 2: Load current value (capture footprint)
-        let (fpLoad, mval) ← InterpM.liftMem (loadImpl ty ptr)
-        -- Step 3: Bind sym to loaded value in environment
-        let loadedVal := valueFromMemValue mval
-        let newEnv := bindInEnv sym loadedVal st.env
-        -- Step 4: Evaluate update expression with sym bound
-        let cval3 ← evalPexpr defaultPexprFuel newEnv valPe
-        -- Step 5: Convert to MemValue
-        let ty' : Ctype := { annots := [], ty := unatomic_ ty.ty }
-        match memValueFromValue ty' cval3 with
-        | some mval' =>
-          -- Step 6: Store new value (capture footprint)
-          let fpStore ← InterpM.liftMem (storeImpl ty false ptr mval')
-          -- Step 7: Return appropriate value with combined footprints
-          let resultVal := if withForward then valueFromMemValue mval' else loadedVal
-          -- SeqRMW always uses DA_pos (only Pos polarity allowed)
-          let dynAnnots : DynAnnotations := [.pos [] fpLoad, .pos [] fpStore]
-          pure (.continue_ { st with arena := mkAnnotatedValueExpr arenaAnnots dynAnnots resultVal })
-        | none =>
-          throw (.typeError "seq_rmw: update expression doesn't match lvalue type")
-      | .ctype ty, .loaded (.specified (.pointer ptr)) =>
-        -- Same as above but pointer is loaded value
-        let (fpLoad, mval) ← InterpM.liftMem (loadImpl ty ptr)
-        let loadedVal := valueFromMemValue mval
-        let newEnv := bindInEnv sym loadedVal st.env
-        let cval3 ← evalPexpr defaultPexprFuel newEnv valPe
-        let ty' : Ctype := { annots := [], ty := unatomic_ ty.ty }
-        match memValueFromValue ty' cval3 with
-        | some mval' =>
-          let fpStore ← InterpM.liftMem (storeImpl ty false ptr mval')
-          let resultVal := if withForward then valueFromMemValue mval' else loadedVal
-          -- SeqRMW always uses DA_pos (only Pos polarity allowed)
-          let dynAnnots : DynAnnotations := [.pos [] fpLoad, .pos [] fpStore]
-          pure (.continue_ { st with arena := mkAnnotatedValueExpr arenaAnnots dynAnnots resultVal })
-        | none =>
-          throw (.typeError "seq_rmw: update expression doesn't match lvalue type")
-      | _, _ =>
-        throw (.typeError "seq_rmw: expected ctype and pointer")
-
-    -- Fence, RMW, CompareExchange - not implemented yet
-    | .fence _ =>
-      throw (.notImplemented "fence")
-    | .rmw _ _ _ _ _ _ =>
-      throw (.notImplemented "rmw")
-    | .compareExchangeStrong _ _ _ _ _ _ =>
-      throw (.notImplemented "compare_exchange_strong")
-    | .compareExchangeWeak _ _ _ _ _ _ =>
-      throw (.notImplemented "compare_exchange_weak")
+    -- Other actions in Eexcluded - not expected but handle gracefully
+    | _ => throw (.notImplemented "excluded wrapper on non-store/load action")
 
   -- Eccall: C function call through pointer
   -- Corresponds to: core_run.lem:926-999
@@ -751,10 +927,17 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
       })
     | .error err => throw err
 
-  -- Ebound: bounds marker, just unwrap
-  -- Corresponds to: core_run.lem:1643-1649
-  | .bound e, _ =>
-    pure (.continue_ { st with arena := e })
+  -- Ebound: bounds marker, push bound context and continue
+  -- Corresponds to: core_run.lem:1643-1649 and Cbound in context
+  -- The bound is tracked in the continuation for neg action transformation.
+  | .bound e, .cons currentProcOpt cont parent =>
+    let boundElem := ContElem.bound arenaAnnots
+    pure (.continue_ { st with
+      arena := e
+      stack := .cons currentProcOpt (boundElem :: cont) parent
+    })
+  | .bound _, .empty =>
+    throw (.illformedProgram "reached empty stack with Ebound")
 
   -- End: nondeterministic choice - pick first (deterministic for testing)
   -- Corresponds to: core_run.lem:1618-1623
@@ -1006,24 +1189,64 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
         match cont with
         | [] =>
           -- Empty continuation, pop to parent frame
-          -- The parent will reconstruct with this arena, preserving the annotation
+          -- The annotated value continues to parent's continuation
           let env' := match st.env with
             | [] => [{}]
             | _ :: rest => if rest.isEmpty then [{}] else rest
-          let wrappedExpr := applyContinuation [] arena  -- arena is the {A}v
           pure (.continue_ { st with
-            arena := wrappedExpr
+            arena := arena  -- arena is the {A}v
             stack := parent
             env := env'
           })
-        | contElem :: restCont =>
-          -- Apply the continuation element
-          -- The Ewseq/Esseq handling will propagate the annotation when it sees {A}v
-          let wrappedExpr := applyContinuation cont arena  -- arena is the {A}v
-          pure (.continue_ { st with
-            arena := wrappedExpr
-            stack := .cons currentProcOpt [] parent
-          })
+        | elem :: rest =>
+          -- Handle ONE continuation element at a time (same approach as .pure case)
+          -- The annotation stays with the value as it propagates
+          match elem with
+          | .wseq wseqAnnots pat e2 =>
+              -- Corresponds to: core_reduction.lem wseq rule for annotated values
+              -- When {A}v goes through wseq, convert A to pos and wrap e2
+              -- Step_eval annot (Expr [] (Eannot (dyn_annot_neg_to_pos xs) (subst pat cval e2)))
+              match valueFromExpr inner with
+              | some cval =>
+                  match st.updateEnv pat cval with
+                  | some st' =>
+                    -- Convert annotations neg-to-pos
+                    let convertedAnnots := dynAnnotsNegToPos dynAnnots
+                    -- Wrap e2 in the converted annotations
+                    let wrappedE2 : AExpr := { annots := wseqAnnots, expr := .annot convertedAnnots e2 }
+                    pure (.continue_ { st' with arena := wrappedE2, stack := .cons currentProcOpt rest parent })
+                  | none => throw .patternMatchFailed
+              | none => throw (.illformedProgram "expected value in annotated expression")
+          | .sseq sseqAnnots pat e2 =>
+              -- Same as wseq: convert annotations neg-to-pos and wrap e2
+              match valueFromExpr inner with
+              | some cval =>
+                  match st.updateEnv pat cval with
+                  | some st' =>
+                    let convertedAnnots := dynAnnotsNegToPos dynAnnots
+                    let wrappedE2 : AExpr := { annots := sseqAnnots, expr := .annot convertedAnnots e2 }
+                    pure (.continue_ { st' with arena := wrappedE2, stack := .cons currentProcOpt rest parent })
+                  | none => throw .patternMatchFailed
+              | none => throw (.illformedProgram "expected value in annotated expression")
+          | .unseq annots done remaining =>
+              -- Add annotated value to done list (keep annotation for race detection)
+              let newDone := done ++ [arena]  -- arena is {A}v
+              match remaining with
+              | [] =>
+                  -- All branches done, rebuild unseq for race checking
+                  let unseqExpr : AExpr := { annots, expr := .unseq newDone }
+                  pure (.continue_ { st with arena := unseqExpr, stack := .cons currentProcOpt rest parent })
+              | next :: moreRemaining =>
+                  let newElem := ContElem.unseq annots newDone moreRemaining
+                  pure (.continue_ { st with arena := next, stack := .cons currentProcOpt (newElem :: rest) parent })
+          | .bound _ =>
+              -- bound({A}v) → {A}v (pass through, matching Cerberus)
+              pure (.continue_ { st with arena := arena, stack := .cons currentProcOpt rest parent })
+          | .annot outerAnnots outerDynAnnots =>
+              -- Merge annotations: {A'}{A}v → {A'A}v
+              let mergedAnnots := outerDynAnnots ++ dynAnnots
+              let mergedExpr : AExpr := { annots := outerAnnots, expr := .annot mergedAnnots inner }
+              pure (.continue_ { st with arena := mergedExpr, stack := .cons currentProcOpt rest parent })
     | none =>
       -- inner is not a value - check for nested annotations or continue reducing
       match inner.expr with
@@ -1069,6 +1292,21 @@ def runUntilDone (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym
   match fuel with
   | 0 => throw (.illformedProgram "execution fuel exhausted")
   | fuel' + 1 =>
+  if fuel' % 1000 == 0 && fuel' < 1000000 then
+    let exprKind := match st.arena.expr with
+      | .pure _ => "pure"
+      | .action _ => "action"
+      | .wseq _ _ _ => "wseq"
+      | .sseq _ _ _ => "sseq"
+      | .unseq _ => "unseq"
+      | .bound _ => "bound"
+      | .annot _ _ => "annot"
+      | .excluded _ _ => "excluded"
+      | _ => "other"
+    let contLen := match st.stack with
+      | .cons _ cont _ => cont.length
+      | .empty => 0
+    dbg_trace s!"STEP {1000000 - fuel'}: {exprKind}, cont={contLen}"
   match ← step st file allLabeledConts with
   | .done v => pure v
   | .continue_ st' => runUntilDone st' file allLabeledConts fuel'
@@ -1099,7 +1337,7 @@ Global variables are initialized before main() runs:
     Audited: 2026-01-01
     Deviations: Simplified - no concurrency support -/
 def runExprToValue (expr : AExpr) (env : List (HashMap Sym Value))
-    (file : File) (fuel : Nat := 100000) : InterpM Value := do
+    (file : File) (fuel : Nat := 100000000) : InterpM Value := do
   -- Use a minimal stack with empty continuation (like Cerberus)
   -- Corresponds to: Stack_cons Nothing [] Stack_empty in driver.lem
   let st : ThreadState := {

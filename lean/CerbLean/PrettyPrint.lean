@@ -732,6 +732,11 @@ partial def ppExpr (ind : Indent) (e : AExpr) : String :=
     -- Cerberus prints: annot[DA_neg(...), DA_pos(...)](inner_expr)
     -- (matches pp_core.ml:678-686)
     s!"annot[{ppDynAnnotations dynAnnots}]({ppExpr ind inner})"
+  | .excluded exclId paction =>
+    -- Eexcluded is internal to the neg action transformation
+    -- Print it for debugging purposes
+    let actionStr := ppAction ind paction.action.action
+    s!"excluded({exclId}, {actionStr})"
 
 /-- Pretty-print annotated expression (alias for ppExpr) -/
 def ppAExpr (ind : Indent) (e : AExpr) : String := ppExpr ind e
