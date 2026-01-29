@@ -77,6 +77,7 @@ def collectLabeledContinuations (e : AExpr) : LabeledConts :=
   | .bound _ => {}  -- Cerberus returns Map.empty for Ebound
   | .nd _ => {}  -- Cerberus returns Map.empty for End
   | .unseq _ => {}  -- Cerberus returns Map.empty for Eunseq
+  | .annot _ inner => collectLabeledContinuations inner  -- Collect from inner expression
 
   | .let_ _pat _e1 e2 =>
     -- Elet _ _ e2 -> collect_labeled_continuations e2

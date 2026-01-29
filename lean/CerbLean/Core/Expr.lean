@@ -10,6 +10,7 @@ import CerbLean.Core.Types
 import CerbLean.Core.Value
 import CerbLean.Core.Annot
 import CerbLean.Core.Undefined
+import CerbLean.Core.DynAnnot
 
 namespace CerbLean.Core
 
@@ -188,6 +189,10 @@ mutual
     -- Concurrency (out of scope initially)
     | par (es : List AExpr)
     | wait (tid : Nat)
+    -- Dynamic annotations for race detection
+    -- Corresponds to: Eannot in core.lem:339
+    -- Audited: 2026-01-28
+    | annot (dynAnnots : DynAnnotations) (e : AExpr)
 
   /-- Annotated expression
       Corresponds to: generic_expr in core.ott lines 432-433

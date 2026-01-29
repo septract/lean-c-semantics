@@ -158,9 +158,8 @@ fi
 TIMEOUT_SECS=10
 
 # Build Cerberus flags
-# Always use --sequentialise since our interpreter evaluates unseq left-to-right
-# (matches Cerberus's sequentialised behavior, not its non-deterministic exploration)
-CERBERUS_FLAGS="--sequentialise"
+# No --sequentialise: we now support proper Eunseq with race detection
+CERBERUS_FLAGS=""
 if $NO_LIBC; then
     CERBERUS_FLAGS="$CERBERUS_FLAGS --nolibc"
 fi

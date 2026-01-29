@@ -10,6 +10,8 @@ import CerbLean.Semantics.Monad
 import CerbLean.Semantics.State
 import CerbLean.Semantics.Env
 import CerbLean.Semantics.Eval
+import CerbLean.Semantics.Context
+import CerbLean.Semantics.Race
 import CerbLean.Memory.Interface
 import Std.Data.HashMap
 
@@ -124,6 +126,50 @@ def mkTuplePexpr (pes : List APexpr) : APexpr :=
 def mkValueExpr (annots : Annots) (v : Value) : AExpr :=
   { annots, expr := .pure { annots := [], ty := none, expr := .val v } }
 
+/-- Extract value and annotations from an irreducible expression.
+    Irreducible expressions are either:
+    - Epure(PEval v) - plain value
+    - Eannot xs (Epure(PEval v)) - annotated value
+    Corresponds to: core_reduction.lem:246-261 pattern matching in one_step_unseq_aux -/
+def extractValueAndAnnots : AExpr → Option (Value × DynAnnotations)
+  | ⟨_, .pure ⟨_, _, .val v⟩⟩ => some (v, [])
+  | ⟨_, .annot xs ⟨_, .pure ⟨_, _, .val v⟩⟩⟩ => some (v, xs)
+  | _ => none
+
+/-- Collect values from all irreducible expressions, checking for races.
+    Returns (values, combined_annotations) or throws UB035 on race.
+    Corresponds to: one_step_unseq_aux in core_reduction.lem:244-261
+    ```lem
+    let rec one_step_unseq_aux annot (cvals_acc, acc_xs) = function
+      | [] -> Step_eval annot (Expr [] (Epure (Pexpr [] None (PEctor Ctuple (...)))))
+      | Expr _ (Eannot xs (Expr _ (Epure (Pexpr _ _ (PEval cval))))) :: es ->
+          if do_race xs acc_xs then Step_ub_race UB_unsequenced_race
+          else one_step_unseq_aux annot (cvals_acc ++ [cval], combine_dynamic_annotations xs acc_xs) es
+      | Expr _ (Epure (Pexpr _ _ (PEval cval))) :: es ->
+          one_step_unseq_aux annot (cvals_acc ++ [cval], acc_xs) es
+    ``` -/
+def collectValuesCheckRace (es : List AExpr) : Except InterpError (List Value × DynAnnotations) :=
+  go [] [] es
+where
+  go (valsAcc : List Value) (annotsAcc : DynAnnotations) : List AExpr → Except InterpError (List Value × DynAnnotations)
+  | [] => .ok (valsAcc, annotsAcc)
+  | e :: rest =>
+    match extractValueAndAnnots e with
+    | some (v, xs) =>
+      if doRace xs annotsAcc then
+        .error (.undefinedBehavior .ub035_unsequencedRace none)
+      else
+        go (valsAcc ++ [v]) (combineDynAnnotations xs annotsAcc) rest
+    | none => .error (.illformedProgram "unseq: expected irreducible expression")
+
+/-- Make an annotated value expression with dynamic annotations.
+    Used for memory operations that need to track footprints.
+    Corresponds to: core_reduction.lem:689-698 (store), 724-734 (load)
+    Creates: Expr [] (Eannot [DA_pos [] fp] (mk_value_e cval)) -/
+def mkAnnotatedValueExpr (annots : Annots) (dynAnnots : DynAnnotations) (v : Value) : AExpr :=
+  let innerExpr := mkValueExpr [] v
+  { annots, expr := .annot dynAnnots innerExpr }
+
 /-! ## Value Conversion Helpers
 
 See Eval.lean for memValueFromValue and valueFromMemValue.
@@ -237,57 +283,103 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
     tryBranches branches
 
   -- Ewseq pat e1 e2: weak sequencing
-  -- Corresponds to: core_run.lem:1408-1445
+  -- Corresponds to: core_reduction.lem Ewseq cases
   | .wseq pat e1 e2, .cons currentProcOpt cont parent =>
-    match valueFromExpr e1 with
-    | some cval =>
-      -- e1 is a value, bind and continue with e2
+    match e1.expr with
+    -- Case: letw pat = {A}v in e2 --> {A}(letw pat = v in e2)
+    -- Corresponds to: core_reduction.lem LETW-ANNOT rule
+    -- The annotation propagates to wrap e2
+    | .annot xs innerE =>
+      match valueFromExpr innerE with
+      | some cval =>
+        -- {A}v case: propagate annotation to e2
+        match st.updateEnv pat cval with
+        | some st' =>
+          let wrappedE2 : AExpr := { annots := [], expr := .annot xs e2 }
+          pure (.continue_ { st' with arena := wrappedE2 })
+        | none => throw .patternMatchFailed
+      | none =>
+        match innerE.expr with
+        | .pure pe1 =>
+          -- {A}(pure e) - evaluate and propagate annotation
+          let cval ← evalPexpr defaultPexprFuel st.env pe1
+          match st.updateEnv pat cval with
+          | some st' =>
+            let wrappedE2 : AExpr := { annots := [], expr := .annot xs e2 }
+            pure (.continue_ { st' with arena := wrappedE2 })
+          | none => throw .patternMatchFailed
+        | _ =>
+          -- {A}e where e is not a value - focus on e1
+          let contElem := ContElem.wseq arenaAnnots pat e2
+          pure (.continue_ { st with
+            arena := e1
+            stack := .cons currentProcOpt (contElem :: cont) parent
+          })
+    -- Case: letw pat = v in e2 --> e2[v/pat]
+    -- Corresponds to: core_reduction.lem LETW-PURE rule
+    | .pure pe1 =>
+      let cval ← evalPexpr defaultPexprFuel st.env pe1
       match st.updateEnv pat cval with
       | some st' => pure (.continue_ { st' with arena := e2 })
       | none => throw .patternMatchFailed
-    | none =>
-      match e1.expr with
-      | .pure pe1 =>
-        -- Evaluate pure expression
-        let cval ← evalPexpr defaultPexprFuel st.env pe1
-        match st.updateEnv pat cval with
-        | some st' => pure (.continue_ { st' with arena := e2 })
-        | none => throw .patternMatchFailed
-      | _ =>
-        -- Focus on e1, push continuation
-        let contElem := ContElem.wseq arenaAnnots pat e2
-        pure (.continue_ { st with
-          arena := e1
-          stack := .cons currentProcOpt (contElem :: cont) parent
-        })
+    | _ =>
+      -- e1 not yet a value - focus on e1, push continuation
+      let contElem := ContElem.wseq arenaAnnots pat e2
+      pure (.continue_ { st with
+        arena := e1
+        stack := .cons currentProcOpt (contElem :: cont) parent
+      })
 
   | .wseq _ _ _, .empty =>
     throw (.illformedProgram "reached empty stack with Ewseq")
 
   -- Esseq pat e1 e2: strong sequencing
-  -- Corresponds to: core_run.lem:1450-1489
+  -- Corresponds to: core_reduction.lem Esseq cases
   | .sseq pat e1 e2, .cons currentProcOpt cont parent =>
-    match valueFromExpr e1 with
-    | some cval =>
-      -- e1 is a value, bind and continue with e2
+    match e1.expr with
+    -- Case: lets pat = {A}v in e2 --> {A}(lets pat = v in e2)
+    -- Corresponds to: core_reduction.lem LETS-ANNOT rule
+    -- The annotation propagates to wrap e2
+    | .annot xs innerE =>
+      match valueFromExpr innerE with
+      | some cval =>
+        -- {A}v case: propagate annotation to e2
+        match st.updateEnv pat cval with
+        | some st' =>
+          let wrappedE2 : AExpr := { annots := [], expr := .annot xs e2 }
+          pure (.continue_ { st' with arena := wrappedE2 })
+        | none => throw .patternMatchFailed
+      | none =>
+        match innerE.expr with
+        | .pure pe1 =>
+          -- {A}(pure e) - evaluate and propagate annotation
+          let cval ← evalPexpr defaultPexprFuel st.env pe1
+          match st.updateEnv pat cval with
+          | some st' =>
+            let wrappedE2 : AExpr := { annots := [], expr := .annot xs e2 }
+            pure (.continue_ { st' with arena := wrappedE2 })
+          | none => throw .patternMatchFailed
+        | _ =>
+          -- {A}e where e is not a value - focus on e1
+          let contElem := ContElem.sseq arenaAnnots pat e2
+          pure (.continue_ { st with
+            arena := e1
+            stack := .cons currentProcOpt (contElem :: cont) parent
+          })
+    -- Case: lets pat = v in e2 --> e2[v/pat]
+    -- Corresponds to: core_reduction.lem LETS-PURE rule
+    | .pure pe1 =>
+      let cval ← evalPexpr defaultPexprFuel st.env pe1
       match st.updateEnv pat cval with
       | some st' => pure (.continue_ { st' with arena := e2 })
       | none => throw .patternMatchFailed
-    | none =>
-      match e1.expr with
-      | .pure pe1 =>
-        -- Evaluate pure expression
-        let cval ← evalPexpr defaultPexprFuel st.env pe1
-        match st.updateEnv pat cval with
-        | some st' => pure (.continue_ { st' with arena := e2 })
-        | none => throw .patternMatchFailed
-      | _ =>
-        -- Focus on e1, push continuation
-        let contElem := ContElem.sseq arenaAnnots pat e2
-        pure (.continue_ { st with
-          arena := e1
-          stack := .cons currentProcOpt (contElem :: cont) parent
-        })
+    | _ =>
+      -- e1 not yet a value - focus on e1, push continuation
+      let contElem := ContElem.sseq arenaAnnots pat e2
+      pure (.continue_ { st with
+        arena := e1
+        stack := .cons currentProcOpt (contElem :: cont) parent
+      })
 
   | .sseq _ _ _, .empty =>
     throw (.illformedProgram "reached empty stack with Esseq")
@@ -360,8 +452,12 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
 
   -- Eaction: execute memory action
   -- Corresponds to: core_action_step in core_run.lem:275-650
+  -- For polarity handling, see core_reduction.lem:1280-1327:
+  --   Pos actions → DA_pos [] fp
+  --   Neg actions → DA_neg excl_id [] fp (via Eexcluded mechanism)
   | .action paction, _ =>
     let act := paction.action.action
+    let pol := paction.polarity
     match act with
     -- Create: allocate memory for a typed object
     -- Corresponds to: core_run.lem:297-338 (Create case)
@@ -438,52 +534,90 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
         throw (.typeError "kill: expected pointer value")
 
     -- Store: store value to memory
-    -- Corresponds to: core_run.lem:505-569 (Store case)
+    -- Corresponds to: core_reduction.lem:689-698 (Store case)
+    -- Creates: Expr [] (Eannot [DA_pos/DA_neg exclusionSet fp] (mk_value_e Vunit))
+    -- Polarity determines annotation type (core_reduction.lem:691-695)
+    -- Exclusion set comes from enclosing annotation contexts (add_exclusion)
     | .store isLocking tyPe ptrPe valPe _order =>
       let tyVal ← evalPexpr defaultPexprFuel st.env tyPe
       let ptrVal ← evalPexpr defaultPexprFuel st.env ptrPe
       let cval ← evalPexpr defaultPexprFuel st.env valPe
+      -- Get exclusion context from continuation stack
+      let exclusionSet := match st.stack with
+        | .cons _ cont _ => Stack.getExclusionContext cont
+        | .empty => []
       match tyVal, ptrVal with
       | .ctype ty, .object (.pointer ptr) =>
         match memValueFromValue ty cval with
         | some mval =>
-          let _ ← InterpM.liftMem (storeImpl ty isLocking ptr mval)
+          let fp ← InterpM.liftMem (storeImpl ty isLocking ptr mval)
           let resultVal := Value.unit
-          pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
+          -- Create annotation based on polarity (core_reduction.lem:691-695)
+          let dynAnnots : DynAnnotations ← match pol with
+            | .pos => pure [.pos exclusionSet fp]
+            | .neg =>
+              let exclId ← InterpM.freshExclusionId
+              pure [.neg exclId exclusionSet fp]
+          pure (.continue_ { st with arena := mkAnnotatedValueExpr arenaAnnots dynAnnots resultVal })
         | none =>
           throw (.typeError s!"store: value doesn't match type")
       | .ctype ty, .loaded (.specified (.pointer ptr)) =>
         match memValueFromValue ty cval with
         | some mval =>
-          let _ ← InterpM.liftMem (storeImpl ty isLocking ptr mval)
+          let fp ← InterpM.liftMem (storeImpl ty isLocking ptr mval)
           let resultVal := Value.unit
-          pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
+          -- Create annotation based on polarity (core_reduction.lem:691-695)
+          let dynAnnots : DynAnnotations ← match pol with
+            | .pos => pure [.pos exclusionSet fp]
+            | .neg =>
+              let exclId ← InterpM.freshExclusionId
+              pure [.neg exclId exclusionSet fp]
+          pure (.continue_ { st with arena := mkAnnotatedValueExpr arenaAnnots dynAnnots resultVal })
         | none =>
           throw (.typeError s!"store: value doesn't match type")
       | _, _ =>
         throw (.typeError "store: expected ctype and pointer")
 
     -- Load: load value from memory
-    -- Corresponds to: core_run.lem:579-612 (Load case)
+    -- Corresponds to: core_reduction.lem:724-734 (Load case)
+    -- Creates: Expr [] (Eannot [DA_pos/DA_neg exclusionSet fp] (mk_value_e cval))
+    -- Polarity determines annotation type (core_reduction.lem:726-730)
+    -- Exclusion set comes from enclosing annotation contexts (add_exclusion)
     | .load tyPe ptrPe _order =>
       let tyVal ← evalPexpr defaultPexprFuel st.env tyPe
       let ptrVal ← evalPexpr defaultPexprFuel st.env ptrPe
+      -- Get exclusion context from continuation stack
+      let exclusionSet := match st.stack with
+        | .cons _ cont _ => Stack.getExclusionContext cont
+        | .empty => []
       match tyVal, ptrVal with
       | .ctype ty, .object (.pointer ptr) =>
-        let (_, mval) ← InterpM.liftMem (loadImpl ty ptr)
+        let (fp, mval) ← InterpM.liftMem (loadImpl ty ptr)
         let resultVal := valueFromMemValue mval
-        pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
+        -- Create annotation based on polarity (core_reduction.lem:726-730)
+        let dynAnnots : DynAnnotations ← match pol with
+          | .pos => pure [.pos exclusionSet fp]
+          | .neg =>
+            let exclId ← InterpM.freshExclusionId
+            pure [.neg exclId exclusionSet fp]
+        pure (.continue_ { st with arena := mkAnnotatedValueExpr arenaAnnots dynAnnots resultVal })
       | .ctype ty, .loaded (.specified (.pointer ptr)) =>
-        let (_, mval) ← InterpM.liftMem (loadImpl ty ptr)
+        let (fp, mval) ← InterpM.liftMem (loadImpl ty ptr)
         let resultVal := valueFromMemValue mval
-        pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
+        -- Create annotation based on polarity (core_reduction.lem:726-730)
+        let dynAnnots : DynAnnotations ← match pol with
+          | .pos => pure [.pos exclusionSet fp]
+          | .neg =>
+            let exclId ← InterpM.freshExclusionId
+            pure [.neg exclId exclusionSet fp]
+        pure (.continue_ { st with arena := mkAnnotatedValueExpr arenaAnnots dynAnnots resultVal })
       | _, _ =>
         throw (.typeError "load: expected ctype and pointer")
 
     -- SeqRMW: sequential read-modify-write (increment/decrement)
     -- Corresponds to: core_reduction.lem:1214-1276 and driver.lem:704-714
-    -- Audited: 2026-01-01
-    -- Deviations: Simplified - no exclusion tracking for negative polarity
+    -- Creates: Expr [] (Eannot [DA_pos [] fp_load; DA_pos [] fp_store] (mk_value_e cval))
+    -- NOTE: Negative SeqRMW is forbidden by typecheck (core_reduction.lem:1215-1216)
     --
     -- Algorithm (matching SeqRMWRequest2 in driver.lem:704-714):
     -- 1. Evaluate pe1 (type) and pe2 (pointer)
@@ -493,44 +627,51 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
     -- 5. Convert result to mval': memValueFromValue ty cval3
     -- 6. Store new value: Mem.store ty false ptrval mval'
     -- 7. Return old value (if not with_forward) or new value (if with_forward)
+    --    with annotations for both load and store footprints
     | .seqRmw withForward tyPe ptrPe sym valPe =>
+      -- Negative SeqRMW is forbidden (core_reduction.lem:1215-1216)
+      match pol with
+      | .neg =>
+        throw (.illformedProgram "negative SeqRMW should be forbidden by typecheck")
+      | .pos =>
       let tyVal ← evalPexpr defaultPexprFuel st.env tyPe
       let ptrVal ← evalPexpr defaultPexprFuel st.env ptrPe
       match tyVal, ptrVal with
       | .ctype ty, .object (.pointer ptr) =>
-        -- Step 2: Load current value
-        let (_, mval) ← InterpM.liftMem (loadImpl ty ptr)
+        -- Step 2: Load current value (capture footprint)
+        let (fpLoad, mval) ← InterpM.liftMem (loadImpl ty ptr)
         -- Step 3: Bind sym to loaded value in environment
-        -- Corresponds to: Map.insert sym (snd (Caux.valueFromMemValue mval)) x :: xs
         let loadedVal := valueFromMemValue mval
         let newEnv := bindInEnv sym loadedVal st.env
         -- Step 4: Evaluate update expression with sym bound
         let cval3 ← evalPexpr defaultPexprFuel newEnv valPe
         -- Step 5: Convert to MemValue
-        -- Corresponds to: memValueFromValue (Ctype.Ctype [] (Ctype.unatomic_ ty)) cval3
         let ty' : Ctype := { annots := [], ty := unatomic_ ty.ty }
         match memValueFromValue ty' cval3 with
         | some mval' =>
-          -- Step 6: Store new value
-          let _ ← InterpM.liftMem (storeImpl ty false ptr mval')
-          -- Step 7: Return appropriate value
-          -- Corresponds to: Caux.valueFromMemValue (if with_forward then mval' else mval)
+          -- Step 6: Store new value (capture footprint)
+          let fpStore ← InterpM.liftMem (storeImpl ty false ptr mval')
+          -- Step 7: Return appropriate value with combined footprints
           let resultVal := if withForward then valueFromMemValue mval' else loadedVal
-          pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
+          -- SeqRMW always uses DA_pos (only Pos polarity allowed)
+          let dynAnnots : DynAnnotations := [.pos [] fpLoad, .pos [] fpStore]
+          pure (.continue_ { st with arena := mkAnnotatedValueExpr arenaAnnots dynAnnots resultVal })
         | none =>
           throw (.typeError "seq_rmw: update expression doesn't match lvalue type")
       | .ctype ty, .loaded (.specified (.pointer ptr)) =>
         -- Same as above but pointer is loaded value
-        let (_, mval) ← InterpM.liftMem (loadImpl ty ptr)
+        let (fpLoad, mval) ← InterpM.liftMem (loadImpl ty ptr)
         let loadedVal := valueFromMemValue mval
         let newEnv := bindInEnv sym loadedVal st.env
         let cval3 ← evalPexpr defaultPexprFuel newEnv valPe
         let ty' : Ctype := { annots := [], ty := unatomic_ ty.ty }
         match memValueFromValue ty' cval3 with
         | some mval' =>
-          let _ ← InterpM.liftMem (storeImpl ty false ptr mval')
+          let fpStore ← InterpM.liftMem (storeImpl ty false ptr mval')
           let resultVal := if withForward then valueFromMemValue mval' else loadedVal
-          pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
+          -- SeqRMW always uses DA_pos (only Pos polarity allowed)
+          let dynAnnots : DynAnnotations := [.pos [] fpLoad, .pos [] fpStore]
+          pure (.continue_ { st with arena := mkAnnotatedValueExpr arenaAnnots dynAnnots resultVal })
         | none =>
           throw (.typeError "seq_rmw: update expression doesn't match lvalue type")
       | _, _ =>
@@ -622,24 +763,41 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
     | [] => throw (.illformedProgram "empty nd")
     | e :: _ => pure (.continue_ { st with arena := e })
 
-  -- Eunseq: unsequenced evaluation - evaluate left to right (deterministic)
-  -- Corresponds to: core_run.lem:1369-1402
+  -- Eunseq: unsequenced evaluation with race detection
+  -- Corresponds to: core_reduction.lem:384-412 (one_step Eunseq case)
+  -- Uses contextual decomposition to find all reducible positions
   | .unseq es, .cons currentProcOpt cont parent =>
     match es with
     | [] => throw (.illformedProgram "empty unseq")
     | [e] => pure (.continue_ { st with arena := e })
     | _ =>
-      -- First check if all elements are pure (Epure)
-      -- Corresponds to: core_run.lem:1373-1377
-      match toPures es with
-      | some pes =>
-        -- All elements are pure, convert to tuple
-        let tupleExpr : AExpr := { annots := arenaAnnots, expr := .pure (mkTuplePexpr pes) }
-        pure (.continue_ { st with arena := tupleExpr })
-      | none =>
-        -- Not all pure, focus on first non-pure element
-        -- For deterministic execution, we go left to right
-        match es.findIdx? (fun e => toPure e |>.isNone) with
+      -- Check if all expressions are irreducible (values or annotated values)
+      -- Corresponds to: core_reduction.lem:385 if List.for_all is_irreducible es
+      if es.all isIrreducible then
+        -- All values: collect and check for races
+        -- Corresponds to: one_step_unseq_aux in core_reduction.lem:244-261
+        match collectValuesCheckRace es with
+        | .ok (cvals, combinedAnnots) =>
+          -- Create tuple value, preserving combined annotations
+          -- The annotations must propagate outward for race detection in nested contexts
+          let tupleVal := Value.tuple cvals
+          if combinedAnnots.isEmpty then
+            -- No annotations to preserve
+            let resultExpr := mkValueExpr arenaAnnots tupleVal
+            pure (.continue_ { st with arena := resultExpr })
+          else
+            -- Wrap result in combined annotations for outer race checking
+            let resultExpr := mkAnnotatedValueExpr arenaAnnots combinedAnnots tupleVal
+            pure (.continue_ { st with arena := resultExpr })
+        | .error err => throw err
+      else
+        -- Not all irreducible: find first reducible and focus on it
+        -- This is deterministic left-to-right execution, but now with proper
+        -- isIrreducible check that handles annotated values correctly.
+        -- Full non-deterministic exploration requires a different driver (Phase 7).
+        --
+        -- Find first non-irreducible expression
+        match es.findIdx? (fun e => !isIrreducible e) with
         | some idx =>
           let e := es[idx]!
           let done := es.take idx
@@ -650,7 +808,7 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
             stack := .cons currentProcOpt (contElem :: cont) parent
           })
         | none =>
-          -- Should not happen if toPures returned none
+          -- Should not happen if not all are irreducible
           throw (.illformedProgram "unseq: inconsistent state")
 
   | .unseq _, .empty =>
@@ -830,13 +988,82 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
   | .wait _, _ =>
     throw (.notImplemented "wait")
 
+  -- Dynamic annotations (Eannot)
+  -- Corresponds to: core_reduction.lem Eannot cases
+  -- {A}v is a value - we need to apply continuations while preserving the annotation
+  | .annot dynAnnots inner, stack =>
+    -- Check if inner is a value (Epure(PEval v))
+    match valueFromExpr inner with
+    | some _cval =>
+      -- {A}v is a value - apply continuations while preserving annotation
+      match stack with
+      | .empty =>
+        -- Empty stack: this annotated value is the final result
+        -- (The annotation will be stripped by the driver, but for unseq race checking
+        -- we need it to propagate through)
+        pure (.continue_ { st with arena := inner })
+      | .cons currentProcOpt cont parent =>
+        match cont with
+        | [] =>
+          -- Empty continuation, pop to parent frame
+          -- The parent will reconstruct with this arena, preserving the annotation
+          let env' := match st.env with
+            | [] => [{}]
+            | _ :: rest => if rest.isEmpty then [{}] else rest
+          let wrappedExpr := applyContinuation [] arena  -- arena is the {A}v
+          pure (.continue_ { st with
+            arena := wrappedExpr
+            stack := parent
+            env := env'
+          })
+        | contElem :: restCont =>
+          -- Apply the continuation element
+          -- The Ewseq/Esseq handling will propagate the annotation when it sees {A}v
+          let wrappedExpr := applyContinuation cont arena  -- arena is the {A}v
+          pure (.continue_ { st with
+            arena := wrappedExpr
+            stack := .cons currentProcOpt [] parent
+          })
+    | none =>
+      -- inner is not a value - check for nested annotations or continue reducing
+      match inner.expr with
+      | .annot innerAnnots innerInner =>
+        -- {A}{A'}e --> {AA'}e (merge annotations)
+        -- Corresponds to: core_reduction.lem ANNOT-MERGE rule (line 291-294)
+        -- Note: Race checking happens ONLY in Eunseq (one_step_unseq_aux),
+        -- NOT when merging annotations from strong/weak sequences.
+        let mergedAnnots := dynAnnots ++ innerAnnots
+        let mergedExpr : AExpr := { annots := [], expr := .annot mergedAnnots innerInner }
+        pure (.continue_ { st with arena := mergedExpr })
+      | .pure pe =>
+        -- {A}pure(pe) where pe needs evaluation - evaluate and keep annotation
+        let cval ← evalPexpr defaultPexprFuel st.env pe
+        let resultExpr := mkAnnotatedValueExpr arenaAnnots dynAnnots cval
+        pure (.continue_ { st with arena := resultExpr })
+      | _ =>
+        -- {A}e where e needs reduction
+        -- Push annotation continuation and step into e
+        -- This matches Cerberus's Cannot context handling (core_reduction.lem:602-603)
+        match stack with
+        | .cons currentProcOpt cont parent =>
+          let newCont := .annot arenaAnnots dynAnnots :: cont
+          pure (.continue_ { st with
+            arena := inner
+            stack := .cons currentProcOpt newCont parent
+          })
+        | .empty =>
+          -- No stack frame - create one with just the annot continuation
+          throw (.illformedProgram "annotation without stack frame")
+
 /-! ## Driver Loop
 
 Run steps until done or error.
 -/
 
 /-- Run the interpreter until completion or error.
-    Returns the final value or an error. -/
+    Returns the final value or an error.
+    For non-deterministic branches, picks the first branch (deterministic execution).
+    Use NDDriver for exhaustive exploration of all branches. -/
 def runUntilDone (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym LabeledConts)
     (fuel : Nat := 1000000) : InterpM Value := do
   match fuel with
@@ -845,6 +1072,12 @@ def runUntilDone (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym
   match ← step st file allLabeledConts with
   | .done v => pure v
   | .continue_ st' => runUntilDone st' file allLabeledConts fuel'
+  | .branches arenas =>
+    -- Deterministic mode: pick first branch
+    -- For exhaustive exploration, use NDDriver instead
+    match arenas with
+    | [] => throw (.illformedProgram "empty branches")
+    | arena :: _ => runUntilDone { st with arena } file allLabeledConts fuel'
   | .error err => throw err
   termination_by fuel
 

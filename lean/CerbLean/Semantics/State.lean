@@ -40,6 +40,12 @@ inductive ContElem where
   /-- Strong sequence: waiting for e1, then bind to pattern and continue with e2
       Corresponds to: Ksseq annots pat e2 -/
   | sseq (annots : Annots) (pat : APattern) (e2 : AExpr)
+  /-- Dynamic annotation context: wrap result in annotation when complete.
+      Corresponds to: Cannot in core_run_aux.lem context type.
+      This is used when stepping into {A}e where e needs reduction.
+      Note: Cerberus uses evaluation contexts rather than continuations for this,
+      but the behavior is equivalent. -/
+  | annot (annots : Annots) (dynAnnots : DynAnnotations)
   deriving Inhabited
 
 /-! ## Continuation
@@ -180,6 +186,27 @@ def pushContElem (elem : ContElem) : Stack → Option Stack
 def currentProc : Stack → Option Sym
   | .empty => none
   | .cons procSym _ _ => procSym
+
+/-- Extract exclusion IDs from dynamic annotations.
+    These are the IDs from DA_neg annotations that should be inherited
+    by inner annotations. -/
+def extractExclusionIds (annots : DynAnnotations) : List Nat :=
+  annots.filterMap fun da =>
+    match da with
+    | .neg id _ _ => some id
+    | .pos _ _ => none
+
+/-- Get the current exclusion context from the continuation stack.
+    This collects exclusion IDs from all enclosing annotation contexts.
+    When creating a new DA_neg annotation, these IDs should be added
+    to its exclusion set to prevent false race detection.
+    Corresponds to: add_exclusion in core_reduction.lem which adds
+    exclusion IDs to the context. -/
+def getExclusionContext (cont : Continuation) : List Nat :=
+  cont.foldl (init := []) fun acc elem =>
+    match elem with
+    | .annot _ dynAnnots => acc ++ extractExclusionIds dynAnnots
+    | _ => acc
 
 end Stack
 
@@ -341,12 +368,21 @@ Result of a single step of execution.
 -/
 
 /-- Result of a single step.
-    Corresponds to the various Step_* constructors in core_run.lem. -/
+    Corresponds to the various Step_* constructors in core_reduction.lem.
+    Step_* corresponds to deterministic steps, Step_nd2 to non-deterministic. -/
 inductive StepResult where
   /-- Execution completed with a value -/
   | done (val : Value)
-  /-- Continue with new thread state -/
+  /-- Continue with new thread state (deterministic) -/
   | continue_ (st : ThreadState)
+  /-- Non-deterministic branch: multiple possible next states.
+      Corresponds to: Step_nd2 in core_reduction.lem:145
+      ```lem
+      type step 'bty =
+        | Step_nd2 of list (expr core_run_annotation)
+      ```
+      Returns all possible next arena expressions (not full states, just arenas). -/
+  | branches (arenas : List AExpr)
   /-- Error occurred -/
   | error (err : InterpError)
   deriving Inhabited
@@ -389,5 +425,9 @@ where
     | .unseq annots done remaining =>
       -- Expr annots (Eunseq $ es1 ++ (expr :: es2))
       { annots, expr := .unseq (done ++ [e] ++ remaining) }
+    | .annot annots dynAnnots =>
+      -- Expr annots (Eannot dynAnnots expr)
+      -- Corresponds to: Cannot annot xs ctx' -> Expr annot (Eannot xs (apply_ctx ctx' expr))
+      { annots, expr := .annot dynAnnots e }
 
 end CerbLean.Semantics

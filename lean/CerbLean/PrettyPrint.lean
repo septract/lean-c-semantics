@@ -11,6 +11,7 @@ import CerbLean.Core
 namespace CerbLean.PrettyPrint
 
 open CerbLean.Core
+open CerbLean.Memory
 
 /-! ## Basic Utilities -/
 
@@ -219,6 +220,21 @@ def ppIop : Iop → String
   | .shr => ">>"
   | .div => "/"
   | .rem_t => "rem_t"
+
+/-! ## Dynamic Annotation Printing -/
+
+/-- Pretty-print a dynamic annotation (matches pp_core.ml:680-685) -/
+def ppDynAnnotation : DynAnnotation → String
+  | .neg id exclusionSet _fp =>
+    let exclStr := joinWith ", " (exclusionSet.map toString)
+    s!"DA_neg({id}, [{exclStr}])"
+  | .pos exclusionSet _fp =>
+    let exclStr := joinWith ", " (exclusionSet.map toString)
+    s!"DA_pos([{exclStr}])"
+
+/-- Pretty-print a list of dynamic annotations -/
+def ppDynAnnotations (annots : DynAnnotations) : String :=
+  s!"[{joinWith ", " (annots.map ppDynAnnotation)}]"
 
 /-! ## Memory Order Printing -/
 
@@ -712,6 +728,10 @@ partial def ppExpr (ind : Indent) (e : AExpr) : String :=
     s!"par({joinWith ", " (es.map (ppExpr ind))})"
   | .wait tid =>
     s!"wait({tid})"
+  | .annot dynAnnots inner =>
+    -- Cerberus prints: annot[DA_neg(...), DA_pos(...)](inner_expr)
+    -- (matches pp_core.ml:678-686)
+    s!"annot[{ppDynAnnotations dynAnnots}]({ppExpr ind inner})"
 
 /-- Pretty-print annotated expression (alias for ppExpr) -/
 def ppAExpr (ind : Indent) (e : AExpr) : String := ppExpr ind e

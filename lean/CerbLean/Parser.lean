@@ -151,7 +151,8 @@ def actionTags : List String :=
 /-- Valid tags for Expr (inner expr field) -/
 def exprTags : List String :=
   ["Epure", "Ememop", "Eaction", "Ecase", "Elet", "Eif", "Eccall", "Eproc",
-   "Eunseq", "Ewseq", "Esseq", "Ebound", "End", "Esave", "Erun", "Epar", "Ewait"]
+   "Eunseq", "Ewseq", "Esseq", "Ebound", "End", "Esave", "Erun", "Epar", "Ewait",
+   "Eannot"]
 
 /-- Valid tags for Name -/
 def nameTags : List String := ["Sym", "Impl"]
@@ -1361,6 +1362,12 @@ mutual
     | "Ewait" =>
       let tid ← getNat exprJ "thread_id"
       .ok (Expr.wait tid)
+    | "Eannot" =>
+      -- Dynamic annotations are not serialized to JSON (they're runtime-only)
+      -- Parse the inner expression with empty annotations
+      let innerJ ← getField exprJ "expr"
+      let inner ← parseExpr innerJ
+      .ok (Expr.annot [] inner)
     | other => .error s!"unknown expr tag '{other}', expected one of {exprTags}"
     .ok { annots := annots, expr := expr }
 end
