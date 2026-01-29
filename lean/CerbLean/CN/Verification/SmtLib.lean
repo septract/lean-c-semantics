@@ -49,6 +49,44 @@ inductive TranslateResult where
   | unsupported (reason : String)
   deriving Inhabited
 
+/-! ## Integer Bounds for Representability -/
+
+/-- Get bit width for an integer base kind -/
+def intBaseKindWidthSmt (kind : Core.IntBaseKind) : Nat :=
+  match kind with
+  | .ichar => 8
+  | .short => 16
+  | .int_ => 32
+  | .long => 64
+  | .longLong => 64
+  | .intN n => n
+  | .intLeastN n => n
+  | .intFastN n => n
+  | .intmax => 64
+  | .intptr => 64
+
+/-- Get bounds for an integer type (lo, hi) where lo <= val < hi for representability -/
+def integerTypeBounds (ity : Core.IntegerType) : Option (Int × Int) :=
+  match ity with
+  | .signed kind =>
+    let width := intBaseKindWidthSmt kind
+    let half := Int.pow 2 (width - 1)
+    some (-half, half)
+  | .unsigned kind =>
+    let width := intBaseKindWidthSmt kind
+    let max := Int.pow 2 width
+    some (0, max)
+  | .char => some (-128, 128)  -- Assuming signed char
+  | .bool => some (0, 2)
+  | .size_t => some (0, Int.pow 2 64)
+  | .ptrdiff_t => some (-(Int.pow 2 63), Int.pow 2 63)
+  | .wchar_t => some (-(Int.pow 2 31), Int.pow 2 31)
+  | .wint_t => some (-(Int.pow 2 31), Int.pow 2 31)
+  | .ptraddr_t => some (0, Int.pow 2 64)
+  | .enum _ => some (-(Int.pow 2 31), Int.pow 2 31)
+
+/-! ## Constant Conversion -/
+
 /-- Convert a Const to Smt.Term -/
 def constToTerm : Const → TranslateResult
   | .z n => .ok (Term.literalT (toString n))
@@ -162,7 +200,26 @@ partial def termToSmtTerm : Types.Term → TranslateResult
         (Term.literalT "0"))
     | .unsupported r, _ => .unsupported r
     | _, .unsupported r => .unsupported r
-  | .representable _ val => annotTermToSmtTerm val
+  | .representable ct val =>
+    -- representable(ct, val) checks if val fits in the integer type ct
+    -- For signed integers: -2^(W-1) <= val < 2^(W-1)
+    -- For unsigned integers: 0 <= val < 2^W
+    match annotTermToSmtTerm val with
+    | .unsupported r => .unsupported r
+    | .ok valTm =>
+      match ct.ty with
+      | .basic (.integer ity) =>
+        let bounds := integerTypeBounds ity
+        match bounds with
+        | some (lo, hi) =>
+          -- Generate: lo <= val && val < hi
+          let loTm := Term.literalT (toString lo)
+          let hiTm := Term.literalT (toString hi)
+          let loCond := Term.mkApp2 (Term.symbolT "<=") loTm valTm
+          let hiCond := Term.mkApp2 (Term.symbolT "<") valTm hiTm
+          .ok (Term.mkApp2 (Term.symbolT "and") loCond hiCond)
+        | none => .unsupported s!"representable for {repr ity}"
+      | _ => .unsupported s!"representable for non-integer type"
   | .good _ val => annotTermToSmtTerm val
   | .wrapI _ val => annotTermToSmtTerm val
   | .cast _ val => annotTermToSmtTerm val
