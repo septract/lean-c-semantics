@@ -454,12 +454,9 @@ inductive StepResult where
   | continue_ (st : ThreadState)
   /-- Non-deterministic branch: multiple possible next states.
       Corresponds to: Step_nd2 in core_reduction.lem:145
-      ```lem
-      type step 'bty =
-        | Step_nd2 of list (expr core_run_annotation)
-      ```
-      Returns all possible next arena expressions (not full states, just arenas). -/
-  | branches (arenas : List AExpr)
+      Each branch is a complete ThreadState with its own arena and continuation stack.
+      The driver decides how to explore these branches (exhaustive, random, or pick first). -/
+  | branches (states : List ThreadState)
   /-- Error occurred -/
   | error (err : InterpError)
   deriving Inhabited
