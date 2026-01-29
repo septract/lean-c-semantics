@@ -97,11 +97,25 @@ Focus on sequential Core initially:
 
 ## Cerberus Reference
 
+### CRITICAL: Deprecated Files
+
+**`cerberus/frontend/model/core_run.lem` is DEPRECATED and will be removed.**
+
+Always refer to **`core_reduction.lem`** for:
+- Small-step dynamics of effectful Core expressions
+- Neg action transformation (unsequenced race handling)
+- Contextual decomposition (`get_ctx`, `apply_ctx`)
+
+The driver (`driver.lem`) uses `core_reduction.lem`, NOT `core_run.lem`.
+
+(Confirmed by Cerberus developers, January 2026)
+
 ### Key Files
 | File | Description |
 |------|-------------|
 | `cerberus/frontend/ott/core-ott/core.ott` | Core AST grammar (~600 lines) |
-| `cerberus/frontend/model/core_run.lem` | Execution semantics (~1655 lines) |
+| `cerberus/frontend/model/core_reduction.lem` | **PRIMARY**: Small-step reduction semantics |
+| `cerberus/frontend/model/core_run.lem` | **DEPRECATED** - do not use |
 | `cerberus/frontend/model/core_eval.lem` | Expression evaluation (~1198 lines) |
 | `cerberus/frontend/model/mem_common.lem` | Memory interface (~705 lines) |
 | `cerberus/frontend/model/core_sequentialise.lem` | Concurrency elimination |
@@ -120,7 +134,7 @@ Focus on sequential Core initially:
 
 **Non-determinism**: Cerberus exhibits non-deterministic behavior on certain tests. The same test may succeed on one run and fail on another with errors like "calling an unknown procedure". This has been observed on tests like pr34099.c and pr43629.c. **TODO**: Investigate the source of this non-determinism in the future.
 
-**Unsequenced race detection**: We use the `core_sequentialise` pass to eliminate concurrency constructs, which means we pick one specific evaluation order. Cerberus's default mode detects unsequenced race undefined behavior (e.g., `i = i++`), but our sequentialized interpreter will simply execute one ordering without flagging UB. Tests in `tests/ci/030*-unseq_race*.c` and `tests/examples/6.5-2.*.c` are expected to show DIFF results for this reason.
+**Unsequenced race detection**: We now support `Eunseq` expressions and detect unsequenced races following `core_reduction.lem`. The neg action transformation creates `unseq` structures that accumulate memory footprints, and race detection happens at `Eunseq` completion via `one_step_unseq_aux`. Tests in `tests/ci/030*-unseq_race*.c` should detect UB035.
 
 ### Cerberus Setup
 

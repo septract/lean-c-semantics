@@ -190,6 +190,9 @@ partial def getCtx (e : AExpr) : List (Context × AExpr) :=
               (getCtx innerE).map fun (innerCtx, inner) =>
                 (.annot_ annots xs innerCtx, inner)
 
+      -- Eexcluded: reducible at top level (executes the wrapped action)
+      | .excluded _ _ => [(.ctx, e)]
+
 /-- Get contexts for unseq operands.
     Accumulates all (context, expr) pairs for reducible expressions in the unseq.
     Corresponds to: core_reduction.lem:576-588

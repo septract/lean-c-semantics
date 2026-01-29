@@ -88,19 +88,25 @@ def runMain (file : File) (args : List String := ["cmdname"]) : InterpResult :=
   let typeEnv := TypeEnv.fromFile file
   -- Run initialization and execution in InterpM monad
   let result := runInterpM file typeEnv do
+    dbg_trace "INIT: starting globals"
     -- Initialize global variables
     -- Corresponds to: driver_globals in driver.lem:1541-1618
     let globalEnv ← initGlobals file
+    dbg_trace "INIT: globals done"
     -- Allocate errno (after globals, before main)
     -- Corresponds to: driver.lem:1837-1839
     allocateErrno
+    dbg_trace "INIT: errno allocated"
     -- Initialize thread state with globals (now in InterpM to support argc/argv allocation)
     -- Corresponds to: pipeline.ml:621,625 - "cmdname" :: args
     let st ← initThreadState file globalEnv args
+    dbg_trace "INIT: thread state ready"
     -- Pre-collect labeled continuations for all procedures
     -- Corresponds to: collect_labeled_continuations_NEW in core_aux.lem:2379-2395
     let allLabeledConts := collectAllLabeledContinuations file
+    dbg_trace s!"INIT: labeled conts collected ({allLabeledConts.size} procs)"
     -- Run step loop until done
+    dbg_trace "INIT: starting main loop"
     runUntilDone st file allLabeledConts
   match result with
   | .ok (v, state) =>

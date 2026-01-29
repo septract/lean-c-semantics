@@ -52,6 +52,8 @@ mutual
     | .wait tid => .group (.text ".wait " ++ repr tid)
     | .annot dynAnnots inner =>
       .group (.text ".annot " ++ repr dynAnnots ++ .text " " ++ reprAExpr inner)
+    | .excluded exclId paction =>
+      .group (.text ".excluded " ++ repr exclId ++ .text " " ++ reprPaction paction)
 
   partial def reprAExpr (e : AExpr) : Std.Format :=
     .group (.text "{ annots := " ++ repr e.annots ++ .text ", expr := " ++ reprExpr e.expr ++ .text " }")

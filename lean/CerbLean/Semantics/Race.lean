@@ -93,4 +93,59 @@ def mkReadAnnotPos (exclusionSet : List Nat) (base size : Nat) : DynAnnotation :
 def mkWriteAnnotPos (exclusionSet : List Nat) (base size : Nat) : DynAnnotation :=
   .pos exclusionSet { kind := .write, base, size }
 
+/-! ## Neg Action Transformation Helpers
+
+When a neg action (store/load) executes, Cerberus performs a transformation that:
+1. Creates a fresh exclusion ID n
+2. Adds n to ALL context annotations' exclusion sets
+3. The action's annotation has ID = n
+4. Race check happens between action and modified context
+
+This prevents false positives for properly sequenced code while detecting
+actual races in unsequenced code.
+
+Corresponds to: neg_action_trans in core_reduction.lem:1285-1302
+-/
+
+/-- Add an exclusion ID to a single annotation's exclusion set.
+    Corresponds to: add_exclusion_to_dyn_annot in core_reduction.lem:192-194 -/
+def addExclusionToAnnot (n : Nat) : DynAnnotation → DynAnnotation
+  | .neg id es fp => .neg id (n :: es) fp
+  | .pos es fp => .pos (n :: es) fp
+
+/-- Add an exclusion ID to all annotations' exclusion sets.
+    Corresponds to: add_exclusion in core_reduction.lem:196-197 -/
+def addExclusionToAnnots (n : Nat) (annots : DynAnnotations) : DynAnnotations :=
+  annots.map (addExclusionToAnnot n)
+
+/-- Convert a neg annotation to pos, adding the neg ID to the exclusion set.
+    Used when wseq completes - the neg ID becomes part of the exclusion set
+    to prevent races with later operations.
+    Corresponds to: dyn_annot_neg_to_pos in core_reduction.lem
+    - DA_neg(Some n, es, fp) → DA_pos([n] ++ es, fp)
+    - DA_neg(None, es, fp) → DA_pos(es, fp)  (shouldn't happen in practice)
+    - DA_pos(es, fp) → DA_pos(es, fp) -/
+def dynAnnotNegToPos : DynAnnotation → DynAnnotation
+  | .neg id es fp => .pos (id :: es) fp
+  | .pos es fp => .pos es fp
+
+/-- Convert all annotations using neg-to-pos conversion.
+    Used when wseq completes. -/
+def dynAnnotsNegToPos (annots : DynAnnotations) : DynAnnotations :=
+  annots.map dynAnnotNegToPos
+
+/-- Check if two sets of annotations would race, ignoring exclusion sets.
+    This is used for neg action race checking, where the action is conceptually
+    executed with pos polarity (inside Eexcluded), so we just check footprint overlap.
+    Corresponds to: pos/pos race check in Cerberus's neg action transformation unseq.
+
+    In Cerberus, the neg action transformation:
+    1. Converts the action to Pos polarity (inside Eexcluded(n, Eaction Pos ...))
+    2. The Eexcluded wrapper adds n to resulting annotations
+    3. Race check in the unseq is pos/pos, which just checks footprint overlap -/
+def doRaceFootprintOnly (xs1 xs2 : DynAnnotations) : Bool :=
+  xs1.any fun da1 =>
+    xs2.any fun da2 =>
+      da1.footprint.overlaps da2.footprint
+
 end CerbLean.Semantics

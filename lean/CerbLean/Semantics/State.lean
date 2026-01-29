@@ -46,6 +46,11 @@ inductive ContElem where
       Note: Cerberus uses evaluation contexts rather than continuations for this,
       but the behavior is equivalent. -/
   | annot (annots : Annots) (dynAnnots : DynAnnotations)
+  /-- Bound context: marks a boundary for neg action transformation.
+      Corresponds to: Cbound in core_run_aux.lem context type.
+      When a neg action is encountered, the context up to the first bound
+      is used to create the neg action transformation (unseq structure). -/
+  | bound (annots : Annots)
   deriving Inhabited
 
 /-! ## Continuation
@@ -207,6 +212,78 @@ def getExclusionContext (cont : Continuation) : List Nat :=
     match elem with
     | .annot _ dynAnnots => acc ++ extractExclusionIds dynAnnots
     | _ => acc
+
+/-- Get ALL dynamic annotations from the continuation stack.
+    This collects all annotations from enclosing annotation contexts.
+    Used for race checking when executing neg actions - the neg action's
+    footprint must be checked against accumulated annotations.
+    Corresponds to: Cerberus's neg action transformation which creates
+    an unseq between the action and context annotations for race detection
+    (core_reduction.lem:1285-1302). -/
+def getContextAnnotations (cont : Continuation) : DynAnnotations :=
+  cont.foldl (init := []) fun acc elem =>
+    match elem with
+    | .annot _ dynAnnots => acc ++ dynAnnots
+    | _ => acc
+
+/-- Result of break_at_bound: either no bound found, or bound with context.
+    Corresponds to: break_at_bound_and_sseq result type in core_reduction.lem:849-852 -/
+inductive BreakAtBoundResult where
+  | noBound
+  | boundNoSseq (ctxBound : ContElem) (ctxA : Continuation)
+  deriving Inhabited
+
+/-- Find the first bound in the continuation and split into context before and after.
+    Returns the continuation elements UP TO (but not including) the bound,
+    plus the bound element itself.
+    Corresponds to: break_at_bound_and_sseq in core_reduction.lem:854-901
+    Note: We don't implement the SSEQ case yet - for now, we only handle BOUND_NO_SSEQ. -/
+def breakAtBound (cont : Continuation) : BreakAtBoundResult :=
+  go cont []
+where
+  go : Continuation → Continuation → BreakAtBoundResult
+  | [], _ => .noBound
+  | elem :: rest, acc =>
+    match elem with
+    | .bound annots => .boundNoSseq elem acc.reverse
+    | _ => go rest (elem :: acc)
+
+/-- Add an exclusion ID to a single annotation's exclusion set.
+    Corresponds to: add_exclusion_to_dyn_annot in core_reduction.lem:192-194 -/
+def addExclusionToAnnot (n : Nat) : DynAnnotation → DynAnnotation
+  | .neg id es fp => .neg id (n :: es) fp
+  | .pos es fp => .pos (n :: es) fp
+
+/-- Add an exclusion ID to all annotations' exclusion sets.
+    Corresponds to: add_exclusion in core_reduction.lem:196-197 -/
+def addExclusionToAnnots (n : Nat) (annots : DynAnnotations) : DynAnnotations :=
+  annots.map (addExclusionToAnnot n)
+
+/-- Add exclusion ID n to all annotations in the continuation.
+    This modifies the dynAnnots in any .annot continuation elements.
+    Corresponds to: add_exclusion in core_reduction.lem:925-944
+    which adds the exclusion ID to all context annotations. -/
+def addExclusionToCont (n : Nat) (cont : Continuation) : Continuation :=
+  cont.map fun elem =>
+    match elem with
+    | .annot annots dynAnnots =>
+        .annot annots (dynAnnots.map (addExclusionToAnnot n))
+    | other => other
+
+/-- Drop continuation elements until (but not including) the bound.
+    Returns the continuation from the bound onwards (including the bound).
+    This is used after the neg action transformation to "pop" the context
+    that was captured and converted to an expression.
+    Corresponds to: keeping ctx_bound in break_at_bound_and_sseq (core_reduction.lem:854-901) -/
+def dropUntilBound (cont : Continuation) : Continuation :=
+  go cont
+where
+  go : Continuation → Continuation
+  | [] => []
+  | elem :: rest =>
+    match elem with
+    | .bound _ => elem :: rest  -- Keep bound and everything after
+    | _ => go rest
 
 end Stack
 
@@ -429,5 +506,11 @@ where
       -- Expr annots (Eannot dynAnnots expr)
       -- Corresponds to: Cannot annot xs ctx' -> Expr annot (Eannot xs (apply_ctx ctx' expr))
       { annots, expr := .annot dynAnnots e }
+    | .bound annots =>
+      -- Expr annots (Ebound expr)
+      -- RESTORED: Needed for neg action transformation which rebuilds expressions.
+      -- Value propagation now happens one-by-one in Step.lean, so this no longer
+      -- causes infinite loops (bound(v) -> v is handled in the step function).
+      { annots, expr := .bound e }
 
 end CerbLean.Semantics

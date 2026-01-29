@@ -78,6 +78,7 @@ def collectLabeledContinuations (e : AExpr) : LabeledConts :=
   | .nd _ => {}  -- Cerberus returns Map.empty for End
   | .unseq _ => {}  -- Cerberus returns Map.empty for Eunseq
   | .annot _ inner => collectLabeledContinuations inner  -- Collect from inner expression
+  | .excluded _ _ => {}  -- Eexcluded wraps an action, no labeled continuations inside
 
   | .let_ _pat _e1 e2 =>
     -- Elet _ _ e2 -> collect_labeled_continuations e2

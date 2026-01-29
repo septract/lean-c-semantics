@@ -193,6 +193,11 @@ mutual
     -- Corresponds to: Eannot in core.lem:339
     -- Audited: 2026-01-28
     | annot (dynAnnots : DynAnnotations) (e : AExpr)
+    -- Excluded wrapper for neg action transformation
+    -- Corresponds to: Eexcluded in core.lem:337
+    -- The exclusion ID is used to mark the action's annotation with DA_neg
+    -- Audited: 2026-01-28
+    | excluded (exclId : Nat) (act : Paction)
 
   /-- Annotated expression
       Corresponds to: generic_expr in core.ott lines 432-433
