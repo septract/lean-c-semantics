@@ -208,6 +208,32 @@ def mkWseqExpr (sym : Sym) (e1 : AExpr) (e2 : AExpr) : AExpr :=
 def mkPureSym (sym : Sym) : AExpr :=
   { annots := [], expr := .pure { annots := [], ty := none, expr := .sym sym } }
 
+/-- Create an sseq expression: let strong pat = e1 in e2
+    Corresponds to: Caux.mk_sseq_e in core_aux.lem -/
+def mkSseqExpr (pat : APattern) (e1 : AExpr) (e2 : AExpr) : AExpr :=
+  { annots := [], expr := .sseq pat e1 e2 }
+
+/-- Create a tuple pattern: (pat1, pat2)
+    Corresponds to: Caux.mk_tuple_pat [pat1, pat2] in core_aux.lem -/
+def mkTuplePat (pats : List Pattern) : APattern :=
+  { annots := [], pat := .ctor .tuple pats }
+
+/-- Create an sseq expression for BOUND_WITH_SSEQ with non-empty ctxB:
+    let strong (_, sseq_pat) = e1 in e2
+    The pattern is a tuple to match the unseq result: [ignored_result, original_result]
+    Corresponds to: core_reduction.lem:1317-1318 -/
+def mkSseqTupleExpr (sseqPat : APattern) (e1 : AExpr) (e2 : AExpr) : AExpr :=
+  -- Pattern: (_, sseq_pat) - ignore first element (unit from excluded action),
+  -- bind second to sseq_pat
+  let emptyPat : Pattern := .base none .unit
+  let tuplePat : APattern := mkTuplePat [emptyPat, sseqPat.pat]
+  mkSseqExpr tuplePat e1 e2
+
+/-- Convert a Paction from Neg to Pos polarity.
+    Corresponds to: Eaction (Paction Pos act) in core_reduction.lem:1307-1308 -/
+def mkPosActionExpr (paction : Paction) : AExpr :=
+  { annots := [], expr := .action { paction with polarity := .pos } }
+
 /-- Convert a continuation to a Context type for use with applyCtx.
     This inverts the continuation (which is inside-out) to create
     a context (which is outside-in).
@@ -389,13 +415,12 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
       match valueFromExpr innerE with
       | some cval =>
         -- {A}v case: propagate annotation to e2
-        -- Apply neg-to-pos conversion: DA_neg(id, es, fp) → DA_pos([id] ++ es, fp)
-        -- This adds the neg ID to the exclusion set, preventing races with later ops
-        -- Corresponds to: dyn_annot_neg_to_pos in core_reduction.lem
-        let xs' := dynAnnotsNegToPos xs
+        -- Corresponds to: core_reduction.lem:383-391 LETW-ANNOT rule
+        -- letw pat = {A}v in E2 --> {A} { v / pat } E2
+        -- NOTE: Cerberus passes xs through unchanged (no neg-to-pos conversion)
         match st.updateEnv pat cval with
         | some st' =>
-          let wrappedE2 : AExpr := { annots := [], expr := .annot xs' e2 }
+          let wrappedE2 : AExpr := { annots := [], expr := .annot xs e2 }
           pure (.continue_ { st' with arena := wrappedE2 })
         | none => throw .patternMatchFailed
       | none =>
@@ -403,10 +428,9 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
         | .pure pe1 =>
           -- {A}(pure e) - evaluate and propagate annotation
           let cval ← evalPexpr defaultPexprFuel st.env pe1
-          let xs' := dynAnnotsNegToPos xs
           match st.updateEnv pat cval with
           | some st' =>
-            let wrappedE2 : AExpr := { annots := [], expr := .annot xs' e2 }
+            let wrappedE2 : AExpr := { annots := [], expr := .annot xs e2 }
             pure (.continue_ { st' with arena := wrappedE2 })
           | none => throw .patternMatchFailed
         | _ =>
@@ -573,37 +597,65 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
         match Stack.breakAtBound cont with
         | .noBound =>
           -- No bound found - this is unexpected for neg actions
-          let contStr := cont.map fun elem => match elem with
-            | .wseq _ _ _ => "wseq"
-            | .sseq _ _ _ => "sseq"
-            | .unseq _ _ _ => "unseq"
-            | .annot _ _ => "annot"
-            | .bound _ => "BOUND"
-          dbg_trace s!"NEG NO BOUND: cont = {contStr}"
           throw (.illformedProgram "neg action without bound in continuation")
         | .boundNoSseq _boundElem ctxA =>
-          dbg_trace s!"NEG TRANSFORM: ctxA has {ctxA.length} elements"
-          -- Step 2: Generate fresh exclusion ID
-          let n ← InterpM.freshExclusionId
-          -- Step 3: Add exclusion ID to all annotations in ctxA
-          let ctxA' := Stack.addExclusionToCont n ctxA
-          -- Step 4: Create the transformed expression
+          -- BOUND_NO_SSEQ: No sseq between action and bound
+          -- Corresponds to: core_reduction.lem:1289-1302
           -- wseq sym = unseq [Eexcluded n act; apply_ctx ctxA' (pure ())] in sym
+          let n ← InterpM.freshExclusionId
+          let ctxA' := Stack.addExclusionToCont n ctxA
           let sym : Sym := { name := some s!"_unseq_{n}", id := n }
           let excludedExpr := mkExcludedExpr n paction
-          -- Convert continuation to context and apply to pure ()
           let ctx' := contToContext ctxA'
           let ctxExpr := applyCtx ctx' mkPureUnit
-          -- Create unseq [excluded_action, context_expr]
           let unseqExpr := mkUnseqExpr [excludedExpr, ctxExpr]
-          -- Create wseq sym = unseq in sym
           let wseqExpr := mkWseqExpr sym unseqExpr (mkPureSym sym)
-          -- Step 5: Apply ctx_bound (drop ctxA, keep bound onwards)
           let newCont := Stack.dropUntilBound cont
           pure (.continue_ { st with
             arena := wseqExpr
             stack := .cons currentProcOpt newCont parent
           })
+
+        | .boundWithSseq _boundElem ctxA sseqPat ctxB sseqE2 =>
+          -- BOUND_WITH_SSEQ: sseq between action and bound
+          if ctxB.isEmpty then
+            -- BOUND_WITH_SSEQ with CTX (empty inner context)
+            -- Corresponds to: core_reduction.lem:1303-1309
+            -- Just execute: sseq sseq_pat = (action Pos act) in sseq_e2
+            -- wrapped in ctxA and ctx_bound
+            let posActionExpr := mkPosActionExpr paction
+            let sseqExpr := mkSseqExpr sseqPat posActionExpr sseqE2
+            -- Apply ctxA around the sseq
+            let ctxA' := contToContext ctxA
+            let wrappedExpr := applyCtx ctxA' sseqExpr
+            -- Drop everything up to and including bound
+            let newCont := Stack.dropUntilBound cont
+            pure (.continue_ { st with
+              arena := wrappedExpr
+              stack := .cons currentProcOpt newCont parent
+            })
+          else
+            -- BOUND_WITH_SSEQ with non-CTX (non-empty inner context)
+            -- Corresponds to: core_reduction.lem:1311-1323
+            -- sseq (_, sseq_pat) = unseq [Eexcluded n act; apply_ctx ctxB' (pure ())] in sseq_e2
+            -- wrapped in ctxA and ctx_bound
+            let n ← InterpM.freshExclusionId
+            let ctxB' := Stack.addExclusionToCont n ctxB
+            let excludedExpr := mkExcludedExpr n paction
+            let ctxB'' := contToContext ctxB'
+            let ctxExpr := applyCtx ctxB'' mkPureUnit
+            let unseqExpr := mkUnseqExpr [excludedExpr, ctxExpr]
+            let sseqExpr := mkSseqTupleExpr sseqPat unseqExpr sseqE2
+            -- Apply ctxA around the sseq
+            let ctxA' := contToContext ctxA
+            let wrappedExpr := applyCtx ctxA' sseqExpr
+            -- Drop everything up to and including bound
+            let newCont := Stack.dropUntilBound cont
+            pure (.continue_ { st with
+              arena := wrappedExpr
+              stack := .cons currentProcOpt newCont parent
+            })
+
       | .empty =>
         throw (.illformedProgram "neg action with empty stack")
     | .pos =>
@@ -1306,28 +1358,26 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
           -- The annotation stays with the value as it propagates
           match elem with
           | .wseq wseqAnnots pat e2 =>
-              -- Corresponds to: core_reduction.lem wseq rule for annotated values
-              -- When {A}v goes through wseq, convert A to pos and wrap e2
-              -- Step_eval annot (Expr [] (Eannot (dyn_annot_neg_to_pos xs) (subst pat cval e2)))
+              -- Corresponds to: core_reduction.lem:383-391 LETW-ANNOT rule
+              -- letw pat = {A}v in E2 --> {A} { v / pat } E2
+              -- NOTE: Cerberus passes annotations through unchanged (no neg-to-pos conversion)
               match valueFromExpr inner with
               | some cval =>
                   match st.updateEnv pat cval with
                   | some st' =>
-                    -- Convert annotations neg-to-pos
-                    let convertedAnnots := dynAnnotsNegToPos dynAnnots
-                    -- Wrap e2 in the converted annotations
-                    let wrappedE2 : AExpr := { annots := wseqAnnots, expr := .annot convertedAnnots e2 }
+                    let wrappedE2 : AExpr := { annots := wseqAnnots, expr := .annot dynAnnots e2 }
                     pure (.continue_ { st' with arena := wrappedE2, stack := .cons currentProcOpt rest parent })
                   | none => throw .patternMatchFailed
               | none => throw (.illformedProgram "expected value in annotated expression")
           | .sseq sseqAnnots pat e2 =>
-              -- Same as wseq: convert annotations neg-to-pos and wrap e2
+              -- Corresponds to: core_reduction.lem:402-410 LETS-ANNOT rule
+              -- lets pat = {A}v in E2 --> {A} { v / pat } E2
+              -- NOTE: Cerberus passes annotations through unchanged (no neg-to-pos conversion)
               match valueFromExpr inner with
               | some cval =>
                   match st.updateEnv pat cval with
                   | some st' =>
-                    let convertedAnnots := dynAnnotsNegToPos dynAnnots
-                    let wrappedE2 : AExpr := { annots := sseqAnnots, expr := .annot convertedAnnots e2 }
+                    let wrappedE2 : AExpr := { annots := sseqAnnots, expr := .annot dynAnnots e2 }
                     pure (.continue_ { st' with arena := wrappedE2, stack := .cons currentProcOpt rest parent })
                   | none => throw .patternMatchFailed
               | none => throw (.illformedProgram "expected value in annotated expression")
@@ -1395,21 +1445,6 @@ def runUntilDone (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym
   match fuel with
   | 0 => throw (.illformedProgram "execution fuel exhausted")
   | fuel' + 1 =>
-  if fuel' % 1000 == 0 && fuel' < 1000000 then
-    let exprKind := match st.arena.expr with
-      | .pure _ => "pure"
-      | .action _ => "action"
-      | .wseq _ _ _ => "wseq"
-      | .sseq _ _ _ => "sseq"
-      | .unseq _ => "unseq"
-      | .bound _ => "bound"
-      | .annot _ _ => "annot"
-      | .excluded _ _ => "excluded"
-      | _ => "other"
-    let contLen := match st.stack with
-      | .cons _ cont _ => cont.length
-      | .empty => 0
-    dbg_trace s!"STEP {1000000 - fuel'}: {exprKind}, cont={contLen}"
   match ← step st file allLabeledConts with
   | .done v => pure v
   | .continue_ st' => runUntilDone st' file allLabeledConts fuel'

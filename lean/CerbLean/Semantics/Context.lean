@@ -221,7 +221,9 @@ partial def getCtxUnseqAux (annots : Annots) (acc : List (Context × AExpr))
         let zs := (getCtx e).map fun (innerCtx, inner) =>
           (Context.unseq annots before innerCtx after, inner)
         -- Continue with remaining expressions (e added to "before")
-        getCtxUnseqAux annots (zs ++ acc) (before ++ [e]) after
+        -- Use acc ++ zs (not zs ++ acc) so leftmost expressions come first
+        -- This ensures deterministic left-to-right execution picks the correct branch
+        getCtxUnseqAux annots (acc ++ zs) (before ++ [e]) after
 
 end
 
