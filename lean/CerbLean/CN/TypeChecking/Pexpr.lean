@@ -21,6 +21,23 @@ open CerbLean.CN.Types
 
 /-! ## Helper Functions -/
 
+/-- Create a numeric literal with the given base type.
+    Corresponds to: CN's num_lit_ in indexTerms.ml lines 478-484
+
+    CN's behavior:
+    - For Bits types: creates Bits constant with sign/width
+    - For Integer type: creates unbounded integer constant
+    - For other types: falls back to integer -/
+def numLit (n : Int) (bt : BaseType) (loc : Core.Loc) : IndexTerm :=
+  match bt with
+  | .bits sign width =>
+    AnnotTerm.mk (.const (.bits sign width n)) bt loc
+  | .integer =>
+    AnnotTerm.mk (.const (.z n)) .integer loc
+  | _ =>
+    -- Fallback to integer for other types (matches CN's default)
+    AnnotTerm.mk (.const (.z n)) .integer loc
+
 /-- Extract a location from an annotation -/
 def getAnnotLoc : Core.Annot → Option Core.Loc
   | .loc l => some l
@@ -138,12 +155,20 @@ def ctypeInnerToBaseType (ty : Core.Ctype_) : BaseType :=
 def ctypeToBaseTypeBits (ct : Core.Ctype) : BaseType :=
   ctypeInnerToBaseType ct.ty
 
-/-- Convert a Core Value to a CN IndexTerm. -/
-def valueToTerm (v : Value) (loc : Core.Loc) : Except TypeError IndexTerm := do
+/-- Convert a Core Value to a CN IndexTerm.
+    If expectedBt is provided and is a Bits type, use it for integer literals
+    (matches CN's type-aware literal creation via num_lit_). -/
+def valueToTerm (v : Value) (loc : Core.Loc) (expectedBt : Option BaseType := none) : Except TypeError IndexTerm := do
   match valueToConst v loc with
   | .ok c =>
-    let bt := baseTypeOfConst c
-    return AnnotTerm.mk (.const c) bt loc
+    -- For integer constants, use expected type if it's Bits
+    -- This matches CN's num_lit_ which creates Bits literals at construction time
+    match c, expectedBt with
+    | .z n, some (.bits sign width) =>
+      return AnnotTerm.mk (.const (.bits sign width n)) (.bits sign width) loc
+    | _, _ =>
+      let bt := baseTypeOfConst c
+      return AnnotTerm.mk (.const c) bt loc
   | .error (.other "unspecified_value") =>
     -- Unspecified (uninitialized) value: return a symbolic "undef" term
     -- The CN verifier will ensure this value is never actually used
@@ -207,7 +232,9 @@ structure PatternBindings where
   boundVars : List (Sym × BaseType)
   deriving Inhabited
 
-/-- Convert Core.BaseType to CN.BaseType -/
+/-- Convert Core.BaseType to CN.BaseType.
+    For object and loaded types with integer content, returns proper Bits type.
+    Corresponds to: CN's handling of object/loaded types for integers. -/
 def coreBaseTypeToCN (bt : Core.BaseType) : BaseType :=
   match bt with
   | .unit => .unit
@@ -215,9 +242,18 @@ def coreBaseTypeToCN (bt : Core.BaseType) : BaseType :=
   | .ctype => .ctype
   | .list _ => .unit  -- TODO: proper list type
   | .tuple _ => .unit  -- TODO: proper tuple type
-  | .object _ => .loc  -- object types map to locations
-  | .loaded _ => .loc  -- loaded types map to locations
+  | .object ot => objectTypeToCN ot
+  | .loaded ot => objectTypeToCN ot  -- loaded types use the inner object type
   | .storable => .unit
+where
+  /-- Convert Core.ObjectType to CN.BaseType -/
+  objectTypeToCN : Core.ObjectType → BaseType
+    | .integer => .bits .signed 32  -- Default to signed 32-bit for unspecified integers
+    | .floating => .real
+    | .pointer => .loc
+    | .array _ => .loc  -- Arrays are accessed via pointers
+    | .struct_ tag => .struct_ tag
+    | .union_ tag => .struct_ tag  -- Unions use same representation as structs
 
 /-- Bind a pattern to a value, returning the bound variables.
     Corresponds to: check_and_match_pattern in check.ml -/
@@ -250,6 +286,12 @@ partial def bindPattern (pat : APattern) (value : IndexTerm) : TypingM PatternBi
     | .tuple =>
       -- Tuple patterns - bind each component
       -- We create symbolic projection terms for each element
+      --
+      -- Type handling for loaded values:
+      -- Core patterns like (ptr, loaded_val) have Core types like (object pointer, loaded integer)
+      -- But `loaded integer` doesn't carry sign/width info - we need the actual value type.
+      -- When the bound value has a Bits type, use that for loaded elements.
+      -- This matches CN's muCore where the loaded value type comes from the resource, not the pattern.
       let mut allBindings : List (Sym × BaseType) := []
       let mut idx := 0
       for innerPat in args do
@@ -260,9 +302,19 @@ partial def bindPattern (pat : APattern) (value : IndexTerm) : TypingM PatternBi
         let state ← TypingM.getState
         let projId := state.freshCounter
         TypingM.modifyState fun s => { s with freshCounter := s.freshCounter + 1 }
-        -- Extract type from the inner pattern
+        -- Extract type from the inner pattern, with special handling for loaded types
         let projBt := match innerPat with
-          | .base _ bt => coreBaseTypeToCN bt
+          | .base _ bt =>
+            match bt with
+            | .loaded _ =>
+              -- For loaded types, prefer the actual value type if available
+              -- This handles the case where Core says "loaded integer" but we know
+              -- the actual type is Bits(signed, 32) from the resource
+              match value.bt with
+                | .bits sign width => .bits sign width
+                | .integer => .integer
+                | _ => coreBaseTypeToCN bt  -- fallback to conversion
+            | _ => coreBaseTypeToCN bt
           | _ => value.bt  -- fallback
         let projSym : Sym := { id := projId, name := some s!"proj_{idx}" }
         let projTerm : IndexTerm := AnnotTerm.mk (.sym projSym) projBt value.loc
@@ -299,10 +351,8 @@ def lookupVar (s : Sym) (loc : Core.Loc) : TypingM IndexTerm := do
     -- Check logical variables
     match ctx.getL s with
     | some (.value it) => return it
-    | some (.baseType bt) =>
-      return AnnotTerm.mk (.sym s) bt loc
-    | none =>
-      TypingM.fail (.unboundVariable s)
+    | some (.baseType bt) => return AnnotTerm.mk (.sym s) bt loc
+    | none => TypingM.fail (.unboundVariable s)
 
 /-! ## Pure Expression Checking
 
@@ -311,25 +361,35 @@ Corresponds to: check_pexpr in check.ml
 -/
 
 /-- Check a pure expression and convert to an IndexTerm.
+    The optional expectedBt parameter provides the expected CN BaseType for
+    type-aware literal creation (matching CN's num_lit_ behavior).
     Corresponds to: check_pexpr in cn/lib/check.ml -/
-partial def checkPexpr (pe : APexpr) : TypingM IndexTerm := do
+partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : TypingM IndexTerm := do
   let loc := getAnnotsLoc pe.annots
   match pe.expr with
   -- Variable reference
   | .sym s => lookupVar s loc
 
   -- Literal value
+  -- Pass expected type to create Bits literals when type hint is available
+  -- Prefer explicit expectedBt parameter over pe.ty hint
   | .val v =>
-    match valueToTerm v loc with
+    let typeHint := expectedBt.orElse (fun _ => pe.ty.map coreBaseTypeToCN)
+    match valueToTerm v loc typeHint with
     | .ok term => return term
     | .error err => TypingM.fail err
 
   -- Binary operation
+  -- Corresponds to: binop checking in check.ml
+  -- Type propagation: check first operand, use its type as expected for second operand.
+  -- This ensures literals get appropriate types from context (e.g., `x < 1000` where x is BitVec).
   | .op op e1 e2 =>
-    let pe1 : APexpr := ⟨[], pe.ty, e1⟩  -- Wrap in APexpr
+    let pe1 : APexpr := ⟨[], pe.ty, e1⟩
+    -- Check first operand (with expected type if available)
+    let t1 ← checkPexpr pe1 expectedBt
+    -- Use first operand's type as expected type for second operand
     let pe2 : APexpr := ⟨[], pe.ty, e2⟩
-    let t1 ← checkPexpr pe1
-    let t2 ← checkPexpr pe2
+    let t2 ← checkPexpr pe2 (some t1.bt)
     match convertBinop op t1.bt t2.bt loc with
     | .ok (cnOp, resBt) =>
       -- Handle operators that need result negation or arg swap (gt, ge)
@@ -346,22 +406,24 @@ partial def checkPexpr (pe : APexpr) : TypingM IndexTerm := do
     return AnnotTerm.mk (.unop .not t) .bool loc
 
   -- Conditional
+  -- Propagate expected type to both branches
   | .if_ cond thenE elseE =>
     let peCond : APexpr := ⟨[], some .boolean, cond⟩
     let peThen : APexpr := ⟨[], pe.ty, thenE⟩
     let peElse : APexpr := ⟨[], pe.ty, elseE⟩
-    let tCond ← checkPexpr peCond
-    let tThen ← checkPexpr peThen
-    let tElse ← checkPexpr peElse
+    let tCond ← checkPexpr peCond (some .bool)
+    let tThen ← checkPexpr peThen expectedBt
+    let tElse ← checkPexpr peElse expectedBt
     return AnnotTerm.mk (.ite tCond tThen tElse) tThen.bt loc
 
   -- Let binding
+  -- Propagate expected type to body expression
   | .let_ pat e1 e2 =>
     let pe1 : APexpr := ⟨[], none, e1⟩
     let v1 ← checkPexpr pe1
     let bindings ← bindPattern pat v1
     let pe2 : APexpr := ⟨[], pe.ty, e2⟩
-    let result ← checkPexpr pe2
+    let result ← checkPexpr pe2 expectedBt
     unbindPattern bindings
     return result
 
@@ -443,6 +505,19 @@ partial def checkPexpr (pe : APexpr) : TypingM IndexTerm := do
         match tyArg with
         | .val (.ctype ct) =>
           let targetBt := ctypeToBaseTypeBits ct
+
+          -- Helper to convert integer constants to Bits constants
+          -- This matches CN's type-aware literal creation
+          let convertToBits (v : IndexTerm) : IndexTerm :=
+            match targetBt, v.term with
+            | .bits sign width, .const (.z n) =>
+              -- Convert integer constant to Bits constant
+              AnnotTerm.mk (.const (.bits sign width n)) targetBt v.loc
+            | .bits _ _, _ =>
+              -- For non-constant values, wrap in cast (symbolic)
+              AnnotTerm.mk (.cast targetBt v) targetBt v.loc
+            | _, _ => v  -- Non-bits target, keep as-is
+
           -- Check what kind of integer type this is
           match ct.ty with
           | .basic (.integer .bool) =>
@@ -458,14 +533,14 @@ partial def checkPexpr (pe : APexpr) : TypingM IndexTerm := do
           | .basic (.integer (.unsigned _)) =>
             -- Unsigned: cast to target type
             -- Corresponds to: check_conv_int lines 421-423
-            return AnnotTerm.mk (.cast targetBt argVal) targetBt loc
+            return convertToBits argVal
 
           | .basic (.integer (.signed _)) =>
             -- Signed: CN checks representable, then casts (lines 424-429)
             -- Add representability constraint as obligation
             let reprTerm := AnnotTerm.mk (.representable ct argVal) .bool loc
             TypingM.requireConstraint (.t reprTerm) loc "integer representability"
-            return AnnotTerm.mk (.cast targetBt argVal) targetBt loc
+            return convertToBits argVal
 
           | _ =>
             -- Other integer types not yet supported
@@ -494,6 +569,7 @@ partial def checkPexpr (pe : APexpr) : TypingM IndexTerm := do
       return AnnotTerm.mk (.apply fnSym argTerms) resBt loc
 
   -- Case/match expression
+  -- Propagate expected type to branch bodies
   | .case_ scrut branches =>
     let peScrut : APexpr := ⟨[], none, scrut⟩
     let tScrut ← checkPexpr peScrut
@@ -501,7 +577,7 @@ partial def checkPexpr (pe : APexpr) : TypingM IndexTerm := do
     let cnBranches ← branches.mapM fun (pat, body) => do
       let bindings ← bindPattern pat tScrut
       let peBody : APexpr := ⟨[], pe.ty, body⟩
-      let tBody ← checkPexpr peBody
+      let tBody ← checkPexpr peBody expectedBt
       unbindPattern bindings
       -- Convert APattern to CN Pattern
       let cnPat := convertPattern pat tScrut.bt loc
@@ -738,9 +814,15 @@ handled by evaluating both branches symbolically).
     the result to the continuation. This provides a uniform interface
     with checkExprK.
 
+    The optional expectedBt parameter is used when the caller knows the expected
+    type (e.g., from a computational argument in AT). This allows type-aware
+    literal creation matching CN's num_lit_ behavior.
+
     Corresponds to: check_pexpr continuation handling in check.ml -/
-partial def checkPexprK (pe : APexpr) (k : IndexTerm → TypingM Unit) : TypingM Unit := do
-  let result ← checkPexpr pe
+partial def checkPexprK (pe : APexpr) (k : IndexTerm → TypingM Unit)
+    (expectedBt : Option BaseType := none) : TypingM Unit := do
+  -- Pass expectedBt directly to checkPexpr for type-aware literal creation
+  let result ← checkPexpr pe expectedBt
   k result
 
 end CerbLean.CN.TypeChecking
