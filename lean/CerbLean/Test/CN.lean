@@ -318,6 +318,8 @@ structure FunctionBodyInfo where
   /-- C-level parameter types from funinfo (for CN type checking) -/
   cParams : List (Option Core.Sym × Core.Ctype)
   retTy : Core.BaseType
+  /-- C-level return type from funinfo (for CN type checking) -/
+  cRetTy : Option Core.Ctype
 
 /-- Look up a function's body and parameters by symbol name.
     Returns the first Proc (actual function with body), not ProcDecl (forward declaration).
@@ -328,11 +330,12 @@ def findFunctionInfo (file : Core.File) (name : Option String) : Option Function
     if sym.name == name then
       match decl with
       | .proc _ _ retTy params body =>
-        -- Look up C-level parameter types from funinfo
-        let cParams := match file.lookupFunInfoByName name with
-          | some funInfo => funInfo.params.map fun fp => (fp.sym, fp.ty)
-          | none => []  -- Fall back to empty if no funinfo (shouldn't happen)
-        some { body, params, cParams, retTy }
+        -- Look up C-level parameter types and return type from funinfo
+        let (cParams, cRetTy) := match file.lookupFunInfoByName name with
+          | some funInfo =>
+            (funInfo.params.map fun fp => (fp.sym, fp.ty), some funInfo.returnType)
+          | none => ([], none)  -- Fall back to empty if no funinfo (shouldn't happen)
+        some { body, params, cParams, retTy, cRetTy }
       | .fun_ _ _ _ => none  -- Pure functions have APexpr body, not AExpr
       | _ => none  -- ProcDecl, BuiltinDecl have no body
     else
@@ -378,7 +381,7 @@ def runJsonTest (jsonPath : String) (expectFail : Bool := false) : IO UInt32 := 
             match findFunctionInfo file sym.name with
             | some info =>
               -- Full verification: check body against spec with parameters bound
-              let result := checkFunctionWithParams spec info.body info.params info.cParams info.retTy Core.Loc.t.unknown
+              let result := checkFunctionWithParams spec info.body info.params info.cParams info.retTy info.cRetTy Core.Loc.t.unknown
               if result.success then
                 verifySuccess := verifySuccess + 1
                 IO.println "  PASS (body verified with trivial oracle)"
@@ -550,7 +553,7 @@ def runJsonTestWithVerify (jsonPath : String) (expectFail : Bool := false) : IO 
             match findFunctionInfo file sym.name with
             | some info =>
               -- Type check first
-              let tcResult := checkFunctionWithParams spec info.body info.params info.cParams info.retTy Core.Loc.t.unknown
+              let tcResult := checkFunctionWithParams spec info.body info.params info.cParams info.retTy info.cRetTy Core.Loc.t.unknown
               if !tcResult.success then
                 verifyFail := verifyFail + 1
                 IO.println "  TYPECHECK FAIL"

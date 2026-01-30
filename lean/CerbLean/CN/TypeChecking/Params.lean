@@ -176,20 +176,11 @@ def tryCoreBaseTypeToCN (bt : Core.BaseType) : Option BaseType :=
 
 /-- Convert C type (Ctype) to CN base type.
     This gives the actual VALUE type, not the stack slot pointer type.
-    Corresponds to: CN's type conversion for parameter values. -/
+    Uses Bits types for integers to match CN's bt_of_sct.
+    Corresponds to: Memory.bt_of_sct in CN's memory.ml -/
 def tryCtypeToCN (ct : Core.Ctype) : Option BaseType :=
-  match ct.ty with
-  | .void => some .unit
-  | .basic (.integer _) => some .integer
-  | .basic (.floating _) => some .real
-  | .pointer _ _ => some .loc
-  | .struct_ tag => some (.struct_ tag)
-  | .union_ _ => none  -- Unsupported
-  | .array _ _ => none
-  | .function _ _ _ _ => none
-  | .functionNoParams _ _ => none
-  | .atomic _ => none
-  | .byte => none
+  -- Use the same logic as Resolve.ctypeToOutputBaseType
+  some (Resolve.ctypeToOutputBaseType ct)
 
 /-! ## Main Function: Check Function With Parameters
 
@@ -227,6 +218,7 @@ def checkFunctionWithParams
     (params : List (Core.Sym × Core.BaseType))
     (cParams : List (Option Core.Sym × Core.Ctype))
     (retTy : Core.BaseType)
+    (cRetTy : Option Core.Ctype := none)
     (loc : Core.Loc)
     : TypeCheckResult :=
   -- For trusted specs, skip verification
@@ -279,9 +271,14 @@ def checkFunctionWithParams
     | .ok (paramCtx, paramValueMap, nextFreshId, cnParams) =>
       -- Step 3: Convert return type to CN BaseType
       -- Corresponds to: WProc extracting return_bt from function type
-      let returnBt := match tryCoreBaseTypeToCN retTy with
-        | some bt => bt
-        | none => .unit  -- Fall back to unit for unsupported types
+      -- Prefer C return type (gives Bits types) over Core return type (gives unbounded Integer)
+      let returnBt := match cRetTy with
+        | some ct => Resolve.ctypeToOutputBaseType ct
+        | none =>
+          -- Fall back to Core return type if C type not available
+          match tryCoreBaseTypeToCN retTy with
+          | some bt => bt
+          | none => .unit  -- Fall back to unit for unsupported types
 
       -- Step 4: Transform body to muCore form
       -- This extracts label definitions and replaces Esave with Erun.
@@ -291,7 +288,8 @@ def checkFunctionWithParams
       -- Step 5: Resolve the spec - convert parsed identifiers to proper symbols
       -- This is the CN-matching approach: resolve names to symbols before type checking.
       -- Corresponds to: CN's Cabs_to_ail.desugar_cn_* functions
-      let resolvedSpec := Resolve.resolveFunctionSpec spec cnParams.reverse nextFreshId
+      -- Pass return type so 'return' symbol gets the correct type
+      let resolvedSpec := Resolve.resolveFunctionSpec spec cnParams.reverse returnBt nextFreshId
 
       -- Step 6: Create label context from label definitions
       -- Corresponds to: WProc.label_context in wellTyped.ml line 2474
