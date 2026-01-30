@@ -1090,12 +1090,18 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
   | .bound _, .empty =>
     throw (.illformedProgram "reached empty stack with Ebound")
 
-  -- End: nondeterministic choice - pick first (deterministic for testing)
-  -- Corresponds to: core_run.lem:1618-1623
+  -- End: nondeterministic choice - return all branches
+  -- Corresponds to: core_reduction.lem:433-435 (ND es)
+  -- Audited: 2026-01-30
+  -- Deviations: None
   | .nd es, _ =>
     match es with
     | [] => throw (.illformedProgram "empty nd")
-    | e :: _ => pure (.continue_ { st with arena := e })
+    | [e] => pure (.continue_ { st with arena := e })
+    | _ =>
+      -- Return branches for all alternatives (matches Cerberus Step_nd2)
+      let branches := es.map fun e => { st with arena := e }
+      pure (.branches branches)
 
   -- Eunseq: unsequenced evaluation with race detection
   -- Corresponds to: core_reduction.lem:384-412 (one_step Eunseq case)
