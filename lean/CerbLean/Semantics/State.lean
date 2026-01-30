@@ -226,18 +226,45 @@ def getContextAnnotations (cont : Continuation) : DynAnnotations :=
     | .annot _ dynAnnots => acc ++ dynAnnots
     | _ => acc
 
+/-- Result of break_at_sseq: splits at the first (innermost) sseq if found.
+    Corresponds to: break_at_sseq result in core_reduction.lem:804
+    Returns: (ctxA, sseq_pat, ctxB, sseq_e2) where
+    - ctxA: context outside the sseq (elements after sseq in our list)
+    - sseq_pat: the sseq's pattern
+    - ctxB: context inside the sseq's first operand (elements before sseq)
+    - sseq_e2: the sseq's second operand -/
+inductive BreakAtSseqResult where
+  | noSseq
+  | sseqFound (ctxA : Continuation) (sseqPat : APattern) (ctxB : Continuation) (sseqE2 : AExpr)
+  deriving Inhabited
+
+/-- Find the first (innermost) sseq in the continuation and split.
+    Corresponds to: break_at_sseq in core_reduction.lem:804-847 -/
+def breakAtSseq (cont : Continuation) : BreakAtSseqResult :=
+  go cont []
+where
+  go : Continuation → Continuation → BreakAtSseqResult
+  | [], _ => .noSseq
+  | elem :: rest, acc =>
+    match elem with
+    | .sseq _annots pat e2 =>
+        -- Found sseq: acc is ctxB (inner), rest is ctxA (outer)
+        .sseqFound rest pat acc.reverse e2
+    | _ => go rest (elem :: acc)
+
 /-- Result of break_at_bound: either no bound found, or bound with context.
     Corresponds to: break_at_bound_and_sseq result type in core_reduction.lem:849-852 -/
 inductive BreakAtBoundResult where
   | noBound
   | boundNoSseq (ctxBound : ContElem) (ctxA : Continuation)
+  | boundWithSseq (ctxBound : ContElem) (ctxA : Continuation) (sseqPat : APattern) (ctxB : Continuation) (sseqE2 : AExpr)
   deriving Inhabited
 
 /-- Find the first bound in the continuation and split into context before and after.
     Returns the continuation elements UP TO (but not including) the bound,
-    plus the bound element itself.
-    Corresponds to: break_at_bound_and_sseq in core_reduction.lem:854-901
-    Note: We don't implement the SSEQ case yet - for now, we only handle BOUND_NO_SSEQ. -/
+    plus the bound element itself. If there's an sseq between the action and
+    the bound, also splits at the sseq.
+    Corresponds to: break_at_bound_and_sseq in core_reduction.lem:854-901 -/
 def breakAtBound (cont : Continuation) : BreakAtBoundResult :=
   go cont []
 where
@@ -245,7 +272,17 @@ where
   | [], _ => .noBound
   | elem :: rest, acc =>
     match elem with
-    | .bound annots => .boundNoSseq elem acc.reverse
+    | .bound _annots =>
+        -- Found bound. Now check if there's an sseq in the inner context (acc).
+        -- acc is in reverse order, so reverse it first.
+        let innerCtx := acc.reverse
+        match breakAtSseq innerCtx with
+        | .noSseq =>
+            -- No sseq: BOUND_NO_SSEQ case
+            .boundNoSseq elem innerCtx
+        | .sseqFound ctxA sseqPat ctxB sseqE2 =>
+            -- Found sseq: BOUND_WITH_SSEQ case
+            .boundWithSseq elem ctxA sseqPat ctxB sseqE2
     | _ => go rest (elem :: acc)
 
 /-- Add an exclusion ID to a single annotation's exclusion set.
@@ -259,10 +296,22 @@ def addExclusionToAnnot (n : Nat) : DynAnnotation → DynAnnotation
 def addExclusionToAnnots (n : Nat) (annots : DynAnnotations) : DynAnnotations :=
   annots.map (addExclusionToAnnot n)
 
+/-- Add exclusion ID n to annotations at the top level of an expression.
+    If the expression is {A}e, adds n to A's exclusion sets.
+    Used for adding exclusions to the done list of unseq contexts.
+    Corresponds to: adding exclusions to expressions in Cunseq's es1 -/
+def addExclusionToExpr (n : Nat) (e : AExpr) : AExpr :=
+  match e.expr with
+  | .annot dynAnnots inner =>
+      { e with expr := .annot (dynAnnots.map (addExclusionToAnnot n)) inner }
+  | _ => e
+
 /-- Add exclusion ID n to all annotations in the continuation.
-    This modifies the dynAnnots in any .annot continuation elements.
+    This modifies the dynAnnots in .annot continuation elements.
     Corresponds to: add_exclusion in core_reduction.lem:925-944
-    which adds the exclusion ID to all context annotations. -/
+    which adds the exclusion ID to Cannot (annotation) context elements only.
+    NOTE: We do NOT modify .unseq done lists here - that would incorrectly
+    propagate exclusions across parallel unseq branches. -/
 def addExclusionToCont (n : Nat) (cont : Continuation) : Continuation :=
   cont.map fun elem =>
     match elem with
