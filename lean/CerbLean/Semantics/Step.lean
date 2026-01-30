@@ -193,10 +193,16 @@ def mkPureUnit : AExpr :=
 def mkUnseqExpr (es : List AExpr) : AExpr :=
   { annots := [], expr := .unseq es }
 
-/-- Create a wseq expression: let weak pat = e1 in e2 -/
+/-- Create a wseq expression for neg transform: let weak (_, sym) = e1 in e2
+    The pattern is a tuple to match the unseq result: [ignored_result, sym_result]
+    Corresponds to: Caux.mk_tuple_pat [mk_empty_pat BTy_unit, mk_sym_pat sym BTy_unit]
+    in core_reduction.lem:1296-1297 -/
 def mkWseqExpr (sym : Sym) (e1 : AExpr) (e2 : AExpr) : AExpr :=
-  let pat : APattern := { annots := [], pat := .base (some sym) .unit }
-  { annots := [], expr := .wseq pat e1 e2 }
+  -- Pattern: (_, sym) - ignore first element, bind second to sym
+  let emptyPat : Pattern := .base none .unit
+  let symPat : Pattern := .base (some sym) .unit
+  let tuplePat : APattern := { annots := [], pat := .ctor .tuple [emptyPat, symPat] }
+  { annots := [], expr := .wseq tuplePat e1 e2 }
 
 /-- Create a pure symbol reference expression. -/
 def mkPureSym (sym : Sym) : AExpr :=
