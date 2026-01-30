@@ -1,6 +1,6 @@
 #!/bin/bash
 # Test the Lean interpreter against Cerberus execution
-# Usage: ./scripts/test_interp.sh [--verbose] [--max N] [--list FILE] [--nolibc] [test_dir_or_file]
+# Usage: ./scripts/test_interp.sh [--verbose] [--max N] [--list FILE] [--nolibc] [--mode=MODE] [test_dir_or_file]
 #
 # Supports:
 #   - Single .c file: ./scripts/test_interp.sh path/to/test.c
@@ -11,6 +11,12 @@
 # Options:
 #   --nolibc: Skip libc linking for faster testing (2MB vs 200MB JSON).
 #             Tests named *.libc.c are automatically skipped in this mode.
+#   --mode=MODE: Execution mode for both Cerberus and Lean interpreter.
+#             - exhaustive (default): explore all interleavings, report any race
+#             - deterministic: pick first branch at each choice point
+#   --sequentialise: Use Cerberus's sequentialise pass (eliminates Eunseq).
+#             Lean always runs deterministic mode with this flag.
+#   --exclude=PATTERN: Exclude files matching pattern (e.g., --exclude=unseq)
 
 set -e
 
@@ -31,6 +37,9 @@ TEST_PATH=""  # Can be a file or directory
 LIST_FILE=""  # File containing list of test paths
 MAX_TESTS=0  # 0 = unlimited
 NO_LIBC=false  # Skip libc linking for faster JSON (2MB vs 200MB)
+MODE="exhaustive"  # Execution mode: "exhaustive" (default) or "deterministic"
+SEQUENTIALISE=false  # Use Cerberus's sequentialise pass
+EXCLUDE_PATTERN=""  # Exclude files matching this pattern
 OUTPUT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/c-to-lean-interp-test.XXXXXXXXXX")
 
 # Parse arguments
@@ -50,6 +59,18 @@ while [[ $# -gt 0 ]]; do
             ;;
         --nolibc)
             NO_LIBC=true
+            shift
+            ;;
+        --mode=*)
+            MODE="${1#--mode=}"
+            shift
+            ;;
+        --sequentialise|--sequentialize)
+            SEQUENTIALISE=true
+            shift
+            ;;
+        --exclude=*)
+            EXCLUDE_PATTERN="${1#--exclude=}"
             shift
             ;;
         *)
@@ -144,6 +165,18 @@ if $NO_LIBC; then
     TEST_FILES=$(echo $TEST_FILES | tr ' ' '\n' | grep -v '\.libc\.c$' | tr '\n' ' ')
 fi
 
+# Filter out files whose BASENAME matches exclude pattern
+if [[ -n "$EXCLUDE_PATTERN" ]]; then
+    filtered=""
+    for f in $TEST_FILES; do
+        basename=$(basename "$f")
+        if ! echo "$basename" | grep -q "$EXCLUDE_PATTERN"; then
+            filtered="$filtered $f"
+        fi
+    done
+    TEST_FILES="$filtered"
+fi
+
 TOTAL_FILES=$(echo $TEST_FILES | wc -w | tr -d ' ')
 if ! $SINGLE_FILE || $LIST_MODE; then
     echo "Found $TOTAL_FILES test files"
@@ -158,10 +191,23 @@ fi
 TIMEOUT_SECS=10
 
 # Build Cerberus flags
-# No --sequentialise: we now support proper Eunseq with race detection
 CERBERUS_FLAGS=""
 if $NO_LIBC; then
     CERBERUS_FLAGS="$CERBERUS_FLAGS --nolibc"
+fi
+if $SEQUENTIALISE; then
+    # Use sequentialise pass - eliminates Eunseq, no race detection
+    CERBERUS_FLAGS="$CERBERUS_FLAGS --sequentialise"
+    # Force deterministic mode for Lean (no ND exploration needed)
+    MODE="deterministic"
+elif [[ -n "$MODE" ]]; then
+    CERBERUS_FLAGS="$CERBERUS_FLAGS --mode=$MODE"
+fi
+
+# Build Lean interpreter flags
+LEAN_FLAGS=""
+if [[ -n "$MODE" ]]; then
+    LEAN_FLAGS="$LEAN_FLAGS --mode=$MODE"
 fi
 
 # Counters
@@ -213,16 +259,18 @@ for c_file in $TEST_FILES; do
     # Extract return value from batch output: Defined {value: "Specified(N)", ...}
     # or detect UB: Undefined {ub: "CODE", ...}
     # or error: Error {msg: "..."}
+    # Note: In exhaustive mode, output has multiple "EXECUTION N:" blocks, so we don't
+    # use ^ anchor - we match "Undefined {" or "Defined {" anywhere in output.
     cerberus_ub_code=""
-    if echo "$cerberus_output" | grep -q '^Undefined {'; then
+    if echo "$cerberus_output" | grep -q 'Undefined {'; then
         cerberus_has_ub=true
-        cerberus_ub_code=$(echo "$cerberus_output" | grep -o 'ub: "[^"]*"' | sed 's/ub: "\([^"]*\)"/\1/')
+        cerberus_ub_code=$(echo "$cerberus_output" | grep -o 'ub: "[^"]*"' | head -1 | sed 's/ub: "\([^"]*\)"/\1/')
         cerberus_ret="UB"
     elif echo "$cerberus_output" | grep -q 'value: "Specified'; then
-        cerberus_ret=$(echo "$cerberus_output" | grep -o 'value: "Specified([^)]*)"' | sed 's/value: "Specified(\([^)]*\))"/\1/')
+        cerberus_ret=$(echo "$cerberus_output" | grep -o 'value: "Specified([^)]*)"' | head -1 | sed 's/value: "Specified(\([^)]*\))"/\1/')
     elif echo "$cerberus_output" | grep -q 'value: "Unspecified'; then
-        cerberus_ret=$(echo "$cerberus_output" | grep -o 'value: "[^"]*"' | sed 's/value: "\([^"]*\)"/\1/')
-    elif echo "$cerberus_output" | grep -q '^Error {'; then
+        cerberus_ret=$(echo "$cerberus_output" | grep -o 'value: "[^"]*"' | head -1 | sed 's/value: "\([^"]*\)"/\1/')
+    elif echo "$cerberus_output" | grep -q 'Error {'; then
         # Cerberus reported an error (ill-formed program, unsupported feature, etc.)
         (( CERBERUS_FAIL++ )) || true
         error_msg=$(echo "$cerberus_output" | grep -o 'msg: "[^"]*"' | head -1 | sed 's/msg: "\([^"]*\)"/\1/')
@@ -253,7 +301,7 @@ for c_file in $TEST_FILES; do
 
     # Run Lean interpreter in batch mode with timeout
     lean_exit=0
-    lean_output=$(timeout ${TIMEOUT_SECS}s "$LEAN_INTERP" --batch "$json_file" 2>&1) || lean_exit=$?
+    lean_output=$(timeout ${TIMEOUT_SECS}s "$LEAN_INTERP" --batch $LEAN_FLAGS "$json_file" 2>&1) || lean_exit=$?
 
     # Check for timeout (exit code 124)
     if [[ $lean_exit -eq 124 ]]; then

@@ -108,12 +108,20 @@ def parseArgs (argsStr : Option String) : List String :=
     let parts := s.splitOn " " |>.filter (· != "")
     "cmdname" :: parts
 
+/-- Execution mode for the interpreter -/
+inductive ExecMode where
+  | deterministic  -- Default: pick first branch at each choice point
+  | exhaustive     -- Explore all interleavings, report any race
+  deriving Repr, DecidableEq
+
 /-- Parse JSON file and run interpreter -/
-def runFile (jsonPath : String) (batch : Bool) (progArgs : List String) : IO Unit := do
+def runFile (jsonPath : String) (batch : Bool) (mode : ExecMode) (progArgs : List String) : IO Unit := do
   let contents ← IO.FS.readFile jsonPath
   match parseFileFromString contents with
   | .ok file =>
-    let result := runMain file progArgs
+    let result := match mode with
+      | .deterministic => runMain file progArgs
+      | .exhaustive => runMainExhaustive file progArgs
     if batch then
       -- Batch mode: output simple parseable format
       match result.error with
@@ -155,14 +163,17 @@ def runFile (jsonPath : String) (batch : Bool) (progArgs : List String) : IO Uni
 
 /-- Main entry point -/
 def main (args : List String) : IO UInt32 := do
-  -- Parse command line: [--batch] [--args "arg1 arg2 ..."] <json-file>
+  -- Parse command line: [--batch] [--mode=exhaustive] [--args "arg1 arg2 ..."] <json-file>
   let mut batch := false
+  let mut mode : ExecMode := .deterministic
   let mut progArgs : Option String := none
   let mut jsonPath : Option String := none
   let mut i := 0
   while i < args.length do
     match args[i]? with
     | some "--batch" => batch := true
+    | some "--mode=exhaustive" => mode := .exhaustive
+    | some "--mode=deterministic" => mode := .deterministic
     | some "--args" =>
       i := i + 1
       progArgs := args[i]?
@@ -174,8 +185,8 @@ def main (args : List String) : IO UInt32 := do
 
   match jsonPath with
   | some path =>
-    runFile path batch (parseArgs progArgs)
+    runFile path batch mode (parseArgs progArgs)
     pure 0
   | none =>
-    IO.println "Usage: cerblean_interp [--batch] [--args \"arg1 arg2 ...\"] <json-file>"
+    IO.println "Usage: cerblean_interp [--batch] [--mode=exhaustive|deterministic] [--args \"arg1 arg2 ...\"] <json-file>"
     pure 1

@@ -9,6 +9,7 @@
 -/
 
 import CerbLean.Semantics.Step
+import CerbLean.Semantics.NDDriver
 import CerbLean.Semantics.Env
 import CerbLean.Memory.Layout
 import CerbLean.PrettyPrint
@@ -108,6 +109,55 @@ def runMain (file : File) (args : List String := ["cmdname"]) : InterpResult :=
       stdout := state.stdout
       stderr := state.stderr
       error := none }
+  | .error e =>
+    { returnValue := none
+      stdout := ""
+      stderr := ""
+      error := some e }
+
+/-- Run the main function with exhaustive exploration of all interleavings.
+    Corresponds to: Cerberus's `--mode=exhaustive` option.
+
+    This explores ALL possible execution paths through unsequenced expressions.
+    If ANY path detects a race (UB035_unsequenced_race), returns that as an error.
+    Otherwise returns one of the successful execution values.
+
+    Use this mode for rigorous race detection - deterministic mode (runMain)
+    may miss races that only occur in certain interleavings. -/
+def runMainExhaustive (file : File) (args : List String := ["cmdname"])
+    (fuel : Nat := 1000000) : InterpResult :=
+  let typeEnv := TypeEnv.fromFile file
+  let result := runInterpM file typeEnv do
+    let globalEnv ← initGlobals file
+    allocateErrno
+    let st ← initThreadState file globalEnv args
+    let allLabeledConts := collectAllLabeledContinuations file
+    -- Use exhaustive exploration instead of deterministic
+    exploreAll st file allLabeledConts fuel
+  match result with
+  | .ok (ndResult, state) =>
+    match ndResult with
+    | .allSucceeded vals =>
+      -- Return first value (all paths succeeded, pick any)
+      { returnValue := vals.head?
+        stdout := state.stdout
+        stderr := state.stderr
+        error := none }
+    | .raceDetected loc =>
+      { returnValue := none
+        stdout := state.stdout
+        stderr := state.stderr
+        error := some (.undefinedBehavior .ub035_unsequencedRace loc) }
+    | .someError err =>
+      { returnValue := none
+        stdout := state.stdout
+        stderr := state.stderr
+        error := some err }
+    | .fuelExhausted =>
+      { returnValue := none
+        stdout := state.stdout
+        stderr := state.stderr
+        error := some (.notImplemented "exhaustive exploration fuel exhausted") }
   | .error e =>
     { returnValue := none
       stdout := ""

@@ -5,6 +5,7 @@
 .PHONY: test-parser test-pp test-parser-quick test-pp-quick
 .PHONY: test-interp test-interp-minimal test-interp-debug test-one
 .PHONY: test-interp-full test-interp-minimal-full test-interp-debug-full test-interp-ci
+.PHONY: test-interp-seq
 .PHONY: test-genproof
 .PHONY: fuzz init update-cerberus help
 
@@ -66,11 +67,11 @@ clean:
 # Testing
 # ------------------------------------------------------------------------------
 
-# Run quick tests (same as CI)
-test: test-unit test-interp test-genproof
+# Run all tests (unit, memory, interpreter in both modes, genproof)
+test: test-unit test-memory test-interp test-interp-seq test-genproof
 
-# Run exactly what CI runs (for local verification before pushing)
-ci: test-unit test-interp test-genproof
+# Alias for 'test' - verify before pushing
+ci: test
 
 # Unit Tests (No Cerberus required)
 test-unit: lean
@@ -128,6 +129,10 @@ test-interp-full: test-interp-minimal-full test-interp-debug-full
 test-interp-ci: lean cerberus
 	./scripts/test_interp.sh
 
+# Sequentialized mode (uses --sequentialise, excludes unseq tests)
+test-interp-seq: lean cerberus
+	./scripts/test_interp.sh --nolibc --sequentialise --exclude=unseq tests/minimal
+
 # ------------------------------------------------------------------------------
 # Fuzzing
 # ------------------------------------------------------------------------------
@@ -172,9 +177,10 @@ help:
 	@echo "  make clean           Clean all build artifacts"
 	@echo ""
 	@echo "Quick Tests:"
-	@echo "  make test            Run quick tests (unit + interpreter + genproof)"
+	@echo "  make test            Run all quick tests (same as CI)"
 	@echo "  make ci              Same as 'test' - verify before pushing"
 	@echo "  make test-unit       Run Lean unit tests only"
+	@echo "  make test-memory     Run memory model unit tests"
 	@echo "  make test-genproof   Test proof generation pipeline"
 	@echo "  make test-one FILE=path/to/test.c   Test a single C file"
 	@echo ""
@@ -182,6 +188,7 @@ help:
 	@echo "  make test-interp       Fast interpreter tests (--nolibc)"
 	@echo "  make test-interp-full  Full interpreter tests (with libc)"
 	@echo "  make test-interp-ci    Run on Cerberus CI suite (~5500 files)"
+	@echo "  make test-interp-seq   Sequentialized mode (no unseq, faster)"
 	@echo ""
 	@echo "Integration Tests (slow):"
 	@echo "  make test-parser     Full parser test (~5500 files)"
