@@ -93,7 +93,8 @@ Memory operations use a type class for incremental complexity:
 ### 4. Sequential Fragment First
 Focus on sequential Core initially:
 - Use `core_sequentialise` pass to eliminate concurrency
-- Concurrent semantics (`Epar`, `Eunseq`) deferred
+- Parallel semantics (`Epar`, `Ewait`) deferred
+- Note: Unsequenced expressions (`Eunseq`) are now fully supported with race detection
 
 ## Cerberus Reference
 
@@ -134,7 +135,7 @@ The driver (`driver.lem`) uses `core_reduction.lem`, NOT `core_run.lem`.
 
 **Non-determinism**: Cerberus exhibits non-deterministic behavior on certain tests. The same test may succeed on one run and fail on another with errors like "calling an unknown procedure". This has been observed on tests like pr34099.c and pr43629.c. **TODO**: Investigate the source of this non-determinism in the future.
 
-**Unsequenced race detection**: We now support `Eunseq` expressions and detect unsequenced races following `core_reduction.lem`. The neg action transformation creates `unseq` structures that accumulate memory footprints, and race detection happens at `Eunseq` completion via `one_step_unseq_aux`. Tests in `tests/ci/030*-unseq_race*.c` should detect UB035.
+**Unsequenced race detection**: We now support `Eunseq` expressions and detect unsequenced races following `core_reduction.lem`. The neg action transformation creates `unseq` structures that accumulate memory footprints, and race detection happens at `Eunseq` completion via `one_step_unseq_aux`. Tests in `cerberus/tests/ci/030*-unseq_race*.c` should detect UB035.
 
 ### Cerberus Setup
 
