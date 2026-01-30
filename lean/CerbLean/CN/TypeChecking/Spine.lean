@@ -146,14 +146,15 @@ where
   aux (argsAcc : List IndexTerm) (args : List APexpr) (at_ : AT α)
       (k : α → TypingM Unit) : TypingM Unit := do
     match args, at_ with
-    | arg :: restArgs, .computational s _bt _info rest =>
+    | arg :: restArgs, .computational s bt _info rest =>
       -- Computational argument: check and substitute
       -- Corresponds to: check.ml lines 1163-1173
-      checkPexprK arg fun argVal => do
+      -- Pass expected type to checkPexprK for type-aware literal creation
+      checkPexprK arg (fun argVal => do
         -- Substitute arg value for parameter in rest of type
         let σ := Subst.single s argVal
         let rest' := AT.subst (fun _ x => x) σ rest  -- No inner subst needed for False
-        aux (argsAcc ++ [argVal]) restArgs rest' k
+        aux (argsAcc ++ [argVal]) restArgs rest' k) (some bt)
 
     | _, .ghost _s _bt _info rest =>
       -- Ghost argument: we don't have ghost args in our simplified model

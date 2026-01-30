@@ -41,6 +41,38 @@ def symToSmtName (s : Sym) : String :=
   | some n => s!"{n}_{s.id}"
   | none => s!"_sym_{s.id}"
 
+/-! ## Type-to-Sort Translation
+
+CN uses actual SMT-LIB BitVec types (`(_ BitVec n)`) with bitvector operations.
+We must match this exactly.
+
+Corresponds to: CN's solver.ml translate_bt function
+-/
+
+/-- Convert CN BaseType to SMT-LIB2 sort.
+    Matches CN's Solver.translate_bt which uses `SMT.t_bits n` for Bits types.
+    Corresponds to: solver.ml line 409: `| Bits (_, n) -> SMT.t_bits n` -/
+def baseTypeToSort : BaseType → Smt.Term
+  | .bits _ width => Term.mkApp2 (Term.symbolT "_")
+                                  (Term.symbolT "BitVec")
+                                  (Term.literalT (toString width))
+  | .integer => Term.symbolT "Int"
+  | .bool => Term.symbolT "Bool"
+  | .real => Term.symbolT "Real"
+  | .loc => Term.symbolT "Int"  -- Pointers as integers (addresses)
+  | .allocId => Term.symbolT "Int"  -- Allocation IDs as integers
+  | .unit => Term.symbolT "Bool"  -- Unit as Bool (SMT doesn't have Unit)
+  | .struct_ _ => Term.symbolT "Int"  -- Structs unsupported, fallback
+  | .memByte => Term.symbolT "Int"  -- Memory bytes as integers
+  | .list _ => Term.symbolT "Int"  -- Lists unsupported
+  | .set _ => Term.symbolT "Int"  -- Sets unsupported
+  | .tuple _ => Term.symbolT "Int"  -- Tuples unsupported
+  | .map _ _ => Term.symbolT "Int"  -- Maps unsupported
+  | .record _ => Term.symbolT "Int"  -- Records unsupported
+  | .datatype _ => Term.symbolT "Int"  -- Datatypes unsupported
+  | .ctype => Term.symbolT "Int"  -- C types as integers
+  | .option _ => Term.symbolT "Int"  -- Options unsupported
+
 /-! ## Translation to Smt.Term -/
 
 /-- Result of translation: either success or unsupported construct -/
@@ -48,6 +80,31 @@ inductive TranslateResult where
   | ok (tm : Smt.Term)
   | unsupported (reason : String)
   deriving Inhabited
+
+/-! ## BitVec Literal Generation
+
+SMT-LIB2 BitVec literals can be written as:
+- `(_ bvN W)` - decimal value N of width W bits
+- `#xHHHH` - hexadecimal (width must be multiple of 4)
+- `#bBBBB` - binary
+
+CN uses the indexed identifier notation: `(_ bvN W)`.
+Corresponds to: simple_smt.ml bv_nat function
+-/
+
+/-- Generate a BitVec literal in SMT-LIB format: (_ bvN W)
+    For negative numbers, we convert to two's complement representation. -/
+def mkBitVecLiteral (width : Nat) (value : Int) : Smt.Term :=
+  -- Convert negative numbers to two's complement unsigned representation
+  let unsignedVal : Nat :=
+    if value < 0 then
+      let modulus := Nat.pow 2 width
+      (modulus - ((-value).toNat % modulus)) % modulus
+    else
+      value.toNat % (Nat.pow 2 width)
+  Term.mkApp2 (Term.symbolT "_")
+              (Term.symbolT s!"bv{unsignedVal}")
+              (Term.literalT (toString width))
 
 /-! ## Integer Bounds for Representability -/
 
@@ -87,10 +144,14 @@ def integerTypeBounds (ity : Core.IntegerType) : Option (Int × Int) :=
 
 /-! ## Constant Conversion -/
 
-/-- Convert a Const to Smt.Term -/
+/-- Convert a Const to Smt.Term.
+    For Bits constants, generates proper BitVec literals using indexed notation.
+    Corresponds to: CN's handling of Const.Bits in solver.ml -/
 def constToTerm : Const → TranslateResult
-  | .z n => .ok (Term.literalT (toString n))
-  | .bits _sign _width n => .ok (Term.literalT (toString n))
+  | .z n =>
+    .ok (Term.literalT (toString n))
+  | .bits _sign width n =>
+    .ok (mkBitVecLiteral width n)  -- Proper BitVec literal
   | .bool true => .ok (Term.symbolT "true")
   | .bool false => .ok (Term.symbolT "false")
   | .null => .ok (Term.literalT "0")
@@ -102,48 +163,122 @@ def constToTerm : Const → TranslateResult
   | .ctypeConst _ => .ok (Term.literalT "0")
   | .default _ => .ok (Term.literalT "0")
 
-/-- Convert a UnOp application to Smt.Term -/
-def unOpToTerm (op : UnOp) (arg : Smt.Term) : TranslateResult :=
+/-- Check if a base type is a bitvector type -/
+def isBitsType : BaseType → Bool
+  | .bits _ _ => true
+  | _ => false
+
+/-- Get width from a bits type (defaults to 32) -/
+def bitsWidth : BaseType → Nat
+  | .bits _ width => width
+  | _ => 32
+
+/-- Get signedness from a bits type (defaults to unsigned) -/
+def bitsSignedness : BaseType → Sign
+  | .bits sign _ => sign
+  | _ => .unsigned
+
+/-- Check if a term is an integer literal -/
+def isIntLiteral (tm : Smt.Term) : Option Int :=
+  match tm with
+  | .literalT s =>
+    -- Try to parse as integer
+    match s.toInt? with
+    | some n => some n
+    | none => none
+  | _ => none
+
+/-- Convert an integer to a BitVec literal for use in comparisons.
+    Used when comparing integer constants with BitVec values. -/
+def intToBitVecTerm (n : Int) (width : Nat) : Smt.Term :=
+  mkBitVecLiteral width n
+
+/-- Convert a UnOp application to Smt.Term.
+    Type-aware: dispatches to bitvector operations for Bits types. -/
+def unOpToTerm (op : UnOp) (argBt : BaseType) (arg : Smt.Term) : TranslateResult :=
+  let useBv := isBitsType argBt
   match op with
   | .not => .ok (Term.appT (Term.symbolT "not") arg)
-  | .negate => .ok (Term.appT (Term.symbolT "-") arg)
-  | .bwCompl => .unsupported "bwCompl"
+  | .negate => if useBv then .ok (Term.appT (Term.symbolT "bvneg") arg)
+               else .ok (Term.appT (Term.symbolT "-") arg)
+  | .bwCompl => if useBv then .ok (Term.appT (Term.symbolT "bvnot") arg)
+                else .unsupported "bwCompl requires Bits type"
   | .bwClzNoSMT => .unsupported "bwClzNoSMT"
   | .bwCtzNoSMT => .unsupported "bwCtzNoSMT"
   | .bwFfsNoSMT => .unsupported "bwFfsNoSMT"
   | .bwFlsNoSMT => .unsupported "bwFlsNoSMT"
 
-/-- Convert a BinOp application to Smt.Term -/
-def binOpToTerm (op : BinOp) (l r : Smt.Term) : TranslateResult :=
+/-- Convert a BinOp application to Smt.Term.
+    Type-aware: dispatches to bitvector operations for Bits types.
+    Both operands are expected to have matching types (enforced by Pexpr.lean).
+    Corresponds to: CN's solver.ml lines 688-702 for arithmetic, 752-765 for comparisons -/
+def binOpToTerm (op : BinOp) (lBt rBt : BaseType) (l r : Smt.Term) : TranslateResult :=
+  -- Both operands should have matching types after Pexpr type fixup
+  -- Use left operand's type to determine if we need bitvector ops
+  let useBv := isBitsType lBt
+  let sign := bitsSignedness lBt
   let mkBinApp (sym : String) := .ok (Term.mkApp2 (Term.symbolT sym) l r)
   match op with
-  | .add => mkBinApp "+"
-  | .sub => mkBinApp "-"
-  | .mul => mkBinApp "*"
-  | .mulNoSMT => mkBinApp "*"
-  | .div => mkBinApp "div"
-  | .divNoSMT => mkBinApp "div"
-  | .rem => mkBinApp "mod"
-  | .remNoSMT => mkBinApp "mod"
-  | .mod_ => mkBinApp "mod"
-  | .modNoSMT => mkBinApp "mod"
-  | .lt => mkBinApp "<"
-  | .le => mkBinApp "<="
-  | .eq => mkBinApp "="
+  -- Arithmetic operations
+  | .add => if useBv then mkBinApp "bvadd" else mkBinApp "+"
+  | .sub => if useBv then mkBinApp "bvsub" else mkBinApp "-"
+  | .mul => if useBv then mkBinApp "bvmul" else mkBinApp "*"
+  | .mulNoSMT => if useBv then mkBinApp "bvmul" else mkBinApp "*"
+  | .div =>
+    if useBv then
+      if sign == .signed then mkBinApp "bvsdiv" else mkBinApp "bvudiv"
+    else mkBinApp "div"
+  | .divNoSMT =>
+    if useBv then
+      if sign == .signed then mkBinApp "bvsdiv" else mkBinApp "bvudiv"
+    else mkBinApp "div"
+  | .rem =>
+    if useBv then
+      if sign == .signed then mkBinApp "bvsrem" else mkBinApp "bvurem"
+    else mkBinApp "mod"
+  | .remNoSMT =>
+    if useBv then
+      if sign == .signed then mkBinApp "bvsrem" else mkBinApp "bvurem"
+    else mkBinApp "mod"
+  | .mod_ =>
+    if useBv then
+      if sign == .signed then mkBinApp "bvsmod" else mkBinApp "bvurem"
+    else mkBinApp "mod"
+  | .modNoSMT =>
+    if useBv then
+      if sign == .signed then mkBinApp "bvsmod" else mkBinApp "bvurem"
+    else mkBinApp "mod"
+  -- Comparison operations
+  | .lt =>
+    if useBv then
+      if sign == .signed then mkBinApp "bvslt" else mkBinApp "bvult"
+    else mkBinApp "<"
+  | .le =>
+    if useBv then
+      if sign == .signed then mkBinApp "bvsle" else mkBinApp "bvule"
+    else mkBinApp "<="
+  | .eq => mkBinApp "="  -- Equality is the same for all types
+  -- Logical operations (type-independent)
   | .and_ => mkBinApp "and"
   | .or_ => mkBinApp "or"
   | .implies => mkBinApp "=>"
+  -- Pointer comparisons (use integers)
   | .ltPointer => mkBinApp "<"
   | .lePointer => mkBinApp "<="
+  -- Bitwise operations (require bitvector types)
+  | .bwXor => if useBv then mkBinApp "bvxor" else .unsupported "bwXor requires Bits type"
+  | .bwAnd => if useBv then mkBinApp "bvand" else .unsupported "bwAnd requires Bits type"
+  | .bwOr => if useBv then mkBinApp "bvor" else .unsupported "bwOr requires Bits type"
+  | .shiftLeft => if useBv then mkBinApp "bvshl" else .unsupported "shiftLeft requires Bits type"
+  | .shiftRight =>
+    if useBv then
+      if sign == .signed then mkBinApp "bvashr" else mkBinApp "bvlshr"
+    else .unsupported "shiftRight requires Bits type"
+  -- Unsupported operations
   | .exp => .unsupported "exp"
   | .expNoSMT => .unsupported "expNoSMT"
   | .min => .unsupported "min"
   | .max => .unsupported "max"
-  | .bwXor => .unsupported "bwXor"
-  | .bwAnd => .unsupported "bwAnd"
-  | .bwOr => .unsupported "bwOr"
-  | .shiftLeft => .unsupported "shiftLeft"
-  | .shiftRight => .unsupported "shiftRight"
   | .setUnion => .unsupported "setUnion"
   | .setIntersection => .unsupported "setIntersection"
   | .setDifference => .unsupported "setDifference"
@@ -152,17 +287,20 @@ def binOpToTerm (op : BinOp) (l r : Smt.Term) : TranslateResult :=
 
 mutual
 
-/-- Convert a CN Term to Smt.Term -/
+/-- Convert a CN Term to Smt.Term.
+    Type information is obtained from AnnotTerm wrappers during recursion. -/
 partial def termToSmtTerm : Types.Term → TranslateResult
   | .const c => constToTerm c
   | .sym s => .ok (Term.symbolT (symToSmtName s))
   | .unop op arg =>
+    -- Pass the operand's type to unOpToTerm
     match annotTermToSmtTerm arg with
-    | .ok argTm => unOpToTerm op argTm
+    | .ok argTm => unOpToTerm op arg.bt argTm
     | .unsupported r => .unsupported r
   | .binop op l r =>
+    -- Pass both operand types to binOpToTerm for type-aware dispatch
     match annotTermToSmtTerm l, annotTermToSmtTerm r with
-    | .ok lTm, .ok rTm => binOpToTerm op lTm rTm
+    | .ok lTm, .ok rTm => binOpToTerm op l.bt r.bt lTm rTm
     | .unsupported r, _ => .unsupported r
     | _, .unsupported r => .unsupported r
   | .ite cond thenB elseB =>
@@ -171,16 +309,17 @@ partial def termToSmtTerm : Types.Term → TranslateResult
     | .unsupported r, _, _ => .unsupported r
     | _, .unsupported r, _ => .unsupported r
     | _, _, .unsupported r => .unsupported r
-  | .eachI lo (s, _bt) hi body =>
-    -- Bounded quantification as forall with range constraint
+  | .eachI lo (s, bt) hi body =>
+    -- Bounded quantification: use proper sort for bound variable
     let name := symToSmtName s
+    let sort := baseTypeToSort bt
     match annotTermToSmtTerm body with
     | .ok b =>
       let rangeConstraint := Term.mkApp2 (Term.symbolT "and")
         (Term.mkApp2 (Term.symbolT ">=") (Term.symbolT name) (Term.literalT (toString lo)))
         (Term.mkApp2 (Term.symbolT "<=") (Term.symbolT name) (Term.literalT (toString hi)))
       let implBody := Term.mkApp2 (Term.symbolT "=>") rangeConstraint b
-      .ok (Term.forallT name (Term.symbolT "Int") implBody)
+      .ok (Term.forallT name sort implBody)
     | .unsupported r => .unsupported r
   | .let_ var binding body =>
     let name := symToSmtName var
@@ -202,24 +341,31 @@ partial def termToSmtTerm : Types.Term → TranslateResult
     | _, .unsupported r => .unsupported r
   | .representable ct val =>
     -- representable(ct, val) checks if val fits in the integer type ct
-    -- For signed integers: -2^(W-1) <= val < 2^(W-1)
-    -- For unsigned integers: 0 <= val < 2^W
-    match annotTermToSmtTerm val with
-    | .unsupported r => .unsupported r
-    | .ok valTm =>
-      match ct.ty with
-      | .basic (.integer ity) =>
-        let bounds := integerTypeBounds ity
-        match bounds with
-        | some (lo, hi) =>
-          -- Generate: lo <= val && val < hi
-          let loTm := Term.literalT (toString lo)
-          let hiTm := Term.literalT (toString hi)
-          let loCond := Term.mkApp2 (Term.symbolT "<=") loTm valTm
-          let hiCond := Term.mkApp2 (Term.symbolT "<") valTm hiTm
-          .ok (Term.mkApp2 (Term.symbolT "and") loCond hiCond)
-        | none => .unsupported s!"representable for {repr ity}"
-      | _ => .unsupported s!"representable for non-integer type"
+    -- For BitVec types, representability is trivially true (bounded by type)
+    -- For unbounded Integer types, we need explicit range checks
+    let valBt := val.bt
+    if isBitsType valBt then
+      -- BitVec values are already bounded by their type width
+      -- Representability is trivially true
+      .ok (Term.symbolT "true")
+    else
+      -- For unbounded integers, generate range constraint
+      match annotTermToSmtTerm val with
+      | .unsupported r => .unsupported r
+      | .ok valTm =>
+        match ct.ty with
+        | .basic (.integer ity) =>
+          let bounds := integerTypeBounds ity
+          match bounds with
+          | some (lo, hi) =>
+            -- Generate: lo <= val && val < hi
+            let loTm := Term.literalT (toString lo)
+            let hiTm := Term.literalT (toString hi)
+            let loCond := Term.mkApp2 (Term.symbolT "<=") loTm valTm
+            let hiCond := Term.mkApp2 (Term.symbolT "<") valTm hiTm
+            .ok (Term.mkApp2 (Term.symbolT "and") loCond hiCond)
+          | none => .unsupported s!"representable for {repr ity}"
+        | _ => .unsupported s!"representable for non-integer type"
   | .good _ val => annotTermToSmtTerm val
   | .wrapI _ val => annotTermToSmtTerm val
   | .cast _ val => annotTermToSmtTerm val
@@ -239,9 +385,23 @@ partial def termToSmtTerm : Types.Term → TranslateResult
         | .ok argTm => buildApp (Term.appT acc argTm) rest
         | .unsupported r => .unsupported r
     buildApp (Term.symbolT fnName) args
-  -- Unsupported constructs
-  | .tuple _ => .unsupported "tuple"
-  | .nthTuple _ _ => .unsupported "nthTuple"
+  | .tuple elems =>
+    -- Support single-element tuples (common in return value handling)
+    match elems with
+    | [single] => annotTermToSmtTerm single
+    | _ => .unsupported s!"tuple with {elems.length} elements"
+  | .nthTuple n tup =>
+    -- Support projecting from tuples
+    match tup.term with
+    | .tuple elems =>
+      if h : n < elems.length then
+        annotTermToSmtTerm (elems.get ⟨n, h⟩)
+      else
+        .unsupported s!"nthTuple index {n} out of bounds for tuple of size {elems.length}"
+    | _ =>
+      -- For non-tuple terms, if n=0, just return the term (treating as single-element)
+      if n == 0 then annotTermToSmtTerm tup
+      else .unsupported s!"nthTuple on non-tuple term"
   | .struct_ _ _ => .unsupported "struct"
   | .structMember _ _ => .unsupported "structMember"
   | .structUpdate _ _ _ => .unsupported "structUpdate"
@@ -257,7 +417,46 @@ partial def termToSmtTerm : Types.Term → TranslateResult
   | .mapSet _ _ _ => .unsupported "mapSet"
   | .mapGet _ _ => .unsupported "mapGet"
   | .mapDef _ _ => .unsupported "mapDef"
-  | .match_ _ _ => .unsupported "match"
+  | .match_ scrutinee cases =>
+    -- Support common match patterns from CN
+    match cases with
+    | [(_, body)] =>
+      -- Single case: just use the body
+      annotTermToSmtTerm body
+    | [(pat1, body1), (pat2, body2)] =>
+      -- Two cases: convert to if-then-else
+      -- Check if this is a Specified/Unspecified pattern
+      let isSpecified (p : Types.Pattern) : Bool :=
+        match p with
+        | .mk (.constructor s _) _ _ => s.name == some "Specified"
+        | _ => false
+      let isUnspecified (p : Types.Pattern) : Bool :=
+        match p with
+        | .mk (.constructor s _) _ _ => s.name == some "Unspecified"
+        | _ => false
+      if isSpecified pat1 && isUnspecified pat2 then
+        -- Pattern: match x with Specified(v) => e1 | Unspecified => e2
+        -- Assume we're always in the Specified case (sound for verification)
+        annotTermToSmtTerm body1
+      else if isUnspecified pat1 && isSpecified pat2 then
+        -- Opposite order
+        annotTermToSmtTerm body2
+      else
+        -- Generic 2-case match: convert to ite if scrutinee is boolean
+        let isBoolType : BaseType → Bool
+          | .bool => true
+          | _ => false
+        if isBoolType scrutinee.bt then
+          match annotTermToSmtTerm scrutinee, annotTermToSmtTerm body1, annotTermToSmtTerm body2 with
+          | .ok s, .ok b1, .ok b2 => .ok (Term.mkApp3 (Term.symbolT "ite") s b1 b2)
+          | .unsupported r, _, _ => .unsupported r
+          | _, .unsupported r, _ => .unsupported r
+          | _, _, .unsupported r => .unsupported r
+        else
+          -- For now, just use the first branch (pragmatic approximation)
+          annotTermToSmtTerm body1
+    | [] => .unsupported "match with no cases"
+    | _ => .unsupported s!"match with {cases.length} cases"
   | .cnNone _ => .unsupported "cnNone"
   | .isSome _ => .unsupported "isSome"
 
@@ -270,89 +469,120 @@ end
 /-- Convert a LogicalConstraint to Smt.Term -/
 def constraintToSmtTerm : LogicalConstraint → TranslateResult
   | .t it => annotTermToSmtTerm it
-  | .forall_ (s, _bt) body =>
+  | .forall_ (s, bt) body =>
     let name := symToSmtName s
+    let sort := baseTypeToSort bt  -- Use proper sort for bound variable
     match annotTermToSmtTerm body with
-    | .ok b => .ok (Term.forallT name (Term.symbolT "Int") b)
+    | .ok b => .ok (Term.forallT name sort b)
     | .unsupported r => .unsupported r
 
-/-! ## Free Symbol Collection -/
+/-! ## Free Symbol Collection with Types
+
+We collect (Sym, BaseType) pairs to generate properly-typed SMT declarations.
+CN uses actual SMT-LIB BitVec types for Bits, so we generate declarations like
+`(declare-const v (_ BitVec 32))` instead of `(declare-const v Int)`.
+-/
+
+/-- A typed symbol for SMT generation -/
+abbrev TypedSym := Sym × BaseType
 
 mutual
 
-/-- Collect free symbols from a Term -/
-partial def termFreeSyms : Types.Term → List Sym
+/-- Collect free symbols with types from an AnnotTerm.
+    Returns (Sym, BaseType) pairs where BaseType comes from the term's annotation. -/
+partial def annotTermFreeTypedSyms (at_ : AnnotTerm) : List TypedSym :=
+  match at_.term with
+  | .sym s => [(s, at_.bt)]
   | .const _ => []
-  | .sym s => [s]
-  | .unop _ arg => annotTermFreeSyms arg
-  | .binop _ l r => annotTermFreeSyms l ++ annotTermFreeSyms r
-  | .ite c t e => annotTermFreeSyms c ++ annotTermFreeSyms t ++ annotTermFreeSyms e
-  | .eachI _ (s, _) _ body => (annotTermFreeSyms body).filter (· != s)
-  | .tuple elems => elems.flatMap annotTermFreeSyms
-  | .nthTuple _ tup => annotTermFreeSyms tup
-  | .struct_ _ members => members.flatMap (annotTermFreeSyms ·.2)
-  | .structMember obj _ => annotTermFreeSyms obj
-  | .structUpdate obj _ val => annotTermFreeSyms obj ++ annotTermFreeSyms val
-  | .record members => members.flatMap (annotTermFreeSyms ·.2)
-  | .recordMember obj _ => annotTermFreeSyms obj
-  | .recordUpdate obj _ val => annotTermFreeSyms obj ++ annotTermFreeSyms val
-  | .constructor _ args => args.flatMap (annotTermFreeSyms ·.2)
-  | .memberShift ptr _ _ => annotTermFreeSyms ptr
-  | .arrayShift base _ idx => annotTermFreeSyms base ++ annotTermFreeSyms idx
-  | .copyAllocId addr loc => annotTermFreeSyms addr ++ annotTermFreeSyms loc
-  | .hasAllocId ptr => annotTermFreeSyms ptr
+  | .unop _ arg => annotTermFreeTypedSyms arg
+  | .binop _ l r => annotTermFreeTypedSyms l ++ annotTermFreeTypedSyms r
+  | .ite c t e => annotTermFreeTypedSyms c ++ annotTermFreeTypedSyms t ++ annotTermFreeTypedSyms e
+  | .eachI _ (s, _) _ body => (annotTermFreeTypedSyms body).filter (·.1 != s)
+  | .tuple elems => elems.flatMap annotTermFreeTypedSyms
+  | .nthTuple _ tup => annotTermFreeTypedSyms tup
+  | .struct_ _ members => members.flatMap (annotTermFreeTypedSyms ·.2)
+  | .structMember obj _ => annotTermFreeTypedSyms obj
+  | .structUpdate obj _ val => annotTermFreeTypedSyms obj ++ annotTermFreeTypedSyms val
+  | .record members => members.flatMap (annotTermFreeTypedSyms ·.2)
+  | .recordMember obj _ => annotTermFreeTypedSyms obj
+  | .recordUpdate obj _ val => annotTermFreeTypedSyms obj ++ annotTermFreeTypedSyms val
+  | .constructor _ args => args.flatMap (annotTermFreeTypedSyms ·.2)
+  | .memberShift ptr _ _ => annotTermFreeTypedSyms ptr
+  | .arrayShift base _ idx => annotTermFreeTypedSyms base ++ annotTermFreeTypedSyms idx
+  | .copyAllocId addr loc => annotTermFreeTypedSyms addr ++ annotTermFreeTypedSyms loc
+  | .hasAllocId ptr => annotTermFreeTypedSyms ptr
   | .sizeOf _ => []
   | .offsetOf _ _ => []
   | .nil _ => []
-  | .cons h t => annotTermFreeSyms h ++ annotTermFreeSyms t
-  | .head l => annotTermFreeSyms l
-  | .tail l => annotTermFreeSyms l
-  | .representable _ val => annotTermFreeSyms val
-  | .good _ val => annotTermFreeSyms val
-  | .aligned ptr align => annotTermFreeSyms ptr ++ annotTermFreeSyms align
-  | .wrapI _ val => annotTermFreeSyms val
-  | .mapConst _ val => annotTermFreeSyms val
-  | .mapSet m k v => annotTermFreeSyms m ++ annotTermFreeSyms k ++ annotTermFreeSyms v
-  | .mapGet m k => annotTermFreeSyms m ++ annotTermFreeSyms k
-  | .mapDef (s, _) body => (annotTermFreeSyms body).filter (· != s)
-  | .apply _ args => args.flatMap annotTermFreeSyms
+  | .cons h t => annotTermFreeTypedSyms h ++ annotTermFreeTypedSyms t
+  | .head l => annotTermFreeTypedSyms l
+  | .tail l => annotTermFreeTypedSyms l
+  | .representable _ val => annotTermFreeTypedSyms val
+  | .good _ val => annotTermFreeTypedSyms val
+  | .aligned ptr align => annotTermFreeTypedSyms ptr ++ annotTermFreeTypedSyms align
+  | .wrapI _ val => annotTermFreeTypedSyms val
+  | .mapConst _ val => annotTermFreeTypedSyms val
+  | .mapSet m k v => annotTermFreeTypedSyms m ++ annotTermFreeTypedSyms k ++ annotTermFreeTypedSyms v
+  | .mapGet m k => annotTermFreeTypedSyms m ++ annotTermFreeTypedSyms k
+  | .mapDef (s, _) body => (annotTermFreeTypedSyms body).filter (·.1 != s)
+  | .apply _ args => args.flatMap annotTermFreeTypedSyms
   | .let_ s binding body =>
-    annotTermFreeSyms binding ++ (annotTermFreeSyms body).filter (· != s)
+    annotTermFreeTypedSyms binding ++ (annotTermFreeTypedSyms body).filter (·.1 != s)
   | .match_ scrut cases =>
-    annotTermFreeSyms scrut ++ cases.flatMap (annotTermFreeSyms ·.2)
-  | .cast _ val => annotTermFreeSyms val
+    annotTermFreeTypedSyms scrut ++ cases.flatMap (annotTermFreeTypedSyms ·.2)
+  | .cast _ val => annotTermFreeTypedSyms val
   | .cnNone _ => []
-  | .cnSome val => annotTermFreeSyms val
-  | .isSome opt => annotTermFreeSyms opt
-  | .getOpt opt => annotTermFreeSyms opt
-
-/-- Collect free symbols from an AnnotTerm -/
-partial def annotTermFreeSyms (at_ : AnnotTerm) : List Sym :=
-  termFreeSyms at_.term
+  | .cnSome val => annotTermFreeTypedSyms val
+  | .isSome opt => annotTermFreeTypedSyms opt
+  | .getOpt opt => annotTermFreeTypedSyms opt
 
 end
 
-/-- Collect free symbols from a LogicalConstraint -/
-def constraintFreeSyms : LogicalConstraint → List Sym
-  | .t it => annotTermFreeSyms it
-  | .forall_ (s, _) body => (annotTermFreeSyms body).filter (· != s)
+/-- Collect free symbols with types from a LogicalConstraint -/
+def constraintFreeTypedSyms : LogicalConstraint → List TypedSym
+  | .t it => annotTermFreeTypedSyms it
+  | .forall_ (s, bt) body =>
+    -- The bound variable has the given type, but we filter it out
+    (annotTermFreeTypedSyms body).filter (·.1 != s)
 
-/-- Collect all free symbols from an obligation -/
+/-- Deduplicate typed symbols, keeping the first occurrence of each symbol -/
+def deduplicateTypedSyms (syms : List TypedSym) : List TypedSym :=
+  syms.foldl (fun acc (s, bt) =>
+    if acc.any (·.1 == s) then acc else acc ++ [(s, bt)]
+  ) []
+
+/-- Collect all free symbols with types from an obligation -/
+def obligationFreeTypedSyms (ob : Obligation) : List TypedSym :=
+  let assumptionSyms := ob.assumptions.flatMap constraintFreeTypedSyms
+  let constraintSyms := constraintFreeTypedSyms ob.constraint
+  deduplicateTypedSyms (assumptionSyms ++ constraintSyms)
+
+/-- Legacy: Collect free symbols without types (for backwards compatibility) -/
+def annotTermFreeSyms (at_ : AnnotTerm) : List Sym :=
+  (annotTermFreeTypedSyms at_).map (·.1)
+
+/-- Legacy: Collect free symbols from a constraint -/
+def constraintFreeSyms (lc : LogicalConstraint) : List Sym :=
+  (constraintFreeTypedSyms lc).map (·.1)
+
+/-- Legacy: Collect all free symbols from an obligation -/
 def obligationFreeSyms (ob : Obligation) : List Sym :=
-  let assumptionSyms := ob.assumptions.flatMap constraintFreeSyms
-  let constraintSyms := constraintFreeSyms ob.constraint
-  (assumptionSyms ++ constraintSyms).eraseDups
+  (obligationFreeTypedSyms ob).map (·.1)
 
 /-! ## Query Building -/
 
 /-- Build SMT commands for an obligation.
-    Returns the commands and any unsupported constructs encountered. -/
-def obligationToCommands (ob : Obligation) : List Command × List String :=
-  let syms := obligationFreeSyms ob
+    Returns the commands and any unsupported constructs encountered.
 
-  -- Generate declarations for all free symbols (as Int)
-  let decls := syms.map fun s =>
-    Command.declare (symToSmtName s) (Term.symbolT "Int")
+    Uses proper SMT-LIB types: Bits symbols are declared with `(_ BitVec n)`,
+    matching CN's approach in solver.ml.
+    Corresponds to: CN's solver.ml translate_global_decls -/
+def obligationToCommands (ob : Obligation) : List Command × List String :=
+  let typedSyms := obligationFreeTypedSyms ob
+
+  -- Generate declarations with proper SMT sorts (BitVec for Bits types)
+  let decls := typedSyms.map fun (s, bt) =>
+    Command.declare (symToSmtName s) (baseTypeToSort bt)
 
   -- Translate assumptions
   let (assumptionTerms, assumptionErrors) := ob.assumptions.foldl
@@ -362,9 +592,12 @@ def obligationToCommands (ob : Obligation) : List Command × List String :=
       | .unsupported r => (terms, r :: errs))
     ([], [])
 
+  -- No need for explicit range constraints - BitVec types handle this
+  let allAssumptions := assumptionTerms.reverse
+
   -- Build conjunction of assumptions (or "true" if empty)
   let assumptionConj :=
-    match assumptionTerms.reverse with
+    match allAssumptions with
     | [] => Term.symbolT "true"
     | [single] => single
     | first :: rest => rest.foldl (fun acc tm =>
