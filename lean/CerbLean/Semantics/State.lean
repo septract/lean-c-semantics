@@ -412,8 +412,7 @@ def matchPatternBindings (pat : Pattern) (val : Value) : Option (List (Sym × Va
   | _, .unit =>
     -- Match unit value
     if let .base none .unit := pat then some [] else none
-  | _, _ =>
-    none
+  | _, _ => none
 
 /-- Helper: match a list of patterns against a list of values -/
 def matchPatternBindingsAll (pats : List Pattern) (vals : List Value) : Option (List (Sym × Value)) :=
