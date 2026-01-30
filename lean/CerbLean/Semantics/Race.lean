@@ -108,13 +108,13 @@ Corresponds to: neg_action_trans in core_reduction.lem:1285-1302
 -/
 
 /-- Add an exclusion ID to a single annotation's exclusion set.
-    Corresponds to: add_exclusion_to_dyn_annot in core_reduction.lem:192-194 -/
+    Corresponds to: inner logic of add_exclusion in core_reduction.lem:935-940 -/
 def addExclusionToAnnot (n : Nat) : DynAnnotation → DynAnnotation
   | .neg id es fp => .neg id (n :: es) fp
   | .pos es fp => .pos (n :: es) fp
 
 /-- Add an exclusion ID to all annotations' exclusion sets.
-    Corresponds to: add_exclusion in core_reduction.lem:196-197 -/
+    Corresponds to: add_exclusion in core_reduction.lem:925-944 -/
 def addExclusionToAnnots (n : Nat) (annots : DynAnnotations) : DynAnnotations :=
   annots.map (addExclusionToAnnot n)
 

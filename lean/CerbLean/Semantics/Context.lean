@@ -55,13 +55,19 @@ let is_irreducible = function
 
 /-- Check if an expression is irreducible (a value or annotated value).
     Irreducible expressions cannot be reduced further within an unseq context.
-    Corresponds to: core_reduction.lem:181-194 -/
+    Corresponds to: core_reduction.lem:181-194
+    Audited: 2026-01-30
+    Deviations: CerbLean catches {A}{A}_ (any nested annotations) while Cerberus
+    specifically checks {A}{A}v (nested around value). This is functionally equivalent
+    because Cerberus's `_ -> false` fallthrough catches all other nested cases anyway.
+    Both return false for all nested annotation patterns. -/
 def isIrreducible : AExpr → Bool
   -- v (pure value)
   | ⟨_, .pure ⟨_, _, .val _⟩⟩ => true
   -- {A}v (annotated value)
   | ⟨_, .annot _ ⟨_, .pure ⟨_, _, .val _⟩⟩⟩ => true
-  -- {A}{A}e (nested annotations) - NOT irreducible, needs reduction
+  -- {A}{A}_ (nested annotations) - NOT irreducible, needs reduction via ANNOTS rule
+  -- Note: Cerberus checks {A}{A}v specifically, but falls through to `_ -> false` for others
   | ⟨_, .annot _ ⟨_, .annot _ _⟩⟩ => false
   -- Everything else is reducible
   | _ => false
@@ -218,12 +224,13 @@ partial def getCtxUnseqAux (annots : Annots) (acc : List (Context × AExpr))
         getCtxUnseqAux annots acc (before ++ [e]) after
       else
         -- Found reducible expression: add all its decompositions
+        -- Corresponds to: core_reduction.lem:583-587
+        -- Audited: 2026-01-30
+        -- Deviations: None
         let zs := (getCtx e).map fun (innerCtx, inner) =>
           (Context.unseq annots before innerCtx after, inner)
         -- Continue with remaining expressions (e added to "before")
-        -- Use acc ++ zs (not zs ++ acc) so leftmost expressions come first
-        -- This ensures deterministic left-to-right execution picks the correct branch
-        getCtxUnseqAux annots (acc ++ zs) (before ++ [e]) after
+        getCtxUnseqAux annots (zs ++ acc) (before ++ [e]) after
 
 end
 
