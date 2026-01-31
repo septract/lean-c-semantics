@@ -193,19 +193,32 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
       k (AnnotTerm.mk (.apply fnSym argVals) resultBt loc)
 
   -- Unsequenced (for sequential, pick first ordering)
-  -- Corresponds to: Eunseq case in check.ml
+  -- Corresponds to: Eunseq case in check.ml lines 2020-2029
+  --
+  -- | Eunseq es ->
+  --   let rec aux es vs =
+  --     match es with
+  --     | e :: es' -> check_expr labels e (fun v -> aux es' (v :: vs))
+  --     | [] -> k (tuple_ (List.rev vs) loc)
+  --   in aux es []
+  --
+  -- Key insight: unseq returns a TUPLE of all sub-expression results.
+  -- This is critical for patterns like `let (a, b) = unseq(e1, e2)`.
   | .unseq es =>
     if es.isEmpty then
       k (mkUnitTermExpr loc)
     else
-      -- Execute in order, continuation called at end
-      let rec execSeq (remaining : List AExpr) : TypingM Unit := do
+      -- Check each expression, collecting results in accumulator
+      let rec aux (remaining : List AExpr) (acc : List IndexTerm) : TypingM Unit := do
         match remaining with
-        | [] => k (mkUnitTermExpr loc)
-        | [e'] => checkExpr labels e' k
+        | [] =>
+          -- Create tuple from accumulated results (reversed to match order)
+          let results := acc.reverse
+          let tupleBt := BaseType.unit  -- TODO: proper tuple type
+          k (AnnotTerm.mk (.tuple results) tupleBt loc)
         | e' :: rest =>
-          checkExpr labels e' fun _ => execSeq rest
-      execSeq es
+          checkExpr labels e' fun v => aux rest (v :: acc)
+      aux es []
 
   -- Bound (resource boundary)
   -- Corresponds to: Ebound case in check.ml

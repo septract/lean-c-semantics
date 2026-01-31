@@ -292,6 +292,12 @@ partial def bindPattern (pat : APattern) (value : IndexTerm) : TypingM PatternBi
       -- But `loaded integer` doesn't carry sign/width info - we need the actual value type.
       -- When the bound value has a Bits type, use that for loaded elements.
       -- This matches CN's muCore where the loaded value type comes from the resource, not the pattern.
+      --
+      -- Key insight: when value is a tuple term, extract element types from it.
+      -- This is needed for patterns like (Specified(a), Specified(b)) matching unseq results.
+      let tupleElems : List AnnotTerm := match value.term with
+        | .tuple elems => elems
+        | _ => []  -- Not a tuple term - will fall back to pattern types
       let mut allBindings : List (Sym × BaseType) := []
       let mut idx := 0
       for innerPat in args do
@@ -303,6 +309,9 @@ partial def bindPattern (pat : APattern) (value : IndexTerm) : TypingM PatternBi
         let projId := state.freshCounter
         TypingM.modifyState fun s => { s with freshCounter := s.freshCounter + 1 }
         -- Extract type from the inner pattern, with special handling for loaded types
+        -- Also check if value is a tuple and use element type
+        let elemType : Option BaseType :=
+          if h : idx < tupleElems.length then some (tupleElems.get ⟨idx, h⟩).bt else none
         let projBt := match innerPat with
           | .base _ bt =>
             match bt with
@@ -310,12 +319,20 @@ partial def bindPattern (pat : APattern) (value : IndexTerm) : TypingM PatternBi
               -- For loaded types, prefer the actual value type if available
               -- This handles the case where Core says "loaded integer" but we know
               -- the actual type is Bits(signed, 32) from the resource
-              match value.bt with
+              match elemType with
+              | some (.bits sign width) => .bits sign width
+              | some .integer => .integer
+              | _ =>
+                match value.bt with
                 | .bits sign width => .bits sign width
                 | .integer => .integer
                 | _ => coreBaseTypeToCN bt  -- fallback to conversion
             | _ => coreBaseTypeToCN bt
-          | _ => value.bt  -- fallback
+          | .ctor _ _ =>
+            -- Constructor pattern (like Specified): use element type from tuple
+            match elemType with
+            | some bt => bt
+            | none => value.bt  -- fallback if not a tuple
         let projSym : Sym := { id := projId, name := some s!"proj_{idx}" }
         let projTerm : IndexTerm := AnnotTerm.mk (.sym projSym) projBt value.loc
         -- Recursively bind the inner pattern
@@ -452,15 +469,22 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
 
   -- Constructor
   | .ctor c args =>
-    let argTerms ← args.mapM fun arg => do
-      let peArg : APexpr := ⟨[], none, arg⟩
-      checkPexpr peArg
+    -- For Specified, we need to pass expected type to get correct literal types
+    -- The outer type (pe.ty) tells us what type the Specified value should have
     let resBt := pe.ty.map coreBaseTypeToCN |>.getD .unit
     match c with
     | .tuple =>
+      let argTerms ← args.mapM fun arg => do
+        let peArg : APexpr := ⟨[], none, arg⟩
+        checkPexpr peArg
       return AnnotTerm.mk (.tuple argTerms) resBt loc
     | .specified =>
       -- Specified(value) - the value is known/defined
+      -- Pass the expected type to the argument so literals get correct types
+      -- For loaded integer, use the result type for the inner value
+      let argTerms ← args.mapM fun arg => do
+        let peArg : APexpr := ⟨[], pe.ty, arg⟩  -- Use outer type for argument
+        checkPexpr peArg (some resBt)  -- Pass expected type
       -- Just unwrap and return the inner value
       match argTerms with
       | [innerVal] => return innerVal
@@ -473,6 +497,10 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
     | _ =>
       -- Other constructors (nil, cons, array, etc.) - create a symbolic term
       -- This is a simplification; full support would track list/array values
+      -- Check arguments without expected type (general case)
+      let _argTerms ← args.mapM fun arg => do
+        let peArg : APexpr := ⟨[], none, arg⟩
+        checkPexpr peArg
       let state ← TypingM.getState
       let ctorSym : Sym := { id := state.freshCounter, name := some s!"ctor_{repr c}" }
       TypingM.modifyState fun s => { s with freshCounter := s.freshCounter + 1 }

@@ -366,6 +366,11 @@ def requireConstraint (lc : LogicalConstraint) (loc : Loc) (desc : String := "co
     -- New behavior: accumulate obligation for post-hoc discharge
     -- Capture current constraints as assumptions
     let assumptions ← getConstraints
+    dbg_trace s!"DEBUG requireConstraint: {desc}"
+    match lc with
+    | .t it => dbg_trace s!"DEBUG requireConstraint: T constraint, type={repr it.bt}"
+    | .forall_ _ _ => dbg_trace s!"DEBUG requireConstraint: Forall constraint"
+    dbg_trace s!"DEBUG requireConstraint: #assumptions = {assumptions.length}"
     let ob := Obligation.arithmetic desc lc assumptions loc
     addObligation ob
   else

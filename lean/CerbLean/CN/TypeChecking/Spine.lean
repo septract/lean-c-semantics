@@ -151,6 +151,8 @@ where
       -- Corresponds to: check.ml lines 1163-1173
       -- Pass expected type to checkPexprK for type-aware literal creation
       checkPexprK arg (fun argVal => do
+        dbg_trace s!"DEBUG spine: arg type = {repr argVal.bt}, expected = {repr bt}"
+        dbg_trace s!"DEBUG spine: substituting for s = {s.name.getD "<unnamed>"} id={s.id}"
         -- Substitute arg value for parameter in rest of type
         let σ := Subst.single s argVal
         let rest' := AT.subst (fun _ x => x) σ rest  -- No inner subst needed for False

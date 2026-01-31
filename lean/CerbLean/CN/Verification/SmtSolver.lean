@@ -75,6 +75,7 @@ def checkObligation
     (path : Option String := none) : IO ObligationResult := do
   -- Translate to SMT terms
   let (queryStr, errors) := obligationToSmtLib2 ob
+  dbg_trace s!"DEBUG SMT query:\n{queryStr}"
 
   -- If there are unsupported constructs, report them
   if !errors.isEmpty then

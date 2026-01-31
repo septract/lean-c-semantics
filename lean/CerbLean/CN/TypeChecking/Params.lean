@@ -233,9 +233,17 @@ def checkFunctionWithParams
     -- We use Core params for symbol IDs and C params for value types.
     -- In Core, all parameters are stack slot pointers. In CN, parameters are direct values.
     -- The C type tells us what type the VALUE has (e.g., int, not pointer-to-stack-slot).
+    --
+    -- Fresh ID strategy (matching CN's approach):
+    -- CN uses a global counter for fresh IDs that never collides with Cerberus IDs.
+    -- We compute the max param ID and start our fresh counter from there.
+    -- This ensures fresh symbols (like `return`) get unique IDs.
+    let maxParamId := params.foldl (init := 0) fun acc (sym, _) => max acc sym.id
+    let initialFreshId := maxParamId + 1
+
     let setupResult : Except String (Context × ParamValueMap × Nat × List (Sym × BaseType)) :=
       params.zip cParams |>.foldlM
-        (init := (Context.empty, ({} : ParamValueMap), 0, []))
+        (init := (Context.empty, ({} : ParamValueMap), initialFreshId, []))
         fun (ctx, pvm, nextId, cnParamAcc) ((coreSym, _coreBt), (_, ctype)) =>
           -- Use C type to get the actual value type
           match tryCtypeToCN ctype with
