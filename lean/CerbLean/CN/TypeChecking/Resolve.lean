@@ -160,9 +160,13 @@ def needsResolution (s : Sym) : Bool :=
 
 /-- Resolve a symbol using the context.
     Returns the resolved symbol AND its type.
-    If not found, returns the original symbol with unit type (error case). -/
+    If not found, returns the original symbol with unit type (error case).
+
+    Note: Symbols created by `fresh()` have non-zero IDs but ARE in the context
+    with their types. We must look them up to preserve type information. -/
 def resolveSymWithType (ctx : ResolveContext) (s : Sym) : Sym × BaseType :=
   if needsResolution s then
+    -- Placeholder symbol (ID = 0): resolve by name and get new ID + type
     match s.name with
     | some name =>
       match ctx.lookup name with
@@ -170,7 +174,13 @@ def resolveSymWithType (ctx : ResolveContext) (s : Sym) : Sym × BaseType :=
       | none => (s, .unit)  -- Not found - keep original with unit type
     | none => (s, .unit)  -- No name - keep original
   else
-    (s, .unit)  -- Already resolved - we don't have type info
+    -- Already has ID: still look up by name to get type (fresh symbols need this)
+    match s.name with
+    | some name =>
+      match ctx.lookup name with
+      | some (_, bt) => (s, bt)  -- Keep symbol ID, use type from context
+      | none => (s, .unit)  -- Not in context - use unit type
+    | none => (s, .unit)  -- No name - use unit type
 
 /-- Resolve a symbol using the context (symbol only, for backwards compat). -/
 def resolveSym (ctx : ResolveContext) (s : Sym) : Sym :=
