@@ -172,54 +172,29 @@ def checkNoLeakedResources : TypingM Unit := do
     -- A strict implementation would fail here
     TypingM.fail (.other s!"Leaked resources: {ctx.resources.length} resource(s) not consumed")
 
-/-- Type check a function body against its specification (CPS style).
+/-- Type check a function body against its specification.
 
-    The process:
-    1. Process precondition: add resources to context as assumptions
-    2. Check body expression with postcondition continuation
-    3. At each exit point, the continuation:
-       - Processes postcondition (generates obligations for resources and constraints)
-       - Checks no resources leaked
+    **DEPRECATED**: This simplified function is for spec-only checking.
+    For full body verification with proper CN-matching semantics
+    (including parameter handling and label contexts), use
+    `checkFunctionWithParams` from CerbLean.CN.TypeChecking.Params instead.
 
-    Returns TypeCheckResult with accumulated proof obligations.
-    Obligations are discharged separately (Phase 4).
+    This function only checks the spec (precondition/postcondition) without
+    verifying the body, since body verification requires:
+    - Parameter mapping (ParamValueMap)
+    - Return type (for LabelContext)
+    - muCore transformation (LabelDefs)
 
-    Corresponds to: check_procedure in check.ml lines 2377-2426 -/
+    Corresponds to: checkFunctionSpec for spec-only checking -/
 def checkFunction
     (spec : FunctionSpec)
-    (body : Core.AExpr)
+    (_body : Core.AExpr)
     (loc : Loc)
     : TypeCheckResult :=
-  -- For trusted specs, skip verification
-  if spec.trusted then
-    TypeCheckResult.ok
-  else
-    -- Run type checking with obligation accumulation enabled
-    let initialState : TypingState := {
-      context := Context.empty
-      oracle := .trivial  -- Not used when accumulating obligations
-      accumulateObligations := true
-    }
-
-    let computation : TypingM Unit := do
-      -- 1. Process precondition: add resources to context, bind outputs
-      processPrecondition spec.requires loc
-
-      -- 2. Check the body with a continuation that handles postcondition
-      --    The continuation is called at each exit point of the function
-      let postconditionK (_returnVal : IndexTerm) : TypingM Unit := do
-        -- Process postcondition: consume final resources, generate obligations
-        processPostcondition spec.ensures loc
-        -- Check no resources leaked (must all be consumed or returned)
-        checkNoLeakedResources
-
-      checkExprK body postconditionK
-
-    match TypingM.run computation initialState with
-    | .ok (_, finalState) =>
-      TypeCheckResult.okWithObligations finalState.obligations
-    | .error err =>
-      TypeCheckResult.fail (toString err)
+  -- Delegate to spec-only checking since we don't have the full context
+  -- needed for CN-matching body verification (params, return type, etc.)
+  let initialResources := extractPreconditionResources spec
+  checkFunctionSpec spec initialResources loc
 
 /-! ## Convenience Functions -/
 

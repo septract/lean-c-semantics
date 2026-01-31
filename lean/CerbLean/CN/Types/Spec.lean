@@ -64,9 +64,37 @@ structure Postcondition where
   clauses : List Clause
   deriving Inhabited
 
+/-! ## Substitution for Clauses and Postconditions
+
+Corresponds to: LRT.subst in cn/lib/logicalReturnTypes.ml
+Used to substitute the return symbol with the actual return value.
+-/
+
+/-- Substitute in a clause -/
+def Clause.subst (σ : Subst) : Clause → Clause
+  | .resource n r => .resource n r  -- TODO: subst in resource if needed
+  | .constraint assertion => .constraint (assertion.subst σ)
+
+/-- Substitute in a postcondition.
+    Corresponds to: LRT.subst in logicalReturnTypes.ml -/
+def Postcondition.subst (σ : Subst) (post : Postcondition) : Postcondition :=
+  { clauses := post.clauses.map (Clause.subst σ) }
+
 /-- Complete function specification
-    Combines precondition and postcondition -/
+    Combines precondition and postcondition.
+
+    Corresponds to: RT.Computational in cn/lib/returnTypes.ml
+    The return symbol is created fresh during parsing and used for
+    `return` references in the postcondition. During type checking,
+    this symbol is substituted with the actual return value.
+
+    Audited: 2026-01-27 against cn/lib/returnTypes.ml, core_to_mucore.ml:1164 -/
 structure FunctionSpec where
+  /-- Symbol for the return value, used in postcondition constraints.
+      This is created fresh during parsing and resolved when `return`
+      appears in the ensures clause.
+      Corresponds to: ret_s in core_to_mucore.ml line 1164 -/
+  returnSym : Sym
   /-- Precondition (requires) -/
   requires : Precondition
   /-- Postcondition (ensures) -/

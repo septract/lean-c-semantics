@@ -14,6 +14,7 @@ import CerbLean.CN.Types.Term
 import CerbLean.CN.Types.Constraint
 import CerbLean.CN.Types.Resource
 import CerbLean.CN.Types.Spec
+import CerbLean.CN.Types.ArgumentTypes
 
 namespace CerbLean.CN.Types
 

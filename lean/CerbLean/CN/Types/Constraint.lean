@@ -35,6 +35,18 @@ inductive LogicalConstraint where
   | forall_ : (Sym × BaseType) → IndexTerm → LogicalConstraint
   deriving Inhabited
 
+namespace LogicalConstraint
+
+/-- Substitute in a logical constraint.
+    Corresponds to: LC.subst in cn/lib/logicalConstraints.ml -/
+def subst (σ : Subst) : LogicalConstraint → LogicalConstraint
+  | .t term => .t (term.subst σ)
+  | .forall_ binding body =>
+    -- Note: should alpha-rename if binding symbol is in σ, but we simplify
+    .forall_ binding (body.subst σ)
+
+end LogicalConstraint
+
 /-! ## Logical Constraint Set
 
 Corresponds to: cn/coq/Cn/LogicalConstraints.v lines 36-40

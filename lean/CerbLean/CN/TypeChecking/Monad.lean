@@ -19,11 +19,13 @@
 import CerbLean.CN.TypeChecking.Context
 import CerbLean.CN.Types
 import CerbLean.CN.Verification.Obligation
+import CerbLean.Core.MuCore
 import Std.Data.HashMap
 
 namespace CerbLean.CN.TypeChecking
 
 open CerbLean.Core (Sym Loc)
+open CerbLean.Core.MuCore (LabelDefs LabelDef LabelInfo)
 open CerbLean.CN.Types
 open CerbLean.CN.Verification
 
@@ -163,10 +165,17 @@ structure TypingState where
   /-- Parameter value mapping: stack slot ID → value term
       Corresponds to: C_vars state in cn/lib/compile.ml -/
   paramValues : ParamValueMap := {}
+  /-- Label definitions from muCore transformation.
+      Maps label symbols to their definitions (return vs regular).
+      Corresponds to: mi_label_defs in milicore.ml -/
+  labelDefs : LabelDefs := []
   /-- Accumulated proof obligations (new: for post-hoc discharge) -/
   obligations : ObligationSet := []
   /-- Whether to accumulate obligations instead of checking immediately -/
   accumulateObligations : Bool := false
+  /-- Whether this execution path has returned.
+      When true, subsequent code should be skipped (return is terminal). -/
+  hasReturned : Bool := false
   deriving Inhabited
 
 namespace TypingState
@@ -227,6 +236,20 @@ def modifyState (f : TypingState → TypingState) : TypingM Unit := do
 def getContext : TypingM Context := do
   let s ← getState
   return s.context
+
+/-- Get the label definitions -/
+def getLabelDefs : TypingM LabelDefs := do
+  let s ← getState
+  return s.labelDefs
+
+/-- Check if the current path has returned -/
+def hasReturned : TypingM Bool := do
+  let s ← getState
+  return s.hasReturned
+
+/-- Mark the current path as having returned -/
+def setReturned : TypingM Unit := do
+  modifyState fun s => { s with hasReturned := true }
 
 /-- Set the typing context -/
 def setContext (ctx : Context) : TypingM Unit := do
@@ -425,18 +448,25 @@ def getParamValues : TypingM ParamValueMap := do
 Corresponds to: pure in typing.ml lines 67-72
 -/
 
-/-- Run a computation without modifying the state (for speculative checking).
-    The computation is executed and its result returned, but state changes
+/-- Run a computation without modifying most state (for speculative checking).
+    The computation is executed and its result returned, but most state changes
     are discarded. Errors still propagate.
 
+    IMPORTANT: Obligations are PRESERVED even when state is restored.
+    This is crucial for CPS-style checking where branches call the same
+    continuation independently. Each branch may generate obligations that
+    must all be checked.
+
     Used for branch checking in CPS: each branch is checked speculatively
-    with state restored afterward.
+    with state restored afterward, but obligations from all branches accumulate.
 
     Corresponds to: pure in typing.ml lines 67-72 -/
 def pure_ (m : TypingM α) : TypingM α := do
   let s ← getState
   let result ← m
-  setState s
+  -- Preserve obligations from the branch, restore everything else
+  let newObligations ← getObligations
+  setState { s with obligations := newObligations }
   return result
 
 end TypingM

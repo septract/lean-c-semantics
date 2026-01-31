@@ -1,0 +1,315 @@
+/-
+  CN Argument Types
+  Corresponds to: cn/lib/argumentTypes.ml and cn/lib/logicalArgumentTypes.ml
+
+  This module defines the exact type structures CN uses for function/label types:
+  - LogicalArgumentTypes (LAT): The logical part (Define, Resource, Constraint, I)
+  - ArgumentTypes (AT): Full argument type (Computational, Ghost, L)
+
+  Type aliases:
+  - FT = AT RT    (function type, returns RT)
+  - LT = AT False (label type, returns False - uninhabited/terminal)
+
+  Audited: 2026-01-28 against cn/lib/argumentTypes.ml, logicalArgumentTypes.ml
+-/
+
+import CerbLean.CN.Types.Resource
+import CerbLean.CN.Types.Constraint
+import CerbLean.CN.Types.Spec
+import CerbLean.Core.MuCore
+
+namespace CerbLean.CN.Types
+
+open CerbLean.Core (Sym Loc)
+
+/-! ## Info Type
+
+Corresponds to: info in cn/lib/*.ml
+Location and lazy description for error messages.
+-/
+
+/-- Info attached to argument type nodes.
+    Corresponds to: info = Locations.t * Pp.document Lazy.t -/
+structure Info where
+  loc : Loc
+  desc : String := ""
+  deriving Inhabited
+
+/-! ## False Type (Uninhabited)
+
+Corresponds to: cn/lib/false.ml
+
+type t = False
+
+This is an uninhabited type used for label types to indicate they never
+return normally. In CN, when you have `AT.lt = False.t AT.t`, the inner
+`LAT.I False.False` case can never be reached at runtime because return
+labels are terminal.
+-/
+
+/-- False type (uninhabited).
+    Used for label types to indicate they never return normally.
+    Corresponds to: type t = False in cn/lib/false.ml
+
+    We use Lean's standard Empty type which is uninhabited. -/
+abbrev False_ := Empty
+
+/-! ## Logical Argument Types (LAT)
+
+Corresponds to: cn/lib/logicalArgumentTypes.ml
+
+The logical part of an argument type. Processes:
+- Define: bind a logical variable with a computed value
+- Resource: consume/produce a resource
+- Constraint: add/verify a constraint
+- I: the inner return type
+-/
+
+/-- Logical argument type, parameterized by inner return type.
+    Corresponds to: 'i t in logicalArgumentTypes.ml
+
+    type 'i t =
+      | Define of (Sym.t * IT.t) * info * 'i t
+      | Resource of (Sym.t * (Req.t * BT.t)) * info * 'i t
+      | Constraint of LC.t * info * 'i t
+      | I of 'i
+
+    We add a `terminal` constructor for label types (where α = False_/Empty).
+    In CN's OCaml, this is handled by `LAT.I False.False` which can never be
+    pattern-matched. In Lean, we make this explicit to avoid runtime panics. -/
+inductive LAT (α : Type) where
+  /-- Define a logical variable with a value.
+      `Define (name, value) info rest` means: let name = value in rest -/
+  | define_ (name : Sym) (value : IndexTerm) (info : Info) (rest : LAT α)
+  /-- Resource clause: consume/produce a resource.
+      The name binds the resource output value. -/
+  | resource (name : Sym) (request : Request) (outputBt : BaseType) (info : Info) (rest : LAT α)
+  /-- Constraint clause: a logical constraint to verify/assume. -/
+  | constraint (lc : LogicalConstraint) (info : Info) (rest : LAT α)
+  /-- Inner return type (base case). -/
+  | I (inner : α)
+  /-- Terminal case for label types. Corresponds to LAT.I False.False in CN.
+      When spineL reaches this, processing is complete and no continuation is called. -/
+  | terminal
+
+namespace LAT
+
+/-- Substitute in a LAT.
+    Corresponds to: LAT.subst in logicalArgumentTypes.ml -/
+partial def subst {α : Type} (innerSubst : Subst → α → α) (σ : Subst) : LAT α → LAT α
+  | .define_ name value info rest =>
+    -- Note: should alpha-rename if name is in σ.relevant, but we simplify
+    .define_ name (value.subst σ) info (subst innerSubst σ rest)
+  | .resource name req bt info rest =>
+    .resource name req bt info (subst innerSubst σ rest)  -- TODO: subst in request
+  | .constraint lc info rest =>
+    .constraint (lc.subst σ) info (subst innerSubst σ rest)
+  | .I inner => .I (innerSubst σ inner)
+  | .terminal => .terminal
+
+/-- Convert a Postcondition (list of clauses) to LAT.
+    Corresponds to: LAT.of_lrt in logicalArgumentTypes.ml line 181
+
+    This converts our simplified Postcondition representation to the
+    exact LAT structure CN uses.
+
+    rec of_lrt (lrt : LRT.t) (rest : 'i t) : 'i t =
+      match lrt with
+      | LRT.I () -> rest
+      | LRT.Define ((name, it), info, args) -> Define ((name, it), info, of_lrt args rest)
+      | LRT.Resource ((name, t), info, args) -> Resource ((name, t), info, of_lrt args rest)
+      | LRT.Constraint (t, info, args) -> Constraint (t, info, of_lrt args rest) -/
+def ofPostcondition {α : Type} (post : Postcondition) (rest : LAT α) : LAT α :=
+  -- Our Postcondition is a list of clauses, so we fold right
+  post.clauses.foldr (init := rest) fun clause acc =>
+    match clause with
+    | .resource name res =>
+      -- Resource clause: the name binds the resource output
+      -- Resource has: request : Request, output : Output
+      -- We create a new Request from the Resource's request
+      .resource name
+                res.request
+                res.output.value.bt
+                { loc := res.output.value.loc }
+                acc
+    | .constraint assertion =>
+      .constraint (.t assertion) { loc := assertion.loc } acc
+
+end LAT
+
+/-! ## Argument Types (AT)
+
+Corresponds to: cn/lib/argumentTypes.ml
+
+Full argument type including computational and ghost arguments.
+-/
+
+/-- Argument type, parameterized by inner return type.
+    Corresponds to: 'i t in argumentTypes.ml
+
+    type 'i t =
+      | Computational of (Sym.t * BT.t) * info * 'i t
+      | Ghost of (Sym.t * BT.t) * info * 'i t
+      | L of 'i LAT.t -/
+inductive AT (α : Type) where
+  /-- Computational argument (runtime value). -/
+  | computational (name : Sym) (bt : BaseType) (info : Info) (rest : AT α)
+  /-- Ghost argument (logical only, not in runtime). -/
+  | ghost (name : Sym) (bt : BaseType) (info : Info) (rest : AT α)
+  /-- Logical part (LAT). -/
+  | L (lat : LAT α)
+
+namespace AT
+
+/-- Substitute in an AT.
+    Corresponds to: AT.subst in argumentTypes.ml -/
+partial def subst {α : Type} (innerSubst : Subst → α → α) (σ : Subst) : AT α → AT α
+  | .computational name bt info rest =>
+    .computational name bt info (subst innerSubst σ rest)
+  | .ghost name bt info rest =>
+    .ghost name bt info (subst innerSubst σ rest)
+  | .L lat => .L (LAT.subst innerSubst σ lat)
+
+/-- Create an argument type from a function spec (return type).
+    Corresponds to: AT.of_rt in argumentTypes.ml line 121
+
+    let of_rt (rt : RT.t) (rest : 'i LAT.t) : 'i t =
+      let (RT.Computational ((name, t), info, lrt)) = rt in
+      Computational ((name, t), info, L (LAT.of_lrt lrt rest))
+
+    For label types, `rest` is `LAT.I False` (uninhabited - terminal).
+    The return symbol becomes a computational argument; when you call
+    the label with the return value, it's substituted throughout.
+
+    Parameters:
+    - spec: The function specification containing return symbol and postcondition
+    - returnBt: The base type of the return value
+    - rest: What comes after the postcondition (LAT.I False for labels) -/
+def ofFunctionSpec {α : Type} (spec : FunctionSpec) (returnBt : BaseType) (rest : LAT α) : AT α :=
+  .computational spec.returnSym returnBt
+                  { loc := .unknown, desc := "return value" }
+                  (.L (LAT.ofPostcondition spec.ensures rest))
+
+end AT
+
+/-! ## Type Aliases
+
+These match CN's exact type aliases.
+-/
+
+/-- Label type: argument type that returns False (terminal).
+    Corresponds to: type lt = False.t t in argumentTypes.ml line 137
+
+    For return labels, this encodes:
+    - One computational argument (the return value)
+    - The postcondition resources and constraints
+    - Ends in False (never continues normally) -/
+abbrev LT := AT False_
+
+/-- The terminal LAT value for label types.
+    Corresponds to: LAT.I False.False in CN
+
+    This represents the end of a label type - since False_ (Empty) is uninhabited,
+    the continuation should never be called. We use the explicit `.terminal`
+    constructor which signals to spineL that processing is complete.
+
+    Note: In CN's OCaml, `LAT.I False.False` is pattern matched but never
+    actually executed because False is uninhabited. Our `.terminal` constructor
+    makes this explicit without requiring `sorry`. -/
+def LAT.terminalValue : LAT False_ := .terminal
+
+/-- Create a label type for a return label.
+    Corresponds to: AT.of_rt function_rt (LAT.I False.False) in wellTyped.ml
+
+    The return symbol becomes a computational argument to the label.
+    When you call the return label with the actual return value,
+    the spine substitutes that value for the return symbol in the postcondition. -/
+def LT.ofFunctionSpec (spec : FunctionSpec) (returnBt : BaseType) : LT :=
+  AT.ofFunctionSpec spec returnBt LAT.terminalValue
+
+/-! ## Label Kind
+
+Corresponds to: CF.Annot.label_annot in cerberus
+-/
+
+/-- Label kind annotation.
+    Corresponds to: CF.Annot.label_annot in cerberus -/
+inductive LabelKind where
+  | return_  -- LAreturn: return label
+  | loop     -- LAloop: loop label
+  | other    -- Other label kinds
+  deriving Inhabited, BEq
+
+/-! ## Label Context
+
+Corresponds to: label_context in cn/lib/wellTyped.ml line 1359
+type label_context = (AT.lt * Where.label * Locations.t) Sym.Map.t
+
+The label context maps each label symbol to:
+- Its argument type (LT = AT False)
+- Its kind (return, loop, etc.)
+- Its source location
+-/
+
+/-- Entry in the label context: label type, kind, and location.
+    Corresponds to: (AT.lt * Where.label * Locations.t) -/
+structure LabelEntry where
+  /-- The label's argument type (ends in False - terminal) -/
+  lt : LT
+  /-- What kind of label (return, loop, etc.) -/
+  kind : LabelKind
+  /-- Source location -/
+  loc : Loc
+
+/-- Label context: maps label symbol ID to its entry.
+    Corresponds to: label_context = (AT.lt * Where.label * Locations.t) Sym.Map.t -/
+abbrev LabelContext := List (Nat × LabelEntry)
+
+namespace LabelContext
+
+/-- Look up a label by symbol.
+    Corresponds to: Sym.Map.find_opt in CN -/
+def get? (ctx : LabelContext) (sym : Sym) : Option LabelEntry :=
+  ctx.lookup sym.id
+
+/-- Create label context from function spec and label definitions.
+    Corresponds to: WProc.label_context in wellTyped.ml line 2474
+
+    Pmap.fold
+      (fun sym def label_context ->
+         let lt, kind, loc =
+           match def with
+           | Non_inlined (loc, _name, label_annot, args) ->
+             (WLabel.typ args, label_annot, loc)
+           | Return loc ->
+             (AT.of_rt function_rt (LAT.I False.False), CF.Annot.LAreturn, loc)
+           | Loop (loc, label_args_and_body, annots, _parsed_spec, _loop_info) ->
+             ...
+         in
+         Sym.Map.add sym (lt, kind, loc) label_context)
+      label_defs
+      Sym.Map.empty
+
+    Parameters:
+    - spec: Function specification (contains return symbol and postcondition)
+    - returnBt: Base type of the return value
+    - labelDefs: Label definitions from muCore transformation -/
+def ofLabelDefs (spec : FunctionSpec) (returnBt : BaseType)
+    (labelDefs : Core.MuCore.LabelDefs) : LabelContext :=
+  labelDefs.filterMap fun (symId, labelDef) =>
+    match labelDef with
+    | .return_ loc =>
+      -- Return label: type is derived from function return type
+      -- AT.of_rt function_rt (LAT.I False.False)
+      let lt := LT.ofFunctionSpec spec returnBt
+      some (symId, { lt := lt, kind := .return_, loc := loc })
+    | .label info =>
+      -- Regular label: for now, create a simple label type
+      -- Full implementation would derive from label's own type
+      -- TODO: Implement WLabel.typ equivalent for regular labels
+      let lt : LT := .L LAT.terminalValue
+      some (symId, { lt := lt, kind := .other, loc := info.loc })
+
+end LabelContext
+
+end CerbLean.CN.Types
