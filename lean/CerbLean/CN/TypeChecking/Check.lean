@@ -168,8 +168,7 @@ def checkNoLeakedResources : TypingM Unit := do
   if ctx.resources.isEmpty then
     pure ()
   else
-    -- For now, just warn about leaked resources
-    -- A strict implementation would fail here
+    -- Fail on leaked resources - CN requires all resources to be accounted for
     TypingM.fail (.other s!"Leaked resources: {ctx.resources.length} resource(s) not consumed")
 
 /-- Type check a function body against its specification.

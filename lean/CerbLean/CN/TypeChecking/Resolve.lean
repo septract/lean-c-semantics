@@ -159,32 +159,32 @@ def needsResolution (s : Sym) : Bool :=
   s.id == 0
 
 /-- Resolve a symbol using the context.
-    Returns the resolved symbol AND its type.
-    If not found, returns the original symbol with unit type (error case).
+    Returns the resolved symbol AND its type, or none if not found.
 
     Note: Symbols created by `fresh()` have non-zero IDs but ARE in the context
     with their types. We must look them up to preserve type information. -/
-def resolveSymWithType (ctx : ResolveContext) (s : Sym) : Sym × BaseType :=
+def resolveSymWithType (ctx : ResolveContext) (s : Sym) : Option (Sym × BaseType) :=
   if needsResolution s then
     -- Placeholder symbol (ID = 0): resolve by name and get new ID + type
     match s.name with
     | some name =>
       match ctx.lookup name with
-      | some (resolved, bt) => (resolved, bt)
-      | none => (s, .unit)  -- Not found - keep original with unit type
-    | none => (s, .unit)  -- No name - keep original
+      | some (resolved, bt) => some (resolved, bt)
+      | none => none  -- Not found
+    | none => none  -- No name
   else
     -- Already has ID: still look up by name to get type (fresh symbols need this)
     match s.name with
     | some name =>
       match ctx.lookup name with
-      | some (_, bt) => (s, bt)  -- Keep symbol ID, use type from context
-      | none => (s, .unit)  -- Not in context - use unit type
-    | none => (s, .unit)  -- No name - use unit type
+      | some (_, bt) => some (s, bt)  -- Keep symbol ID, use type from context
+      | none => none  -- Not in context
+    | none => none  -- No name
 
-/-- Resolve a symbol using the context (symbol only, for backwards compat). -/
-def resolveSym (ctx : ResolveContext) (s : Sym) : Sym :=
-  (resolveSymWithType ctx s).1
+/-- Resolve a symbol using the context (symbol only).
+    Returns none if the symbol cannot be resolved. -/
+def resolveSym (ctx : ResolveContext) (s : Sym) : Option Sym :=
+  (resolveSymWithType ctx s).map (·.1)
 
 /-! ## Default Integer Type Selection
 
@@ -231,73 +231,101 @@ Corresponds to: CN's `infer_pexpr` and `check_pexpr` in wellTyped.ml.
 For binary operations: infer left operand, check right operand against left's type.
 -/
 
+/-- Error type for resolution failures -/
+inductive ResolveError where
+  | symbolNotFound (name : String)
+  | integerTooLarge (n : Int)
+  deriving Repr, Inhabited
+
+abbrev ResolveResult α := Except ResolveError α
+
 mutual
 
 /-- Resolve symbols in a term, threading expected type for literals.
     Uses CN's bidirectional type checking approach. -/
 partial def resolveTerm (ctx : ResolveContext) (t : Term)
-    (expectedBt : Option BaseType := none) : Term :=
+    (expectedBt : Option BaseType := none) : ResolveResult Term := do
   match t with
   | .const c =>
     -- Handle integer constants based on mode (CN's num_lit_ + pick_integer_encoding_type)
     match c, expectedBt with
     | .z n, some (.bits sign width) =>
       -- CHECK mode with Bits expected
-      .const (.bits sign width n)
+      return .const (.bits sign width n)
     | .z n, none =>
       -- INFER mode: pick smallest fitting Bits type
       match pickIntegerEncodingType n with
-      | some (.bits sign width) => .const (.bits sign width n)
-      | _ => .const c  -- Fallback for huge numbers (CN would fail here)
-    | _, _ => .const c
-  | .sym s => .sym (resolveSym ctx s)
-  | .unop op arg => .unop op (resolveAnnotTerm ctx arg expectedBt)
+      | some (.bits sign width) => return .const (.bits sign width n)
+      | _ => throw (.integerTooLarge n)  -- CN fails here
+    | _, _ => return .const c
+  | .sym s =>
+    match resolveSym ctx s with
+    | some resolved => return .sym resolved
+    | none => throw (.symbolNotFound (s.name.getD "?"))
+  | .unop op arg =>
+    return .unop op (← resolveAnnotTerm ctx arg expectedBt)
   | .binop op l r =>
     -- CN's algorithm: INFER left, CHECK right against left's type
-    let l' := resolveAnnotTerm ctx l none
-    let r' := resolveAnnotTerm ctx r (some l'.bt)
-    .binop op l' r'
+    let l' ← resolveAnnotTerm ctx l none
+    let r' ← resolveAnnotTerm ctx r (some l'.bt)
+    return .binop op l' r'
   | .ite c t e =>
     -- Condition expects bool, branches expect the overall expected type
-    .ite (resolveAnnotTerm ctx c (some .bool))
-         (resolveAnnotTerm ctx t expectedBt)
-         (resolveAnnotTerm ctx e expectedBt)
-  | .eachI lo v hi body => .eachI lo v hi (resolveAnnotTerm ctx body expectedBt)
-  | .tuple elems => .tuple (elems.map (resolveAnnotTerm ctx · none))
-  | .nthTuple n tup => .nthTuple n (resolveAnnotTerm ctx tup none)
-  | .struct_ tag members => .struct_ tag (members.map fun (id, t) => (id, resolveAnnotTerm ctx t none))
-  | .structMember obj member => .structMember (resolveAnnotTerm ctx obj none) member
-  | .structUpdate obj member value => .structUpdate (resolveAnnotTerm ctx obj none) member (resolveAnnotTerm ctx value none)
-  | .record members => .record (members.map fun (id, t) => (id, resolveAnnotTerm ctx t none))
-  | .recordMember obj member => .recordMember (resolveAnnotTerm ctx obj none) member
-  | .recordUpdate obj member value => .recordUpdate (resolveAnnotTerm ctx obj none) member (resolveAnnotTerm ctx value none)
-  | .constructor constr args => .constructor constr (args.map fun (id, t) => (id, resolveAnnotTerm ctx t none))
-  | .memberShift ptr tag member => .memberShift (resolveAnnotTerm ctx ptr none) tag member
-  | .arrayShift base ct idx => .arrayShift (resolveAnnotTerm ctx base none) ct (resolveAnnotTerm ctx idx none)
-  | .copyAllocId addr loc => .copyAllocId (resolveAnnotTerm ctx addr none) (resolveAnnotTerm ctx loc none)
-  | .hasAllocId ptr => .hasAllocId (resolveAnnotTerm ctx ptr none)
-  | .sizeOf ct => .sizeOf ct
-  | .offsetOf tag member => .offsetOf tag member
-  | .nil bt => .nil bt
-  | .cons head tail => .cons (resolveAnnotTerm ctx head none) (resolveAnnotTerm ctx tail none)
-  | .head list => .head (resolveAnnotTerm ctx list none)
-  | .tail list => .tail (resolveAnnotTerm ctx list none)
-  | .representable ct value => .representable ct (resolveAnnotTerm ctx value none)
-  | .good ct value => .good ct (resolveAnnotTerm ctx value none)
-  | .aligned ptr align => .aligned (resolveAnnotTerm ctx ptr none) (resolveAnnotTerm ctx align none)
-  | .wrapI intTy value => .wrapI intTy (resolveAnnotTerm ctx value none)
-  | .mapConst keyTy value => .mapConst keyTy (resolveAnnotTerm ctx value none)
-  | .mapSet m k v => .mapSet (resolveAnnotTerm ctx m none) (resolveAnnotTerm ctx k none) (resolveAnnotTerm ctx v none)
-  | .mapGet m k => .mapGet (resolveAnnotTerm ctx m none) (resolveAnnotTerm ctx k none)
-  | .mapDef var body => .mapDef var (resolveAnnotTerm ctx body none)
-  | .apply fn args => .apply (resolveSym ctx fn) (args.map (resolveAnnotTerm ctx · none))
-  | .let_ var binding body => .let_ var (resolveAnnotTerm ctx binding none) (resolveAnnotTerm ctx body expectedBt)
-  | .match_ scrutinee cases => .match_ (resolveAnnotTerm ctx scrutinee none) (cases.map fun (p, t) => (p, resolveAnnotTerm ctx t expectedBt))
-  | .cast targetTy value => .cast targetTy (resolveAnnotTerm ctx value none)
-  | .cnNone bt => .cnNone bt
-  | .cnSome value => .cnSome (resolveAnnotTerm ctx value none)
-  | .isSome opt => .isSome (resolveAnnotTerm ctx opt none)
-  | .getOpt opt => .getOpt (resolveAnnotTerm ctx opt none)
+    return .ite (← resolveAnnotTerm ctx c (some .bool))
+               (← resolveAnnotTerm ctx t expectedBt)
+               (← resolveAnnotTerm ctx e expectedBt)
+  | .eachI lo v hi body => return .eachI lo v hi (← resolveAnnotTerm ctx body expectedBt)
+  | .tuple elems =>
+    let elems' ← elems.mapM (resolveAnnotTerm ctx · none)
+    return .tuple elems'
+  | .nthTuple n tup => return .nthTuple n (← resolveAnnotTerm ctx tup none)
+  | .struct_ tag members =>
+    let members' ← members.mapM fun (id, t) => do return (id, ← resolveAnnotTerm ctx t none)
+    return .struct_ tag members'
+  | .structMember obj member => return .structMember (← resolveAnnotTerm ctx obj none) member
+  | .structUpdate obj member value => return .structUpdate (← resolveAnnotTerm ctx obj none) member (← resolveAnnotTerm ctx value none)
+  | .record members =>
+    let members' ← members.mapM fun (id, t) => do return (id, ← resolveAnnotTerm ctx t none)
+    return .record members'
+  | .recordMember obj member => return .recordMember (← resolveAnnotTerm ctx obj none) member
+  | .recordUpdate obj member value => return .recordUpdate (← resolveAnnotTerm ctx obj none) member (← resolveAnnotTerm ctx value none)
+  | .constructor constr args =>
+    let args' ← args.mapM fun (id, t) => do return (id, ← resolveAnnotTerm ctx t none)
+    return .constructor constr args'
+  | .memberShift ptr tag member => return .memberShift (← resolveAnnotTerm ctx ptr none) tag member
+  | .arrayShift base ct idx => return .arrayShift (← resolveAnnotTerm ctx base none) ct (← resolveAnnotTerm ctx idx none)
+  | .copyAllocId addr loc => return .copyAllocId (← resolveAnnotTerm ctx addr none) (← resolveAnnotTerm ctx loc none)
+  | .hasAllocId ptr => return .hasAllocId (← resolveAnnotTerm ctx ptr none)
+  | .sizeOf ct => return .sizeOf ct
+  | .offsetOf tag member => return .offsetOf tag member
+  | .nil bt => return .nil bt
+  | .cons head tail => return .cons (← resolveAnnotTerm ctx head none) (← resolveAnnotTerm ctx tail none)
+  | .head list => return .head (← resolveAnnotTerm ctx list none)
+  | .tail list => return .tail (← resolveAnnotTerm ctx list none)
+  | .representable ct value => return .representable ct (← resolveAnnotTerm ctx value none)
+  | .good ct value => return .good ct (← resolveAnnotTerm ctx value none)
+  | .aligned ptr align => return .aligned (← resolveAnnotTerm ctx ptr none) (← resolveAnnotTerm ctx align none)
+  | .wrapI intTy value => return .wrapI intTy (← resolveAnnotTerm ctx value none)
+  | .mapConst keyTy value => return .mapConst keyTy (← resolveAnnotTerm ctx value none)
+  | .mapSet m k v => return .mapSet (← resolveAnnotTerm ctx m none) (← resolveAnnotTerm ctx k none) (← resolveAnnotTerm ctx v none)
+  | .mapGet m k => return .mapGet (← resolveAnnotTerm ctx m none) (← resolveAnnotTerm ctx k none)
+  | .mapDef var body => return .mapDef var (← resolveAnnotTerm ctx body none)
+  | .apply fn args =>
+    match resolveSym ctx fn with
+    | some resolved =>
+      let args' ← args.mapM (resolveAnnotTerm ctx · none)
+      return .apply resolved args'
+    | none => throw (.symbolNotFound (fn.name.getD "?"))
+  | .let_ var binding body => return .let_ var (← resolveAnnotTerm ctx binding none) (← resolveAnnotTerm ctx body expectedBt)
+  | .match_ scrutinee cases =>
+    let scrut' ← resolveAnnotTerm ctx scrutinee none
+    let cases' ← cases.mapM fun (p, t) => do return (p, ← resolveAnnotTerm ctx t expectedBt)
+    return .match_ scrut' cases'
+  | .cast targetTy value => return .cast targetTy (← resolveAnnotTerm ctx value none)
+  | .cnNone bt => return .cnNone bt
+  | .cnSome value => return .cnSome (← resolveAnnotTerm ctx value none)
+  | .isSome opt => return .isSome (← resolveAnnotTerm ctx opt none)
+  | .getOpt opt => return .getOpt (← resolveAnnotTerm ctx opt none)
 
 /-- Resolve symbols in an annotated term, threading expected type.
     For symbol terms, looks up the type from context.
@@ -306,12 +334,15 @@ partial def resolveTerm (ctx : ResolveContext) (t : Term)
 
     Corresponds to: CN's type threading via Pexpr.expect field. -/
 partial def resolveAnnotTerm (ctx : ResolveContext) (at_ : AnnotTerm)
-    (expectedBt : Option BaseType := none) : AnnotTerm :=
+    (expectedBt : Option BaseType := none) : ResolveResult AnnotTerm := do
   match at_ with
   | .mk (.sym s) _bt loc =>
     -- For symbols, look up the type from context
-    let (resolvedSym, resolvedBt) := resolveSymWithType ctx s
-    .mk (.sym resolvedSym) resolvedBt loc
+    match resolveSymWithType ctx s with
+    | some (resolvedSym, resolvedBt) =>
+      return .mk (.sym resolvedSym) resolvedBt loc
+    | none =>
+      throw (.symbolNotFound (s.name.getD "?"))
   | .mk (.const (.z n)) _bt loc =>
     -- For integer constants, handle based on mode:
     -- CHECK mode (expectedBt = some): use expected type if it's Bits
@@ -320,77 +351,76 @@ partial def resolveAnnotTerm (ctx : ResolveContext) (at_ : AnnotTerm)
     match expectedBt with
     | some (.bits sign width) =>
       -- CHECK mode with Bits expected: use expected type
-      .mk (.const (.bits sign width n)) (.bits sign width) loc
+      return .mk (.const (.bits sign width n)) (.bits sign width) loc
     | some _ =>
       -- CHECK mode with non-Bits expected: keep as unbounded Integer
-      .mk (.const (.z n)) .integer loc
+      return .mk (.const (.z n)) .integer loc
     | none =>
       -- INFER mode: pick smallest fitting Bits type (CN's default behavior)
       match pickIntegerEncodingType n with
-      | some (.bits sign width) => .mk (.const (.bits sign width n)) (.bits sign width) loc
-      | _ => .mk (.const (.z n)) .integer loc  -- Fallback for huge numbers (CN would fail)
+      | some (.bits sign width) => return .mk (.const (.bits sign width n)) (.bits sign width) loc
+      | _ => throw (.integerTooLarge n)  -- CN fails here
   | .mk (.binop op l r) _bt loc =>
     -- For binops, use CN's exact algorithm (wellTyped.ml:1643-1650):
     -- 1. INFER left operand (no expected type)
     -- 2. CHECK right operand against left's inferred type
     -- This is asymmetric and matches CN exactly.
-    let l' := resolveAnnotTerm ctx l none  -- INFER left
-    let r' := resolveAnnotTerm ctx r (some l'.bt)  -- CHECK right against left's type
+    let l' ← resolveAnnotTerm ctx l none  -- INFER left
+    let r' ← resolveAnnotTerm ctx r (some l'.bt)  -- CHECK right against left's type
     -- Compute result type from operator
     let resultBt := match op with
       | .eq | .lt | .le | .and_ | .or_ | .implies => .bool
       | _ => l'.bt  -- Arithmetic ops: result type matches left operand
-    .mk (.binop op l' r') resultBt loc
+    return .mk (.binop op l' r') resultBt loc
   | .mk (.unop op arg) _bt loc =>
     -- For unary ops, thread expected type to operand
-    let arg' := resolveAnnotTerm ctx arg expectedBt
-    .mk (.unop op arg') arg'.bt loc
+    let arg' ← resolveAnnotTerm ctx arg expectedBt
+    return .mk (.unop op arg') arg'.bt loc
   | .mk (.ite c t e) _bt loc =>
     -- Condition expects bool, branches expect the overall expected type
-    let c' := resolveAnnotTerm ctx c (some .bool)
-    let t' := resolveAnnotTerm ctx t expectedBt
-    let e' := resolveAnnotTerm ctx e expectedBt
+    let c' ← resolveAnnotTerm ctx c (some .bool)
+    let t' ← resolveAnnotTerm ctx t expectedBt
+    let e' ← resolveAnnotTerm ctx e expectedBt
     -- Result type comes from branches (should match)
-    .mk (.ite c' t' e') t'.bt loc
+    return .mk (.ite c' t' e') t'.bt loc
   | .mk t bt loc =>
     -- For other terms, resolve recursively with expected type, preserve original type
-    .mk (resolveTerm ctx t expectedBt) bt loc
+    let t' ← resolveTerm ctx t expectedBt
+    return .mk t' bt loc
 
 end
 
 /-! ## Resource Resolution -/
 
 /-- Resolve symbols in a Predicate -/
-def resolvePredicate (ctx : ResolveContext) (p : Predicate) : Predicate :=
-  { p with
-    pointer := resolveAnnotTerm ctx p.pointer
-    iargs := p.iargs.map (resolveAnnotTerm ctx)
-  }
+def resolvePredicate (ctx : ResolveContext) (p : Predicate) : ResolveResult Predicate := do
+  let pointer' ← resolveAnnotTerm ctx p.pointer
+  let iargs' ← p.iargs.mapM (resolveAnnotTerm ctx)
+  return { p with pointer := pointer', iargs := iargs' }
 
 /-- Resolve symbols in a QPredicate -/
-def resolveQPredicate (ctx : ResolveContext) (qp : QPredicate) : QPredicate :=
-  { qp with
-    pointer := resolveAnnotTerm ctx qp.pointer
-    permission := resolveAnnotTerm ctx qp.permission
-    iargs := qp.iargs.map (resolveAnnotTerm ctx)
-  }
+def resolveQPredicate (ctx : ResolveContext) (qp : QPredicate) : ResolveResult QPredicate := do
+  let pointer' ← resolveAnnotTerm ctx qp.pointer
+  let permission' ← resolveAnnotTerm ctx qp.permission
+  let iargs' ← qp.iargs.mapM (resolveAnnotTerm ctx)
+  return { qp with pointer := pointer', permission := permission', iargs := iargs' }
 
 /-- Resolve symbols in a Request -/
-def resolveRequest (ctx : ResolveContext) (req : Request) : Request :=
+def resolveRequest (ctx : ResolveContext) (req : Request) : ResolveResult Request := do
   match req with
-  | .p pred => .p (resolvePredicate ctx pred)
-  | .q qpred => .q (resolveQPredicate ctx qpred)
+  | .p pred => return .p (← resolvePredicate ctx pred)
+  | .q qpred => return .q (← resolveQPredicate ctx qpred)
 
 /-- Resolve symbols in an Output -/
-def resolveOutput (ctx : ResolveContext) (out : Output) : Output :=
-  { out with value := resolveAnnotTerm ctx out.value }
+def resolveOutput (ctx : ResolveContext) (out : Output) : ResolveResult Output := do
+  let value' ← resolveAnnotTerm ctx out.value
+  return { out with value := value' }
 
 /-- Resolve symbols in a resource -/
-def resolveResource (ctx : ResolveContext) (r : Resource) : Resource :=
-  { r with
-    request := resolveRequest ctx r.request
-    output := resolveOutput ctx r.output
-  }
+def resolveResource (ctx : ResolveContext) (r : Resource) : ResolveResult Resource := do
+  let request' ← resolveRequest ctx r.request
+  let output' ← resolveOutput ctx r.output
+  return { r with request := request', output := output' }
 
 /-! ## Clause Resolution
 
@@ -399,12 +429,12 @@ When resolving clauses, we also need to handle bindings.
 -/
 
 /-- Resolve a clause, returning updated context (for new bindings) and resolved clause -/
-def resolveClause (ctx : ResolveContext) (c : Clause) : ResolveContext × Clause :=
+def resolveClause (ctx : ResolveContext) (c : Clause) : ResolveResult (ResolveContext × Clause) := do
   match c with
   | .resource name r =>
     -- Resource clause introduces a new binding
     -- First resolve the request to determine the output type
-    let resolvedRequest := resolveRequest ctx r.request
+    let resolvedRequest ← resolveRequest ctx r.request
 
     -- Compute the proper output base type from the resource
     -- For Owned<T>, this gives the CN base type of T (using Bits for integers)
@@ -420,29 +450,33 @@ def resolveClause (ctx : ResolveContext) (c : Clause) : ResolveContext × Clause
       request := resolvedRequest
       output := { value := AnnotTerm.mk (.sym freshSym) outputBt r.output.value.loc }
     }
-    (ctx', .resource freshSym resolvedResource)
+    return (ctx', .resource freshSym resolvedResource)
   | .constraint assertion =>
     -- Constraint uses current context, doesn't add bindings
-    (ctx, .constraint (resolveAnnotTerm ctx assertion))
+    let assertion' ← resolveAnnotTerm ctx assertion
+    return (ctx, .constraint assertion')
 
 /-- Resolve all clauses in order, threading context through -/
-def resolveClauses (ctx : ResolveContext) (clauses : List Clause) : ResolveContext × List Clause :=
-  clauses.foldl (fun (ctx, resolved) clause =>
-    let (ctx', resolvedClause) := resolveClause ctx clause
-    (ctx', resolved ++ [resolvedClause])
-  ) (ctx, [])
+def resolveClauses (ctx : ResolveContext) (clauses : List Clause) : ResolveResult (ResolveContext × List Clause) := do
+  let mut ctx' := ctx
+  let mut resolved : List Clause := []
+  for clause in clauses do
+    let (newCtx, resolvedClause) ← resolveClause ctx' clause
+    ctx' := newCtx
+    resolved := resolved ++ [resolvedClause]
+  return (ctx', resolved)
 
 /-! ## Spec Resolution -/
 
 /-- Resolve a precondition -/
-def resolvePrecondition (ctx : ResolveContext) (pre : Precondition) : ResolveContext × Precondition :=
-  let (ctx', clauses) := resolveClauses ctx pre.clauses
-  (ctx', { clauses := clauses })
+def resolvePrecondition (ctx : ResolveContext) (pre : Precondition) : ResolveResult (ResolveContext × Precondition) := do
+  let (ctx', clauses) ← resolveClauses ctx pre.clauses
+  return (ctx', { clauses := clauses })
 
 /-- Resolve a postcondition -/
-def resolvePostcondition (ctx : ResolveContext) (post : Postcondition) : ResolveContext × Postcondition :=
-  let (ctx', clauses) := resolveClauses ctx post.clauses
-  (ctx', { clauses := clauses })
+def resolvePostcondition (ctx : ResolveContext) (post : Postcondition) : ResolveResult (ResolveContext × Postcondition) := do
+  let (ctx', clauses) ← resolveClauses ctx post.clauses
+  return (ctx', { clauses := clauses })
 
 /-- Resolve a complete function specification.
 
@@ -453,13 +487,15 @@ def resolvePostcondition (ctx : ResolveContext) (post : Postcondition) : Resolve
 
     Creates a fresh return symbol and resolves all identifiers.
 
+    Returns error if any symbol is not found or integer is too large.
+
     Corresponds to: CN's desugaring of function specs in core_to_mucore.ml -/
 def resolveFunctionSpec
     (spec : FunctionSpec)
     (params : List (Sym × BaseType))
     (returnType : BaseType := .unit)
     (nextFreshId : Nat := 1000)
-    : FunctionSpec :=
+    : ResolveResult FunctionSpec := do
   -- Build initial context with parameters INCLUDING TYPES
   let paramCtx : ResolveContext := {
     nameToSymType := params.filterMap fun (sym, bt) =>
@@ -471,15 +507,15 @@ def resolveFunctionSpec
   let (ctxWithReturn, returnSym) := paramCtx.fresh "return" returnType
 
   -- Resolve precondition (bindings from requires are visible in ensures)
-  let (ctxAfterPre, resolvedPre) := resolvePrecondition ctxWithReturn spec.requires
+  let (ctxAfterPre, resolvedPre) ← resolvePrecondition ctxWithReturn spec.requires
 
   -- Resolve postcondition (can see precondition bindings + return)
-  let (_, resolvedPost) := resolvePostcondition ctxAfterPre spec.ensures
+  let (_, resolvedPost) ← resolvePostcondition ctxAfterPre spec.ensures
 
-  { returnSym := returnSym
-    requires := resolvedPre
-    ensures := resolvedPost
-    trusted := spec.trusted
-  }
+  return { returnSym := returnSym
+           requires := resolvedPre
+           ensures := resolvedPost
+           trusted := spec.trusted
+         }
 
 end CerbLean.CN.TypeChecking.Resolve

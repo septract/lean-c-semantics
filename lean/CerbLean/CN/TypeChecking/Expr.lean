@@ -93,11 +93,11 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
 
   -- Memory operation (memop)
   -- Corresponds to: Ememop case in check.ml lines 1524-1710
-  | .memop _op args =>
-    -- Evaluate all arguments (simplified)
-    for arg in args do
-      checkPexprK arg fun _ => pure ()
-    k (mkUnitTermExpr loc)
+  | .memop op _args =>
+    -- memop includes: ptrdiff, intFromPtr, ptrFromInt, ptrValidForDeref,
+    -- ptrWellAligned, ptrArrayShift, etc.
+    -- Full implementation requires proper semantic handling per operation.
+    TypingM.fail (.other s!"memop not implemented: {repr op}")
 
   -- Memory action (create, kill, store, load)
   -- Corresponds to: Eaction case in check.ml lines 1711-1984
@@ -167,45 +167,58 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
 
   -- C function call
   -- Corresponds to: Eccall case in check.ml lines 2018-2080
-  | .ccall funPtr _funTy args =>
-    -- Evaluate function pointer
-    checkPexprK funPtr fun _fnVal => do
-      -- Evaluate arguments
-      evalArgsK args fun argVals => do
-        -- In a full implementation, we would:
-        -- 1. Look up the function's specification
-        -- 2. Check precondition resources via Spine.calltype_ft
-        -- 3. Consume/produce resources
-        -- 4. Call continuation with result
-
-        let resultBt := if argVals.isEmpty then .unit else argVals.head!.bt
-        k (AnnotTerm.mk (.const .unit) resultBt loc)
+  | .ccall _funPtr _funTy _args =>
+    -- C function call requires:
+    -- 1. Looking up the function's specification
+    -- 2. Checking precondition resources via Spine.calltype_ft
+    -- 3. Consuming/producing resources
+    -- 4. Calling continuation with result
+    TypingM.fail (.other "ccall not implemented - requires function specification lookup")
 
   -- Named procedure call
   -- Corresponds to: Eproc case in check.ml
-  | .proc name args =>
-    evalArgsK args fun argVals => do
-      let fnSym := match name with
-        | .sym s => s
-        | .impl _ => { id := 0, name := some "impl" : Sym }
-
-      let resultBt := if argVals.isEmpty then .unit else argVals.head!.bt
-      k (AnnotTerm.mk (.apply fnSym argVals) resultBt loc)
+  | .proc name _args =>
+    -- Named procedure call requires:
+    -- 1. Looking up the function's specification
+    -- 2. Checking precondition resources
+    -- 3. Consuming/producing resources
+    -- 4. Calling continuation with properly typed result
+    let nameStr := match name with
+      | .sym s => s.name.getD "?"
+      | .impl _ => "impl"
+    TypingM.fail (.other s!"proc call not implemented: {nameStr}")
 
   -- Unsequenced (for sequential, pick first ordering)
   -- Corresponds to: Eunseq case in check.ml
+  --
+  -- IMPORTANT: In Core, unseq(e1, e2, ..., en) returns a TUPLE of all results (v1, v2, ..., vn).
+  -- This is used for binding multiple values in tuple patterns like:
+  --   let weak (a_524: loaded integer, a_525: loaded integer) = unseq(load(...), pure(...))
+  --
+  -- We evaluate all expressions and construct a tuple term with proper element types.
   | .unseq es =>
     if es.isEmpty then
       k (mkUnitTermExpr loc)
+    else if es.length == 1 then
+      -- Single expression: return its result directly
+      checkExpr labels es.head! k
     else
-      -- Execute in order, continuation called at end
-      let rec execSeq (remaining : List AExpr) : TypingM Unit := do
+      -- Multiple expressions: evaluate all and return a tuple
+      -- Use CPS to collect all results
+      let rec collectResults (remaining : List AExpr) (acc : List IndexTerm)
+          : TypingM Unit := do
         match remaining with
-        | [] => k (mkUnitTermExpr loc)
-        | [e'] => checkExpr labels e' k
+        | [] =>
+          -- All expressions evaluated, construct tuple term
+          -- Create proper tuple type with ALL element types
+          let elemTypes := acc.map (·.bt)
+          let tupleBt := BaseType.tuple elemTypes
+          let tupleTermInner := Term.tuple acc
+          let tupleTerm := AnnotTerm.mk tupleTermInner tupleBt loc
+          k tupleTerm
         | e' :: rest =>
-          checkExpr labels e' fun _ => execSeq rest
-      execSeq es
+          checkExpr labels e' fun v => collectResults rest (acc ++ [v])
+      collectResults es []
 
   -- Bound (resource boundary)
   -- Corresponds to: Ebound case in check.ml
@@ -249,7 +262,7 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
       TypingM.fail (.other s!"Undefined code label: {label.name.getD "?"}")
     | some entry =>
       -- Get all resources before the call (for checking all_empty after)
-      let originalResources ← TypingM.getResources
+      let _originalResources ← TypingM.getResources
 
       -- Call Spine.calltypeLt with the label type and kind
       -- The continuation receives False (uninhabited) - never actually called
@@ -258,25 +271,17 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
         -- Corresponds to: all_empty loc original_resources
         let remainingResources ← TypingM.getResources
         if !remainingResources.isEmpty then
-          -- For now, just warn about leaked resources
-          -- A strict implementation would fail here
-          pure ()
+          TypingM.fail (.other s!"Leaked resources: {remainingResources.length} resource(s) not consumed after label call")
         pure ()
 
-  -- Concurrency constructs (not fully supported)
+  -- Concurrency constructs - not supported
   -- Corresponds to: Epar case in check.ml
-  | .par es =>
-    if es.isEmpty then
-      k (mkUnitTermExpr loc)
-    else
-      -- For parallel, check each speculatively
-      for e' in es do
-        let _ ← TypingM.pure_ (checkExpr labels e' k)
-      pure ()
+  | .par _es =>
+    TypingM.fail (.other "par (parallel) expressions not supported")
 
   -- Corresponds to: Ewait case in check.ml
   | .wait _tid =>
-    k (mkUnitTermExpr loc)
+    TypingM.fail (.other "wait expressions not supported")
 
 /-! ## check_expr_top: Top-Level Expression Checking
 
@@ -321,7 +326,7 @@ def checkExprTop (loc : Core.Loc) (labels : LabelContext) (spec : FunctionSpec)
       let substitutedPost := spec.ensures.subst σ
 
       -- Get resources before subtype check
-      let originalResources ← TypingM.getResources
+      let _originalResources ← TypingM.getResources
 
       -- Use Spine.subtype to check postcondition
       subtype loc substitutedPost fun () => do
