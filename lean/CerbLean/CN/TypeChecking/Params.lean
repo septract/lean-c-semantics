@@ -280,13 +280,16 @@ def checkFunctionWithParams
       -- Step 3: Convert return type to CN BaseType
       -- Corresponds to: WProc extracting return_bt from function type
       -- Prefer C return type (gives Bits types) over Core return type (gives unbounded Integer)
-      let returnBt := match cRetTy with
-        | some ct => Resolve.ctypeToOutputBaseType ct
+      let returnBtResult : Except String BaseType := match cRetTy with
+        | some ct => .ok (Resolve.ctypeToOutputBaseType ct)
         | none =>
           -- Fall back to Core return type if C type not available
           match tryCoreBaseTypeToCN retTy with
-          | some bt => bt
-          | none => .unit  -- Fall back to unit for unsupported types
+          | some bt => .ok bt
+          | none => .error s!"Unsupported return type: {repr retTy}"
+      match returnBtResult with
+      | .error msg => TypeCheckResult.fail msg
+      | .ok returnBt =>
 
       -- Step 4: Transform body to muCore form
       -- This extracts label definitions and replaces Esave with Erun.
@@ -297,8 +300,13 @@ def checkFunctionWithParams
       -- This is the CN-matching approach: resolve names to symbols before type checking.
       -- Corresponds to: CN's Cabs_to_ail.desugar_cn_* functions
       -- Pass return type so 'return' symbol gets the correct type
-      let resolvedSpec := Resolve.resolveFunctionSpec spec cnParams.reverse returnBt nextFreshId
-
+      let resolveResult := (Resolve.resolveFunctionSpec spec cnParams.reverse returnBt nextFreshId).mapError fun e =>
+        match e with
+        | .symbolNotFound name => s!"Symbol not found: {name}"
+        | .integerTooLarge n => s!"Integer too large for any CN type: {n}"
+      match resolveResult with
+      | .error msg => TypeCheckResult.fail msg
+      | .ok resolvedSpec =>
       -- Step 6: Create label context from label definitions
       -- Corresponds to: WProc.label_context in wellTyped.ml line 2474
       -- Maps each label symbol to its type (LT) and kind (return, loop, other)

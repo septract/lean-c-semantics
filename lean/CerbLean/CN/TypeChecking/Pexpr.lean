@@ -21,6 +21,46 @@ open CerbLean.CN.Types
 
 /-! ## Helper Functions -/
 
+/-- Convert a Core IntegerType to CN BaseType.
+    Uses the same width logic as Resolve.lean for consistency.
+    Corresponds to: Memory.bt_of_sct in CN's memory.ml -/
+def integerTypeToBaseType (ity : Core.IntegerType) : BaseType :=
+  match ity with
+  | .bool => .bool
+  | .char => .integer  -- char signedness is implementation-defined
+  | .signed kind =>
+    let width := match kind with
+      | .ichar => 8
+      | .short => 16
+      | .int_ => 32
+      | .long => 64
+      | .longLong => 64
+      | .intN n => n
+      | .intLeastN n => n
+      | .intFastN n => n
+      | .intmax => 64
+      | .intptr => 64
+    .bits .signed width
+  | .unsigned kind =>
+    let width := match kind with
+      | .ichar => 8
+      | .short => 16
+      | .int_ => 32
+      | .long => 64
+      | .longLong => 64
+      | .intN n => n
+      | .intLeastN n => n
+      | .intFastN n => n
+      | .intmax => 64
+      | .intptr => 64
+    .bits .unsigned width
+  | .size_t => .bits .unsigned 64
+  | .ptrdiff_t => .bits .signed 64
+  | .wchar_t => .bits .signed 32
+  | .wint_t => .bits .signed 32
+  | .ptraddr_t => .bits .unsigned 64
+  | .enum _ => .bits .signed 32
+
 /-- Create a numeric literal with the given base type.
     Corresponds to: CN's num_lit_ in indexTerms.ml lines 478-484
 
@@ -94,15 +134,21 @@ def valueToConst (v : Value) (_loc : Core.Loc) : Except TypeError Const := do
     -- We return a special "undef" constant that will be handled symbolically
     throw (.other "unspecified_value")
 
-/-- Convert Ctype to CN BaseType for unspecified value type inference -/
-def ctypeToBaseTypeSimple (ct : Core.Ctype) : BaseType :=
+/-- Convert Ctype to CN BaseType for unspecified value type inference.
+    Returns none for unsupported types (arrays, unions, functions, atomics). -/
+def ctypeToBaseTypeSimple (ct : Core.Ctype) : Option BaseType :=
   match ct.ty with
-  | .void => .unit
-  | .basic (.integer _) => .integer
-  | .basic (.floating _) => .real
-  | .pointer _ _ => .loc
-  | .struct_ tag => .struct_ tag
-  | _ => .unit  -- fallback for complex types
+  | .void => some .unit
+  | .basic (.integer _) => some .integer
+  | .basic (.floating _) => some .real
+  | .pointer _ _ => some .loc
+  | .struct_ tag => some (.struct_ tag)
+  | .array _ _ => none  -- Arrays not supported
+  | .union_ _ => none   -- Unions not supported
+  | .function _ _ _ _ => none  -- Functions not supported
+  | .functionNoParams _ _ => none  -- K&R functions not supported
+  | .atomic _ => none   -- Atomics not supported
+  | .byte => none  -- Byte type not supported
 
 /-- Get the bit width for an integer base kind -/
 def intBaseKindWidth (kind : Core.IntBaseKind) : Nat :=
@@ -173,10 +219,13 @@ def valueToTerm (v : Value) (loc : Core.Loc) (expectedBt : Option BaseType := no
     -- Unspecified (uninitialized) value: return a symbolic "undef" term
     -- The CN verifier will ensure this value is never actually used
     let symUndef : Core.Sym := { id := 0, name := some "undef" }
-    -- Infer type from the loaded value if possible
-    let bt := match v with
-      | .loaded (.unspecified ct) => ctypeToBaseTypeSimple ct
-      | _ => .unit
+    -- Infer type from the loaded value - MUST have valid type
+    let bt ← match v with
+      | .loaded (.unspecified ct) =>
+        match ctypeToBaseTypeSimple ct with
+        | some bt => pure bt
+        | none => throw (.other s!"Unsupported type in unspecified value: {repr ct.ty}")
+      | _ => throw (.other "Cannot determine type for unspecified value")
     return AnnotTerm.mk (.sym symUndef) bt loc
   | .error e => throw e
 where
@@ -234,26 +283,37 @@ structure PatternBindings where
 
 /-- Convert Core.BaseType to CN.BaseType.
     For object and loaded types with integer content, returns proper Bits type.
-    Corresponds to: CN's handling of object/loaded types for integers. -/
-def coreBaseTypeToCN (bt : Core.BaseType) : BaseType :=
+    Corresponds to: CN's handling of object/loaded types for integers.
+    Returns none for unsupported types (list, tuple, storable). -/
+def coreBaseTypeToCN (bt : Core.BaseType) : Option BaseType :=
   match bt with
-  | .unit => .unit
-  | .boolean => .bool
-  | .ctype => .ctype
-  | .list _ => .unit  -- TODO: proper list type
-  | .tuple _ => .unit  -- TODO: proper tuple type
+  | .unit => some .unit
+  | .boolean => some .bool
+  | .ctype => some .ctype
+  | .list _ => none  -- Lists not supported in CN base types
+  | .tuple _ => none  -- Tuples not supported (should use tuple element types)
   | .object ot => objectTypeToCN ot
   | .loaded ot => objectTypeToCN ot  -- loaded types use the inner object type
-  | .storable => .unit
+  | .storable => none  -- Storable not supported
 where
   /-- Convert Core.ObjectType to CN.BaseType -/
-  objectTypeToCN : Core.ObjectType → BaseType
-    | .integer => .bits .signed 32  -- Default to signed 32-bit for unspecified integers
-    | .floating => .real
-    | .pointer => .loc
-    | .array _ => .loc  -- Arrays are accessed via pointers
-    | .struct_ tag => .struct_ tag
-    | .union_ tag => .struct_ tag  -- Unions use same representation as structs
+  objectTypeToCN : Core.ObjectType → Option BaseType
+    | .integer => some (.bits .signed 32)  -- Default to signed 32-bit for unspecified integers
+    | .floating => some .real
+    | .pointer => some .loc
+    | .array _ => some .loc  -- Arrays are accessed via pointers
+    | .struct_ tag => some (.struct_ tag)
+    | .union_ tag => some (.struct_ tag)  -- Unions use same representation as structs
+
+/-- Require a Core.BaseType to be convertible to CN.BaseType, failing otherwise.
+    Use this instead of `.getD` patterns which silently mask type errors. -/
+def requireCoreBaseTypeToCN (bt : Option Core.BaseType) (context : String) : TypingM BaseType := do
+  match bt with
+  | none => TypingM.fail (.other s!"{context}: no Core type annotation available")
+  | some coreBt =>
+    match coreBaseTypeToCN coreBt with
+    | some cnBt => pure cnBt
+    | none => TypingM.fail (.other s!"{context}: unsupported Core type {repr coreBt}")
 
 /-- Bind a pattern to a value, returning the bound variables.
     Corresponds to: check_and_match_pattern in check.ml -/
@@ -262,7 +322,9 @@ partial def bindPattern (pat : APattern) (value : IndexTerm) : TypingM PatternBi
   | .base (some sym) bt =>
     -- Bind variable to value
     let loc := value.loc
-    let cnBt := coreBaseTypeToCN bt
+    let cnBt ← match coreBaseTypeToCN bt with
+      | some t => pure t
+      | none => TypingM.fail (.other s!"Unsupported Core base type in pattern: {repr bt}")
     TypingM.addAValue sym value loc s!"pattern binding {sym.name.getD ""}"
     return { boundVars := [(sym, cnBt)] }
   | .base none _ =>
@@ -287,35 +349,46 @@ partial def bindPattern (pat : APattern) (value : IndexTerm) : TypingM PatternBi
       -- Tuple patterns - bind each component
       -- We create symbolic projection terms for each element
       --
-      -- Type handling for loaded values:
-      -- Core patterns like (ptr, loaded_val) have Core types like (object pointer, loaded integer)
-      -- But `loaded integer` doesn't carry sign/width info - we need the actual value type.
-      -- When the bound value has a Bits type, use that for loaded elements.
-      -- This matches CN's muCore where the loaded value type comes from the resource, not the pattern.
+      -- Type handling: Extract element types from the tuple type.
+      -- If value.bt is BaseType.tuple elemTypes, use elemTypes[idx] for each element.
+      -- This ensures proper type propagation through tuple destructuring.
+      let elemTypes ← match value.bt with
+        | .tuple ts => pure ts
+        | other =>
+          -- Non-tuple value being destructured as tuple - this indicates a type error
+          -- Fall back to pattern-declared types if args have base patterns with types
+          -- Otherwise fail explicitly
+          if args.all (fun p => match p with | .base _ _ => true | _ => false) then
+            pure []  -- Will use pattern types for each element
+          else
+            TypingM.fail (.other s!"Tuple pattern applied to non-tuple value of type: {repr other}")
+
       let mut allBindings : List (Sym × BaseType) := []
       let mut idx := 0
       for innerPat in args do
-        -- Create a symbolic term for tuple element i
-        -- Use the value's location for the projection term
         let innerAPat : APattern := ⟨pat.annots, innerPat⟩
         -- Get a fresh symbol for this projection
         let state ← TypingM.getState
         let projId := state.freshCounter
         TypingM.modifyState fun s => { s with freshCounter := s.freshCounter + 1 }
-        -- Extract type from the inner pattern, with special handling for loaded types
-        let projBt := match innerPat with
-          | .base _ bt =>
-            match bt with
-            | .loaded _ =>
-              -- For loaded types, prefer the actual value type if available
-              -- This handles the case where Core says "loaded integer" but we know
-              -- the actual type is Bits(signed, 32) from the resource
-              match value.bt with
-                | .bits sign width => .bits sign width
-                | .integer => .integer
-                | _ => coreBaseTypeToCN bt  -- fallback to conversion
-            | _ => coreBaseTypeToCN bt
-          | _ => value.bt  -- fallback
+
+        -- Determine element type: prefer tuple element type, then pattern type
+        let projBt ← match elemTypes[idx]? with
+          | some elemBt =>
+            -- Have tuple element type - use it
+            pure elemBt
+          | none =>
+            -- No tuple type info - must use pattern's declared type
+            match innerPat with
+            | .base _ bt =>
+              match coreBaseTypeToCN bt with
+              | some t => pure t
+              | none => TypingM.fail (.other s!"Unsupported Core base type in tuple pattern element {idx}: {repr bt}")
+            | .ctor _ _ =>
+              -- Constructor pattern without tuple type info - need pattern's enclosing type
+              -- For Specified/Unspecified patterns, the type should come from context
+              TypingM.fail (.other s!"Cannot determine type for constructor pattern at index {idx} - value is not a proper tuple")
+
         let projSym : Sym := { id := projId, name := some s!"proj_{idx}" }
         let projTerm : IndexTerm := AnnotTerm.mk (.sym projSym) projBt value.loc
         -- Recursively bind the inner pattern
@@ -374,7 +447,7 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
   -- Pass expected type to create Bits literals when type hint is available
   -- Prefer explicit expectedBt parameter over pe.ty hint
   | .val v =>
-    let typeHint := expectedBt.orElse (fun _ => pe.ty.map coreBaseTypeToCN)
+    let typeHint := expectedBt.orElse (fun _ => pe.ty.bind coreBaseTypeToCN)
     match valueToTerm v loc typeHint with
     | .ok term => return term
     | .error err => TypingM.fail err
@@ -432,8 +505,7 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
     let pe' : APexpr := ⟨[], none, e⟩
     let tStruct ← checkPexpr pe'
     -- Return the appropriate base type based on member
-    -- For now, use a generic approach
-    let resBt := pe.ty.map coreBaseTypeToCN |>.getD .unit
+    let resBt ← requireCoreBaseTypeToCN pe.ty s!"memberof {member.name}"
     return AnnotTerm.mk (.structMember tStruct member) resBt loc
 
   -- Array/pointer shift
@@ -452,31 +524,39 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
 
   -- Constructor
   | .ctor c args =>
-    let argTerms ← args.mapM fun arg => do
-      let peArg : APexpr := ⟨[], none, arg⟩
-      checkPexpr peArg
-    let resBt := pe.ty.map coreBaseTypeToCN |>.getD .unit
     match c with
     | .tuple =>
-      return AnnotTerm.mk (.tuple argTerms) resBt loc
+      -- For tuples, evaluate each arg without expected type (tuple elements are independent)
+      let argTerms ← args.mapM fun arg => do
+        let peArg : APexpr := ⟨[], none, arg⟩
+        checkPexpr peArg
+      let elemTypes := argTerms.map (·.bt)
+      let tupleBt := BaseType.tuple elemTypes
+      return AnnotTerm.mk (.tuple argTerms) tupleBt loc
     | .specified =>
       -- Specified(value) - the value is known/defined
-      -- Just unwrap and return the inner value
-      match argTerms with
-      | [innerVal] => return innerVal
+      -- Propagate expected type to inner value (Specified wraps a value of that type)
+      match args with
+      | [innerArg] =>
+        let peArg : APexpr := ⟨[], none, innerArg⟩
+        let innerVal ← checkPexpr peArg expectedBt
+        return innerVal
       | _ => TypingM.fail (.other "Specified requires exactly 1 argument")
     | .unspecified =>
       -- Unspecified(ctype) - the value is undefined
       -- Return a symbolic "undef" term
+      -- Type must come from expected type or pattern annotation
+      let unspecBt ← match expectedBt with
+        | some bt => pure bt
+        | none => match pe.ty.bind coreBaseTypeToCN with
+          | some bt => pure bt
+          | none => TypingM.fail (.other "Cannot determine type for Unspecified value")
       let symUndef : Sym := { id := 0, name := some "undef" }
-      return AnnotTerm.mk (.sym symUndef) resBt loc
+      return AnnotTerm.mk (.sym symUndef) unspecBt loc
     | _ =>
-      -- Other constructors (nil, cons, array, etc.) - create a symbolic term
-      -- This is a simplification; full support would track list/array values
-      let state ← TypingM.getState
-      let ctorSym : Sym := { id := state.freshCounter, name := some s!"ctor_{repr c}" }
-      TypingM.modifyState fun s => { s with freshCounter := s.freshCounter + 1 }
-      return AnnotTerm.mk (.sym ctorSym) resBt loc
+      -- Other constructors (nil, cons, array, etc.) are not supported
+      -- Do not create symbolic terms - fail explicitly
+      TypingM.fail (.other s!"Unsupported constructor in expression: {repr c}")
 
   -- Function call (pure)
   | .call name args =>
@@ -555,7 +635,8 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
           let peArg : APexpr := ⟨[], none, arg⟩
           checkPexpr peArg
         let fnSym : Sym := { id := 0, name := fnName }
-        let resBt := pe.ty.map coreBaseTypeToCN |>.getD .integer
+        let fnStr := fnName.getD "unknown"
+        let resBt ← requireCoreBaseTypeToCN pe.ty s!"function call {fnStr}"
         return AnnotTerm.mk (.apply fnSym argTerms) resBt loc
     else
       -- General function call
@@ -565,7 +646,10 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
       let fnSym := match name with
         | .sym s => s
         | .impl _ => { id := 0, name := some "impl_const" : Sym }  -- Placeholder
-      let resBt := pe.ty.map coreBaseTypeToCN |>.getD .unit
+      let fnNameStr := match name with
+        | .sym s => s.name.getD "unknown"
+        | .impl _ => "impl"
+      let resBt ← requireCoreBaseTypeToCN pe.ty s!"function call {fnNameStr}"
       return AnnotTerm.mk (.apply fnSym argTerms) resBt loc
 
   -- Case/match expression
@@ -582,7 +666,7 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
       -- Convert APattern to CN Pattern
       let cnPat := convertPattern pat tScrut.bt loc
       return (cnPat, tBody)
-    let resBt := pe.ty.map coreBaseTypeToCN |>.getD .unit
+    let resBt ← requireCoreBaseTypeToCN pe.ty "case/match expression"
     return AnnotTerm.mk (.match_ tScrut cnBranches) resBt loc
 
   -- Struct literal
@@ -591,7 +675,10 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
       let peExpr : APexpr := ⟨[], none, expr⟩
       let tExpr ← checkPexpr peExpr
       return (id, tExpr)
-    let resBt := pe.ty.map coreBaseTypeToCN |>.getD (.struct_ tag)
+    -- For struct literals, we know the type from the tag; use pe.ty if available for consistency
+    let resBt ← match pe.ty.bind coreBaseTypeToCN with
+      | some bt => pure bt
+      | none => pure (.struct_ tag)  -- Struct tag provides the type when annotation missing
     return AnnotTerm.mk (.struct_ tag memberTerms) resBt loc
 
   -- Undefined behavior marker
@@ -601,7 +688,7 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
     -- should not be taken. We return a symbolic term representing undefined.
     -- The CN verifier will ensure this value is never actually used
     -- (i.e., the path condition leading here is unsatisfiable).
-    let resBt := pe.ty.map coreBaseTypeToCN |>.getD .integer
+    let resBt ← requireCoreBaseTypeToCN pe.ty "undef expression"
     let symUndef : Core.Sym := {
       id := 0,
       name := some "undef",
@@ -618,9 +705,9 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
     match c with
     | .sizeof_ ct =>
       return AnnotTerm.mk (.sizeOf ct) .integer loc
-    | .alignof_ ct =>
-      -- alignof not directly in CN terms, use sizeof as approximation
-      return AnnotTerm.mk (.sizeOf ct) .integer loc
+    | .alignof_ _ct =>
+      -- alignof not supported in CN terms
+      TypingM.fail (.other "alignof not supported - CN does not have alignof terms")
     | .intMax ty =>
       -- Maximum value of integer type
       let maxVal := intTypeMax ty
@@ -640,63 +727,56 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
     checkPexpr pe'
 
   -- Wrap integer (modular arithmetic)
-  | .wrapI _ty _op e1 e2 =>
+  | .wrapI ty _op e1 e2 =>
     -- Wrap integer: compute the operation with modular wrapping
-    -- For CN verification, we evaluate the operands symbolically
-    let pe1 : APexpr := ⟨[], pe.ty, e1⟩
-    let pe2 : APexpr := ⟨[], pe.ty, e2⟩
-    let t1 ← checkPexpr pe1
-    let t2 ← checkPexpr pe2
+    -- Use the IntegerType to determine the proper Bits type for operands
+    -- Corresponds to: CN's handling of integer operations with Bits types
+    let opBt := integerTypeToBaseType ty
+    let pe1 : APexpr := ⟨[], none, e1⟩
+    let pe2 : APexpr := ⟨[], none, e2⟩
+    let t1 ← checkPexpr pe1 (some opBt)
+    let t2 ← checkPexpr pe2 (some t1.bt)
     -- Return a symbolic operation (the wrapping is implicit in the type)
     return AnnotTerm.mk (.binop .add t1 t2) t1.bt loc
 
   -- Catch exceptional condition (overflow checking)
-  | .catchExceptionalCondition _ty op e1 e2 =>
+  | .catchExceptionalCondition ty op e1 e2 =>
     -- Exceptional condition check: evaluate operation, checking for overflow
-    -- For CN verification, we evaluate symbolically (assume no overflow for now)
-    let pe1 : APexpr := ⟨[], pe.ty, e1⟩
-    let pe2 : APexpr := ⟨[], pe.ty, e2⟩
-    let t1 ← checkPexpr pe1
-    let t2 ← checkPexpr pe2
+    -- Use the IntegerType to determine the proper Bits type for operands
+    -- This is critical: ensures that 0 in "0 - x" (negation) gets Bits type
+    -- Corresponds to: CN's handling of PEcatch_exceptional_condition
+    let opBt := integerTypeToBaseType ty
+    let pe1 : APexpr := ⟨[], none, e1⟩
+    let pe2 : APexpr := ⟨[], none, e2⟩
+    let t1 ← checkPexpr pe1 (some opBt)
+    let t2 ← checkPexpr pe2 (some t1.bt)
     -- Map the Iop to CN binop
-    let cnOp := match op with
-      | .add => BinOp.add
-      | .sub => BinOp.sub
-      | .mul => BinOp.mul
-      | .div => BinOp.div
-      | .rem_t => BinOp.rem
-      | .shl | .shr => BinOp.add  -- shifts not directly in CN, approximate
+    let cnOp ← match op with
+      | .add => pure BinOp.add
+      | .sub => pure BinOp.sub
+      | .mul => pure BinOp.mul
+      | .div => pure BinOp.div
+      | .rem_t => pure BinOp.rem
+      | .shl => TypingM.fail (.other "shift left (shl) not supported in CN catch_exceptional_condition")
+      | .shr => TypingM.fail (.other "shift right (shr) not supported in CN catch_exceptional_condition")
     return AnnotTerm.mk (.binop cnOp t1 t2) t1.bt loc
 
   -- Type predicates (is_scalar, is_integer, etc.)
-  | .isScalar e =>
-    let pe' : APexpr := ⟨[], some .ctype, e⟩
-    let _t ← checkPexpr pe'
-    -- These are runtime type checks - return true symbolically
-    return AnnotTerm.mk (.const (.bool true)) .bool loc
+  -- These require actual type checking, not constant returns
+  | .isScalar _e =>
+    TypingM.fail (.other "isScalar type predicate not implemented - requires type analysis")
 
-  | .isInteger e =>
-    let pe' : APexpr := ⟨[], some .ctype, e⟩
-    let _t ← checkPexpr pe'
-    return AnnotTerm.mk (.const (.bool true)) .bool loc
+  | .isInteger _e =>
+    TypingM.fail (.other "isInteger type predicate not implemented - requires type analysis")
 
-  | .isSigned e =>
-    let pe' : APexpr := ⟨[], some .ctype, e⟩
-    let _t ← checkPexpr pe'
-    return AnnotTerm.mk (.const (.bool true)) .bool loc
+  | .isSigned _e =>
+    TypingM.fail (.other "isSigned type predicate not implemented - requires type analysis")
 
-  | .isUnsigned e =>
-    let pe' : APexpr := ⟨[], some .ctype, e⟩
-    let _t ← checkPexpr pe'
-    return AnnotTerm.mk (.const (.bool false)) .bool loc
+  | .isUnsigned _e =>
+    TypingM.fail (.other "isUnsigned type predicate not implemented - requires type analysis")
 
-  | .areCompatible e1 e2 =>
-    let pe1 : APexpr := ⟨[], some .ctype, e1⟩
-    let pe2 : APexpr := ⟨[], some .ctype, e2⟩
-    let _t1 ← checkPexpr pe1
-    let _t2 ← checkPexpr pe2
-    -- Type compatibility check - return symbolic result
-    return AnnotTerm.mk (.const (.bool true)) .bool loc
+  | .areCompatible _e1 _e2 =>
+    TypingM.fail (.other "areCompatible type predicate not implemented - requires type analysis")
 
   -- C function pointer extraction
   | .cfunction e =>
@@ -718,7 +798,7 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
     let argTerms ← args.mapM fun arg => do
       let peArg : APexpr := ⟨[], none, arg⟩
       checkPexpr peArg
-    let resBt := pe.ty.map coreBaseTypeToCN |>.getD .bool
+    let resBt ← requireCoreBaseTypeToCN pe.ty "pureMemop"
     -- Return a symbolic term for the memory operation result
     let state ← TypingM.getState
     let memopSym : Sym := { id := state.freshCounter, name := some "memop_result" }

@@ -49,29 +49,52 @@ We must match this exactly.
 Corresponds to: CN's solver.ml translate_bt function
 -/
 
+/-- Result of sort translation -/
+inductive SortResult where
+  | ok (tm : Smt.Term)
+  | unsupported (reason : String)
+  deriving Inhabited
+
 /-- Convert CN BaseType to SMT-LIB2 sort.
     Matches CN's Solver.translate_bt which uses `SMT.t_bits n` for Bits types.
-    Corresponds to: solver.ml line 409: `| Bits (_, n) -> SMT.t_bits n` -/
-def baseTypeToSort : BaseType → Smt.Term
-  | .bits _ width => Term.mkApp2 (Term.symbolT "_")
+    Corresponds to: solver.ml line 409: `| Bits (_, n) -> SMT.t_bits n`
+    Returns unsupported for types that cannot be represented in SMT. -/
+def baseTypeToSort : BaseType → SortResult
+  | .bits _ width => .ok (Term.mkApp2 (Term.symbolT "_")
                                   (Term.symbolT "BitVec")
-                                  (Term.literalT (toString width))
-  | .integer => Term.symbolT "Int"
-  | .bool => Term.symbolT "Bool"
-  | .real => Term.symbolT "Real"
-  | .loc => Term.symbolT "Int"  -- Pointers as integers (addresses)
-  | .allocId => Term.symbolT "Int"  -- Allocation IDs as integers
-  | .unit => Term.symbolT "Bool"  -- Unit as Bool (SMT doesn't have Unit)
-  | .struct_ _ => Term.symbolT "Int"  -- Structs unsupported, fallback
-  | .memByte => Term.symbolT "Int"  -- Memory bytes as integers
-  | .list _ => Term.symbolT "Int"  -- Lists unsupported
-  | .set _ => Term.symbolT "Int"  -- Sets unsupported
-  | .tuple _ => Term.symbolT "Int"  -- Tuples unsupported
-  | .map _ _ => Term.symbolT "Int"  -- Maps unsupported
-  | .record _ => Term.symbolT "Int"  -- Records unsupported
-  | .datatype _ => Term.symbolT "Int"  -- Datatypes unsupported
-  | .ctype => Term.symbolT "Int"  -- C types as integers
-  | .option _ => Term.symbolT "Int"  -- Options unsupported
+                                  (Term.literalT (toString width)))
+  | .integer => .ok (Term.symbolT "Int")
+  | .bool => .ok (Term.symbolT "Bool")
+  | .real => .ok (Term.symbolT "Real")
+  | .loc => .ok (Term.symbolT "Int")  -- Pointers as integers (addresses)
+  | .allocId => .ok (Term.symbolT "Int")  -- Allocation IDs as integers
+  | .unit => .ok (Term.symbolT "Bool")  -- Unit as Bool (SMT doesn't have Unit)
+  | .memByte => .ok (Term.symbolT "Int")  -- Memory bytes as integers
+  | .struct_ tag =>
+    let tagStr := tag.name.getD "?"
+    .unsupported s!"struct type {tagStr}"
+  | .list elemBt =>
+    let elemStr := toString (repr elemBt)
+    .unsupported s!"list type (element: {elemStr})"
+  | .set elemBt =>
+    let elemStr := toString (repr elemBt)
+    .unsupported s!"set type (element: {elemStr})"
+  | .tuple bts =>
+    .unsupported s!"tuple type ({bts.length} elements)"
+  | .map keyBt valBt =>
+    let keyStr := toString (repr keyBt)
+    let valStr := toString (repr valBt)
+    .unsupported s!"map type ({keyStr} -> {valStr})"
+  | .record fields =>
+    .unsupported s!"record type ({fields.length} fields)"
+  | .datatype dtTag =>
+    let dtName := dtTag.name.getD "?"
+    .unsupported s!"datatype {dtName}"
+  | .ctype =>
+    .unsupported "ctype"
+  | .option innerBt =>
+    let innerStr := toString (repr innerBt)
+    .unsupported s!"option type ({innerStr})"
 
 /-! ## Translation to Smt.Term -/
 
@@ -213,6 +236,11 @@ def unOpToTerm (op : UnOp) (argBt : BaseType) (arg : Smt.Term) : TranslateResult
     Both operands are expected to have matching types (enforced by Pexpr.lean).
     Corresponds to: CN's solver.ml lines 688-702 for arithmetic, 752-765 for comparisons -/
 def binOpToTerm (op : BinOp) (lBt rBt : BaseType) (l r : Smt.Term) : TranslateResult :=
+  -- Type consistency check: both operands should have matching types
+  -- If they don't, the type checker has a bug - don't mask it
+  if isBitsType lBt != isBitsType rBt then
+    .unsupported s!"Type mismatch in binop {repr op}: left={repr lBt}, right={repr rBt}"
+  else
   -- Both operands should have matching types after Pexpr type fixup
   -- Use left operand's type to determine if we need bitvector ops
   let useBv := isBitsType lBt
@@ -312,15 +340,17 @@ partial def termToSmtTerm : Types.Term → TranslateResult
   | .eachI lo (s, bt) hi body =>
     -- Bounded quantification: use proper sort for bound variable
     let name := symToSmtName s
-    let sort := baseTypeToSort bt
-    match annotTermToSmtTerm body with
-    | .ok b =>
-      let rangeConstraint := Term.mkApp2 (Term.symbolT "and")
-        (Term.mkApp2 (Term.symbolT ">=") (Term.symbolT name) (Term.literalT (toString lo)))
-        (Term.mkApp2 (Term.symbolT "<=") (Term.symbolT name) (Term.literalT (toString hi)))
-      let implBody := Term.mkApp2 (Term.symbolT "=>") rangeConstraint b
-      .ok (Term.forallT name sort implBody)
-    | .unsupported r => .unsupported r
+    match baseTypeToSort bt with
+    | .unsupported reason => .unsupported s!"eachI bound variable type: {reason}"
+    | .ok sort =>
+      match annotTermToSmtTerm body with
+      | .ok b =>
+        let rangeConstraint := Term.mkApp2 (Term.symbolT "and")
+          (Term.mkApp2 (Term.symbolT ">=") (Term.symbolT name) (Term.literalT (toString lo)))
+          (Term.mkApp2 (Term.symbolT "<=") (Term.symbolT name) (Term.literalT (toString hi)))
+        let implBody := Term.mkApp2 (Term.symbolT "=>") rangeConstraint b
+        .ok (Term.forallT name sort implBody)
+      | .unsupported r => .unsupported r
   | .let_ var binding body =>
     let name := symToSmtName var
     match annotTermToSmtTerm binding, annotTermToSmtTerm body with
@@ -366,14 +396,32 @@ partial def termToSmtTerm : Types.Term → TranslateResult
             .ok (Term.mkApp2 (Term.symbolT "and") loCond hiCond)
           | none => .unsupported s!"representable for {repr ity}"
         | _ => .unsupported s!"representable for non-integer type"
-  | .good _ val => annotTermToSmtTerm val
-  | .wrapI _ val => annotTermToSmtTerm val
-  | .cast _ val => annotTermToSmtTerm val
-  | .copyAllocId _ loc => annotTermToSmtTerm loc
-  | .hasAllocId _ => .ok (Term.symbolT "true")
-  | .sizeOf _ => .ok (Term.literalT "1")
-  | .offsetOf _ _ => .ok (Term.literalT "0")
-  | .memberShift ptr _ _ => annotTermToSmtTerm ptr
+  | .good ct _val =>
+    -- good(ct, val) checks val is representable in ct - needs proper handling
+    .unsupported s!"good (type check for {repr ct.ty})"
+  | .wrapI intType _val =>
+    -- wrapI wraps to representation - needs proper handling
+    .unsupported s!"wrapI (wrap to {repr intType})"
+  | .cast targetType _val =>
+    -- cast changes type - needs proper handling
+    .unsupported s!"cast (to {repr targetType})"
+  | .copyAllocId _addr _loc =>
+    -- copyAllocId copies allocation ID from one pointer to another
+    .unsupported "copyAllocId"
+  | .hasAllocId _ptr =>
+    -- hasAllocId checks if pointer has a valid allocation ID
+    .unsupported "hasAllocId"
+  | .sizeOf ct =>
+    -- sizeOf needs actual type layout
+    .unsupported s!"sizeOf ({repr ct.ty})"
+  | .offsetOf tag member =>
+    -- offsetOf needs actual struct layout
+    let tagStr := tag.name.getD "?"
+    .unsupported s!"offsetOf ({tagStr}, {member.name})"
+  | .memberShift _ptr tag member =>
+    -- memberShift needs actual struct layout
+    let tagStr := tag.name.getD "?"
+    .unsupported s!"memberShift ({tagStr}, {member.name})"
   | .cnSome val => annotTermToSmtTerm val
   | .getOpt opt => annotTermToSmtTerm opt
   | .apply fn args =>
@@ -399,9 +447,7 @@ partial def termToSmtTerm : Types.Term → TranslateResult
       else
         .unsupported s!"nthTuple index {n} out of bounds for tuple of size {elems.length}"
     | _ =>
-      -- For non-tuple terms, if n=0, just return the term (treating as single-element)
-      if n == 0 then annotTermToSmtTerm tup
-      else .unsupported s!"nthTuple on non-tuple term"
+      .unsupported s!"nthTuple on non-tuple term (index {n}, term type {repr tup.bt})"
   | .struct_ _ _ => .unsupported "struct"
   | .structMember _ _ => .unsupported "structMember"
   | .structUpdate _ _ _ => .unsupported "structUpdate"
@@ -423,38 +469,19 @@ partial def termToSmtTerm : Types.Term → TranslateResult
     | [(_, body)] =>
       -- Single case: just use the body
       annotTermToSmtTerm body
-    | [(pat1, body1), (pat2, body2)] =>
-      -- Two cases: convert to if-then-else
-      -- Check if this is a Specified/Unspecified pattern
-      let isSpecified (p : Types.Pattern) : Bool :=
-        match p with
-        | .mk (.constructor s _) _ _ => s.name == some "Specified"
+    | [(_, body1), (_, body2)] =>
+      -- Two cases: convert to if-then-else if scrutinee is boolean
+      let isBoolType : BaseType → Bool
+        | .bool => true
         | _ => false
-      let isUnspecified (p : Types.Pattern) : Bool :=
-        match p with
-        | .mk (.constructor s _) _ _ => s.name == some "Unspecified"
-        | _ => false
-      if isSpecified pat1 && isUnspecified pat2 then
-        -- Pattern: match x with Specified(v) => e1 | Unspecified => e2
-        -- Assume we're always in the Specified case (sound for verification)
-        annotTermToSmtTerm body1
-      else if isUnspecified pat1 && isSpecified pat2 then
-        -- Opposite order
-        annotTermToSmtTerm body2
+      if isBoolType scrutinee.bt then
+        match annotTermToSmtTerm scrutinee, annotTermToSmtTerm body1, annotTermToSmtTerm body2 with
+        | .ok s, .ok b1, .ok b2 => .ok (Term.mkApp3 (Term.symbolT "ite") s b1 b2)
+        | .unsupported r, _, _ => .unsupported r
+        | _, .unsupported r, _ => .unsupported r
+        | _, _, .unsupported r => .unsupported r
       else
-        -- Generic 2-case match: convert to ite if scrutinee is boolean
-        let isBoolType : BaseType → Bool
-          | .bool => true
-          | _ => false
-        if isBoolType scrutinee.bt then
-          match annotTermToSmtTerm scrutinee, annotTermToSmtTerm body1, annotTermToSmtTerm body2 with
-          | .ok s, .ok b1, .ok b2 => .ok (Term.mkApp3 (Term.symbolT "ite") s b1 b2)
-          | .unsupported r, _, _ => .unsupported r
-          | _, .unsupported r, _ => .unsupported r
-          | _, _, .unsupported r => .unsupported r
-        else
-          -- For now, just use the first branch (pragmatic approximation)
-          annotTermToSmtTerm body1
+        .unsupported s!"match on non-boolean scrutinee (type {repr scrutinee.bt})"
     | [] => .unsupported "match with no cases"
     | _ => .unsupported s!"match with {cases.length} cases"
   | .cnNone _ => .unsupported "cnNone"
@@ -471,10 +498,12 @@ def constraintToSmtTerm : LogicalConstraint → TranslateResult
   | .t it => annotTermToSmtTerm it
   | .forall_ (s, bt) body =>
     let name := symToSmtName s
-    let sort := baseTypeToSort bt  -- Use proper sort for bound variable
-    match annotTermToSmtTerm body with
-    | .ok b => .ok (Term.forallT name sort b)
-    | .unsupported r => .unsupported r
+    match baseTypeToSort bt with
+    | .unsupported reason => .unsupported s!"forall bound variable type: {reason}"
+    | .ok sort =>
+      match annotTermToSmtTerm body with
+      | .ok b => .ok (Term.forallT name sort b)
+      | .unsupported r => .unsupported r
 
 /-! ## Free Symbol Collection with Types
 
@@ -541,7 +570,7 @@ end
 /-- Collect free symbols with types from a LogicalConstraint -/
 def constraintFreeTypedSyms : LogicalConstraint → List TypedSym
   | .t it => annotTermFreeTypedSyms it
-  | .forall_ (s, bt) body =>
+  | .forall_ (s, _bt) body =>
     -- The bound variable has the given type, but we filter it out
     (annotTermFreeTypedSyms body).filter (·.1 != s)
 
@@ -581,8 +610,12 @@ def obligationToCommands (ob : Obligation) : List Command × List String :=
   let typedSyms := obligationFreeTypedSyms ob
 
   -- Generate declarations with proper SMT sorts (BitVec for Bits types)
-  let decls := typedSyms.map fun (s, bt) =>
-    Command.declare (symToSmtName s) (baseTypeToSort bt)
+  -- Collect errors for symbols with unsupported types
+  let (decls, declErrors) := typedSyms.foldl (fun (cmds, errs) (s, bt) =>
+    match baseTypeToSort bt with
+    | .ok sort => (cmds ++ [Command.declare (symToSmtName s) sort], errs)
+    | .unsupported reason => (cmds, errs ++ [s!"symbol {symToSmtName s}: {reason}"])
+  ) ([], [])
 
   -- Translate assumptions
   let (assumptionTerms, assumptionErrors) := ob.assumptions.foldl
@@ -609,7 +642,7 @@ def obligationToCommands (ob : Obligation) : List Command × List String :=
     | .ok tm => (tm, [])
     | .unsupported r => (Term.symbolT "false", [r])
 
-  let allErrors := assumptionErrors.reverse ++ goalErrors
+  let allErrors := declErrors ++ assumptionErrors.reverse ++ goalErrors
 
   -- Build implication: assumptions => goal
   let implication := Term.mkApp2 (Term.symbolT "=>") assumptionConj goalTerm

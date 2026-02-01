@@ -243,17 +243,10 @@ def handleKill (kind : KillKind) (ptrPe : APexpr) (loc : Core.Loc)
       -- Resource consumed successfully
       return mkUnitTerm loc
     | none =>
-      -- No resource found - this can happen with Cerberus-generated code
-      -- that has multiple cleanup points (e.g., return statement + scope exit).
-      -- We treat this as idempotent (killing already-freed memory is a no-op)
-      -- rather than a hard error.
-      --
-      -- TODO: POTENTIAL CN DISCREPANCY - Kill idempotence needs careful review.
-      -- CN may require the resource to exist. We make kill idempotent to handle
-      -- Cerberus's double-kill pattern, but this should be revisited when proving
-      -- type checking correct wrt runtime semantics. If CN actually requires the
-      -- resource, we'd need to track "already killed" state differently.
-      return mkUnitTerm loc
+      -- No resource found - this is an error.
+      -- CN requires the resource to exist for kill actions.
+      -- Attempting to kill non-existent memory is a verification failure.
+      TypingM.fail (.other s!"Kill: no Owned resource found for pointer (possible double-free or use-after-free)")
 
 /-- Handle store action: write to memory.
     Consumes Owned<T>(Uninit) or Owned<T>(Init), produces Owned<T>(Init) with the stored value.
