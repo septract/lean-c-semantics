@@ -1,5 +1,7 @@
 # Lean C Semantics
 
+> **⚠️ CRITICAL: Read "ABSOLUTE RULE: Fail, Never Guess" in Development Notes before writing any code. Never add fall-throughs. Never guess. Never approximate. Failure is always better than incorrect output.**
+
 ## Overview
 A Lean 4 implementation of C semantics via Cerberus. Cerberus compiles C to its Core intermediate representation; this project parses and executes Core in Lean, enabling formal reasoning about C programs.
 
@@ -57,6 +59,8 @@ lean-c-semantics/
 
 ## Key Design Decisions
 
+> **⚠️ BEFORE WRITING ANY CODE**: Read "ABSOLUTE RULE: Fail, Never Guess" in Development Notes. This is the most important rule in this codebase. Never add fall-through cases. Never guess. Never approximate. Failure is always better than being incorrect.
+
 ### 0. CRITICAL: Interpreter Must Match Cerberus EXACTLY
 
 **The Lean interpreter MUST mirror Cerberus semantics EXACTLY.**
@@ -68,6 +72,8 @@ lean-c-semantics/
 - Document correspondence with comments linking to Cerberus source (file:lines)
 
 This is not about writing "good Lean code" - it's about creating a verifiable translation that can be audited for correctness against the Cerberus reference implementation.
+
+**⚠️ CRITICAL**: See "ABSOLUTE RULE: Fail, Never Guess" in Development Notes. When implementing interpreter functionality, you MUST fail on unrecognized cases - NEVER add fall-through defaults. If Cerberus would error, we MUST error.
 
 See `docs/2025-12-31_INTERPRETER_REFACTOR.md` for the audit checklist and correspondence documentation requirements.
 
@@ -82,6 +88,8 @@ See `docs/2026-01-01_MEMORY_AUDIT.md` for the memory model audit plan and Cerber
 - Each type and function must be auditable against the corresponding CN code
 - Document correspondence with comments linking to CN source (file:lines)
 - This allows us to reuse CN's theory and proofs
+
+**⚠️ CRITICAL**: See "ABSOLUTE RULE: Fail, Never Guess" in Development Notes. When implementing CN type checking, you MUST fail on unrecognized cases - NEVER add fall-through defaults or "simplifications" that guess types. If CN would reject something, we MUST reject it. If CN would fail, we MUST fail.
 
 **Audit Comment Style** (same as Cerberus audit comments):
 ```lean
@@ -564,7 +572,72 @@ make test-genproof
 
 ## Development Notes
 
+### ⚠️ MOST IMPORTANT RULE IN THIS FILE ⚠️
+
+### ABSOLUTE RULE: Fail, Never Guess
+
+**It is ALWAYS better to fail than to be incorrect. NEVER approximate. NEVER guess. NEVER add fall-through cases. This is the single most important rule in this codebase.**
+
+This applies to EVERYTHING: parser, interpreter, type checker, memory model, all code in this project. No exceptions. No "reasonable" shortcuts.
+
+**The rule is simple**: If the code doesn't know the correct answer, it MUST fail. Returning a wrong answer - even one that "might work" or "seems reasonable" - is absolutely forbidden.
+
+```lean
+-- ❌ FORBIDDEN: fall-through / catch-all cases
+| _ => someValue
+| _, _ => defaultResult
+| _ => pure anything
+
+-- ❌ FORBIDDEN: guessing when information is missing
+| none => assumedDefault
+| [] => likelyValue
+
+-- ❌ FORBIDDEN: "reasonable" approximations
+-- "most types are probably int" → NO
+-- "this is usually true" → NO
+-- "we can assume X" → NO
+-- "let's simplify by defaulting to Y" → NO
+```
+
+The ONLY acceptable behavior when the correct answer is unknown:
+```lean
+-- ✓ Fail explicitly
+| _ => throw "unhandled case: ..."
+| _ => .error "unexpected: ..."
+| _ => throw "not yet implemented: ..."  -- for incomplete implementations
+| none => none  -- propagate the unknown
+| _ => panic! "impossible case" -- if truly impossible
+```
+
+**This also applies to incomplete implementations**: Our implementation may not cover everything CN or Cerberus does yet. When you encounter a case we haven't implemented, you MUST fail explicitly - not guess, not approximate, not "handle it for now." Unimplemented functionality must error with a clear message like `throw "not yet implemented: X"`. This ensures we know exactly what's missing rather than having hidden gaps that silently produce wrong results.
+
+**Why this matters**: This project implements formal semantics. A wrong answer that happens to work sometimes is **infinitely worse** than a clear failure. Wrong answers:
+- Hide bugs (tests pass but behavior is incorrect)
+- Are nearly impossible to debug (no error points to the problem)
+- Compound silently (one wrong guess feeds into another)
+- Undermine the entire purpose of formal verification
+
+A failure is immediately visible, debuggable, and fixable. An incorrect result can hide for months.
+
+**Common rationalizations that are ALL WRONG**:
+- "This handles edge cases gracefully" → Incorrect output is not graceful
+- "This simplifies the code" → Correctness over brevity, always
+- "This case probably can't happen" → Then fail if it does
+- "This is a reasonable default" → There are no reasonable defaults
+- "The user/caller probably meant X" → If ambiguous, fail
+- "We can refine this later" → No, fail now, fix properly later
+- "This makes the code more robust" → Silent incorrectness is not robustness
+- "This is just a fallback" → Fallbacks that guess are forbidden
+- "I'll handle this for now until it's implemented" → No, throw "not yet implemented"
+- "This covers the gap in our implementation" → Gaps must error, not guess
+
+**If you find yourself writing `| _ =>` or `| _, _ =>` that returns a value (not an error), STOP. You are about to violate the most important rule in this codebase.**
+
+---
+
 ### ABSOLUTE RULE: NEVER Silently Swallow Errors
+
+**(This is a specific instance of "Fail, Never Guess" above - read that section first.)**
 
 **NEVER EVER catch an error and silently substitute a default value. NEVER. UNDER ANY CIRCUMSTANCES. This applies to the ENTIRE project - parser, interpreter, memory model, everything.**
 
@@ -596,6 +669,8 @@ Silent error swallowing hides bugs. We discovered the parser was completely brok
 **NEVER commit changes without first running `make test`.** This ensures the build succeeds and all tests pass. A commit that breaks tests is unacceptable.
 
 ### ABSOLUTE RULE: NEVER Modify Tests to Achieve a Pass
+
+**(This is related to "Fail, Never Guess" - modifying tests to pass is another form of hiding incorrectness.)**
 
 **NEVER modify, weaken, or remove a test in order to make it pass. NEVER. UNDER ANY CIRCUMSTANCES.**
 
