@@ -83,29 +83,33 @@ def checkObligation
   -- Get the commands
   let (cmds, _) := obligationToCommands ob
 
-  -- Create solver
-  let state ← Smt.Translate.Solver.createFromKind kind path timeout
+  -- Create solver with error handling
+  try
+    let state ← Smt.Translate.Solver.createFromKind kind path timeout
 
-  -- Run the query
-  let result ← StateT.run (s := state) do
-    -- Emit all commands except checkSat (we'll call it separately)
-    for cmd in cmds.dropLast do
-      Smt.Translate.Solver.emitCommand cmd
-    -- Check satisfiability
-    Smt.Translate.Solver.checkSat
+    -- Run the query
+    let result ← StateT.run (s := state) do
+      -- Emit all commands except checkSat (we'll call it separately)
+      for cmd in cmds.dropLast do
+        Smt.Translate.Solver.emitCommand cmd
+      -- Check satisfiability
+      Smt.Translate.Solver.checkSat
 
-  let (smtResult, finalState) := result
+    let (smtResult, finalState) := result
 
-  -- Clean up
-  let _ ← StateT.run (s := finalState) Smt.Translate.Solver.exit
+    -- Clean up
+    let _ ← StateT.run (s := finalState) Smt.Translate.Solver.exit
 
-  -- Convert result
-  let checkResult := match smtResult with
-    | .unsat => CheckResult.valid      -- No counterexample exists, obligation holds
-    | .sat => CheckResult.invalid      -- Counterexample exists, obligation fails
-    | .unknown => CheckResult.unknown
+    -- Convert result
+    let checkResult := match smtResult with
+      | .unsat => CheckResult.valid      -- No counterexample exists, obligation holds
+      | .sat => CheckResult.invalid      -- Counterexample exists, obligation fails
+      | .unknown => CheckResult.unknown
 
-  return { obligation := ob, result := checkResult, query := some queryStr }
+    return { obligation := ob, result := checkResult, query := some queryStr }
+  catch e =>
+    -- Catch solver errors and return as error result with the query
+    return { obligation := ob, result := .error (toString e), query := some queryStr }
 
 /-- Check all obligations in a set -/
 def checkObligations

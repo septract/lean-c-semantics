@@ -592,12 +592,20 @@ This applies to EVERYTHING: parser, interpreter, type checker, memory model, all
 | none => assumedDefault
 | [] => likelyValue
 
+-- ❌ FORBIDDEN: .getD with default values (VERY COMMON VIOLATION)
+pe.ty.map convertType |>.getD .unit   -- NO! This silently defaults to unit
+option.getD defaultValue              -- NO! Propagate the none instead
+
 -- ❌ FORBIDDEN: "reasonable" approximations
 -- "most types are probably int" → NO
 -- "this is usually true" → NO
 -- "we can assume X" → NO
 -- "let's simplify by defaulting to Y" → NO
 ```
+
+**Particularly dangerous pattern - `.getD`**: The pattern `something.getD defaultValue` looks like reasonable Option handling but is actually silently swallowing missing information. If you don't have the value, FAIL - don't substitute a default. This pattern has caused 15+ violations in a single audit.
+
+**Particularly dangerous default - `.unit`**: Using `.unit` as a default type is especially insidious because it's a valid type that doesn't look obviously wrong. Code like `|>.getD .unit` or `| _ => .unit` compiles fine and may even pass some tests, but it silently corrupts type information. The same applies to using `Int` as a default SMT sort, `true`/`false` as default booleans, or `[]` as a default list.
 
 The ONLY acceptable behavior when the correct answer is unknown:
 ```lean
@@ -631,7 +639,20 @@ A failure is immediately visible, debuggable, and fixable. An incorrect result c
 - "I'll handle this for now until it's implemented" → No, throw "not yet implemented"
 - "This covers the gap in our implementation" → Gaps must error, not guess
 
+**Red flag phrases in comments** - If you write any of these, you are about to violate the rule:
+- `-- For simplicity` → You're about to simplify away correctness
+- `-- For now` → You're about to add a temporary hack that guesses
+- `-- Simplified` → You're about to lose precision
+- `-- Fallback` → You're about to guess when you don't know
+- `-- Pragmatic` / `-- Approximation` → You're about to be wrong
+- `-- Sound for verification` → You're about to silently pick one case
+- `-- Default to X` → You're about to guess X
+- `-- TODO` with non-failing code → You're leaving a hidden gap
+- `-- CN would fail here` with non-failing code → You MUST fail too!
+
 **If you find yourself writing `| _ =>` or `| _, _ =>` that returns a value (not an error), STOP. You are about to violate the most important rule in this codebase.**
+
+**See also**: `docs/2026-02-01_CN_ANTIPATTERN_AUDIT.md` documents 48 violations of this rule found in a single audit. Learn from these mistakes.
 
 ---
 

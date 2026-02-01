@@ -169,7 +169,11 @@ def buildCtype (sign : Option CSignSpec) (size : Option CSizeSpec) (baseName : S
       then .basic (.floating (.realFloating .longDouble))
       else .basic (.floating (.realFloating .double))
     | _ =>
-      -- Treat as struct tag for now (could also be typedef)
+      -- User-defined type (typedef, struct name without 'struct' keyword, etc.)
+      -- CN resolves these against the C context later. At parse time, we accept
+      -- any identifier as a potential type name and represent it using struct_
+      -- (limitation: our Ctype lacks a distinct typedef variant).
+      -- Examples: size_t, uint32_t, my_struct_t
       .struct_ { id := 0, name := some baseName }
 
   -- Apply pointer indirection
@@ -463,23 +467,20 @@ def predName : P ResourceName := do
   let name ← ident
   match name with
   | "Owned" =>
-    -- Parse optional type parameter: Owned<type>
-    let ct ← optional do
-      symbol "<"
-      let ct ← parseCtype
-      symbol ">"
-      pure ct
-    -- Default to signed int if no type specified
-    pure (.owned (ct.getD mkIntCtype) .init)
+    -- Parse required type parameter: Owned<type>
+    -- CN requires explicit type; no defaulting
+    symbol "<"
+    let ct ← parseCtype
+    symbol ">"
+    pure (.owned ct .init)
   | "Block" =>
-    -- Parse optional type parameter: Block<type>
-    let ct ← optional do
-      symbol "<"
-      let ct ← parseCtype
-      symbol ">"
-      pure ct
+    -- Parse required type parameter: Block<type>
+    -- CN requires explicit type; no defaulting
+    symbol "<"
+    let ct ← parseCtype
+    symbol ">"
     -- Block represents uninitialized memory
-    pure (.owned (ct.getD mkIntCtype) .uninit)
+    pure (.owned ct .uninit)
   | _ =>
     if name.front.isUpper then
       pure (.pname (mkSym name))
