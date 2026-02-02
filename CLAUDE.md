@@ -130,7 +130,7 @@ Key CN source files for reference:
 | `cn/lib/core_to_mucore.ml` | Core to muCore transformation |
 | `cn/lib/compile.ml` | Compilation/translation |
 
-**CN Repository**: The CN source is available at https://github.com/rems-project/cn. If needed for reference, clone it to `tmp/cn/`:
+**CN Repository**: The CN source is available at https://github.com/rems-project/cn. It may already be checked out in `tmp/cn/`. If not, clone it there:
 ```bash
 mkdir -p tmp && cd tmp && git clone --depth 1 https://github.com/rems-project/cn.git
 ```
