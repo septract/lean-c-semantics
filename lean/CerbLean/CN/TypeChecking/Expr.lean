@@ -92,12 +92,84 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
     checkPexprK pe k
 
   -- Memory operation (memop)
-  -- Corresponds to: Ememop case in check.ml lines 1524-1710
-  | .memop op _args =>
-    -- memop includes: ptrdiff, intFromPtr, ptrFromInt, ptrValidForDeref,
-    -- ptrWellAligned, ptrArrayShift, etc.
-    -- Full implementation requires proper semantic handling per operation.
-    TypingM.fail (.other s!"memop not implemented: {repr op}")
+  -- Corresponds to: Ememop case in check.ml lines 1524-1777
+  | .memop op args =>
+    match op, args with
+    -- PtrValidForDeref: check if pointer is valid for dereferencing
+    -- Corresponds to: check.ml lines 1700-1715
+    -- Returns Bool (aligned_ term)
+    | .ptrValidForDeref, [pe_ct, pe] =>
+      match extractCtypeConst pe_ct with
+      | .error e => TypingM.fail e
+      | .ok ct =>
+        match alignOfCtype ct with
+        | none => TypingM.fail (.other s!"Cannot compute alignment for type: {repr ct}")
+        | some alignVal =>
+          checkPexprK pe fun ptrTerm => do
+            -- Create aligned(ptr, align) term with Bool type
+            let alignTerm := AnnotTerm.mk (.const (.bits .unsigned 64 alignVal)) (.bits .unsigned 64) loc
+            let result := AnnotTerm.mk (.aligned ptrTerm alignTerm) .bool loc
+            k result
+
+    -- PtrWellAligned: same as PtrValidForDeref
+    -- Corresponds to: check.ml lines 1716-1725
+    | .ptrWellAligned, [pe_ct, pe] =>
+      match extractCtypeConst pe_ct with
+      | .error e => TypingM.fail e
+      | .ok ct =>
+        match alignOfCtype ct with
+        | none => TypingM.fail (.other s!"Cannot compute alignment for type: {repr ct}")
+        | some alignVal =>
+          checkPexprK pe fun ptrTerm => do
+            let alignTerm := AnnotTerm.mk (.const (.bits .unsigned 64 alignVal)) (.bits .unsigned 64) loc
+            let result := AnnotTerm.mk (.aligned ptrTerm alignTerm) .bool loc
+            k result
+
+    -- PtrArrayShift: pointer arithmetic (base + index * sizeof(element))
+    -- Corresponds to: check.ml lines 1726-1746
+    -- Returns Loc (pointer type)
+    | .ptrArrayShift, [pe_base, pe_ct, pe_idx] =>
+      match extractCtypeConst pe_ct with
+      | .error e => TypingM.fail e
+      | .ok ct =>
+        checkPexprK pe_base fun baseTerm =>
+          checkPexprK pe_idx fun idxTerm => do
+            -- Cast index to uintptr type (CN invariant: ArrayShift index must be uintptr)
+            let castIdx := AnnotTerm.mk (.cast (.bits .unsigned 64) idxTerm) (.bits .unsigned 64) loc
+            let result := AnnotTerm.mk (.arrayShift baseTerm ct castIdx) .loc loc
+            k result
+
+    -- Pointer comparisons: NOT YET IMPLEMENTED
+    -- CN's pointer comparison (check.ml lines 1525-1618) involves:
+    -- - For PtrEq/PtrNe: complex constraint involving hasAllocId_, allocId_, addr_,
+    --   and handling of ambiguous cases (same address, different provenance)
+    -- - For PtrLt/PtrGt/PtrLe/PtrGe: check_both_eq_alloc and check_live_alloc_bounds
+    --   side condition checks before creating ltPointer_/lePointer_ terms
+    -- These are NOT simple binary operations - they have semantic side effects.
+    | .ptrEq, _ => TypingM.fail (.other "memop ptrEq not yet implemented (requires provenance handling)")
+    | .ptrNe, _ => TypingM.fail (.other "memop ptrNe not yet implemented (requires provenance handling)")
+    | .ptrLt, _ => TypingM.fail (.other "memop ptrLt not yet implemented (requires allocation checks)")
+    | .ptrGt, _ => TypingM.fail (.other "memop ptrGt not yet implemented (requires allocation checks)")
+    | .ptrLe, _ => TypingM.fail (.other "memop ptrLe not yet implemented (requires allocation checks)")
+    | .ptrGe, _ => TypingM.fail (.other "memop ptrGe not yet implemented (requires allocation checks)")
+
+    -- Unimplemented memops - fail explicitly with details
+    | .ptrdiff, _ => TypingM.fail (.other "memop ptrdiff not yet implemented")
+    | .intFromPtr, _ => TypingM.fail (.other "memop intFromPtr not yet implemented")
+    | .ptrFromInt, _ => TypingM.fail (.other "memop ptrFromInt not yet implemented")
+    | .ptrMemberShift _ _, _ => TypingM.fail (.other "memop ptrMemberShift not yet implemented")
+    | .memcpy, _ => TypingM.fail (.other "memop memcpy not yet implemented")
+    | .memcmp, _ => TypingM.fail (.other "memop memcmp not yet implemented")
+    | .realloc, _ => TypingM.fail (.other "memop realloc not yet implemented")
+    | .vaStart, _ => TypingM.fail (.other "memop vaStart not yet implemented")
+    | .vaCopy, _ => TypingM.fail (.other "memop vaCopy not yet implemented")
+    | .vaArg, _ => TypingM.fail (.other "memop vaArg not yet implemented")
+    | .vaEnd, _ => TypingM.fail (.other "memop vaEnd not yet implemented")
+    | .copyAllocId, _ => TypingM.fail (.other "memop copyAllocId not yet implemented")
+    | .cheriIntrinsic _, _ => TypingM.fail (.other "memop cheriIntrinsic not yet implemented")
+
+    -- Argument count mismatch - fail with details
+    | _, _ => TypingM.fail (.other s!"memop {repr op} called with wrong number of arguments: {args.length}")
 
   -- Memory action (create, kill, store, load)
   -- Corresponds to: Eaction case in check.ml lines 1711-1984
