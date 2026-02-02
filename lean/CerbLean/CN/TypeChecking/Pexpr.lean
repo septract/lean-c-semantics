@@ -88,6 +88,62 @@ def getAnnotLoc : Core.Annot → Option Core.Loc
 def getAnnotsLoc (annots : List Core.Annot) : Core.Loc :=
   annots.findSome? getAnnotLoc |>.getD Core.Loc.t.unknown
 
+/-! ## Ctype Extraction for Memops
+
+CN memops like PtrValidForDeref take a ctype as their first argument.
+The ctype is passed as a pure expression containing a ctype constant.
+Corresponds to: check_pexpr_good_ctype_const in cn/lib/check.ml
+-/
+
+/-- Extract a Ctype constant from a pure expression.
+    Used for memop type arguments.
+    Corresponds to: check_pexpr_good_ctype_const in check.ml -/
+def extractCtypeConst (pe : APexpr) : Except TypeError Core.Ctype :=
+  match pe.expr with
+  | .val (.ctype ct) => .ok ct
+  | _ => .error (.other "Expected ctype constant in memop argument")
+
+/-- Calculate alignment of a C type inner representation.
+    Returns none for types that require TypeEnv lookup (struct, union, array).
+    Corresponds to: Memory.align_of_ctype in CN's memory.ml -/
+def alignOfCtype_ (ct : Core.Ctype_) : Option Nat :=
+  match ct with
+  | .void => some 1
+  | .basic (.integer ity) =>
+    some <| match ity with
+    | .bool => 1
+    | .char => 1
+    | .signed k | .unsigned k =>
+      match k with
+      | .ichar => 1
+      | .short => 2
+      | .int_ => 4
+      | .long | .longLong | .intptr => 8
+      | .intN n | .intLeastN n | .intFastN n => min ((n + 7) / 8) 16
+      | .intmax => 8
+    | .size_t | .ptrdiff_t | .ptraddr_t => 8
+    | .wchar_t | .wint_t => 4
+    | .enum _ => 4
+  | .basic (.floating fty) =>
+    some <| match fty with
+    | .realFloating .float => 4
+    | .realFloating .double => 8
+    | .realFloating .longDouble => 16
+  | .pointer _ _ => some 8  -- 64-bit architecture
+  | .function _ _ _ _ | .functionNoParams _ _ => some 1  -- function types have alignment 1
+  | .atomic ct' => alignOfCtype_ ct'  -- Recurse on inner Ctype_
+  | .byte => some 1
+  -- Types requiring TypeEnv lookup - fail explicitly
+  | .array _ _ => none
+  | .struct_ _ => none
+  | .union_ _ => none
+
+/-- Calculate alignment of a C type.
+    Returns none for types that require TypeEnv lookup (struct, union, array).
+    Corresponds to: Memory.align_of_ctype in CN's memory.ml -/
+def alignOfCtype (ct : Core.Ctype) : Option Nat :=
+  alignOfCtype_ ct.ty
+
 /-! ## Value Conversion
 
 Convert Core values to CN index terms.
