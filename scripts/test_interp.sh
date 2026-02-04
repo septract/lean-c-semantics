@@ -410,3 +410,17 @@ fi
 
 echo ""
 echo "Output files saved to: $OUTPUT_DIR"
+
+# Exit with failure if there were interpreter errors or mismatches
+# This ensures CI fails when our interpreter has bugs
+if [[ $LEAN_FAIL -gt 0 ]]; then
+    echo ""
+    echo "FAILED: $LEAN_FAIL interpreter error(s)"
+    exit 1
+fi
+
+if [[ $MISMATCH -gt 0 ]]; then
+    echo ""
+    echo "FAILED: $MISMATCH mismatch(es) with Cerberus"
+    exit 1
+fi

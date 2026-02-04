@@ -83,6 +83,7 @@ def getTaggedFieldMulti (obj : Json) (field : String) (expectedTags : List Strin
   else
     .error s!"field '{field}' has tag '{actualTag}', expected one of {expectedTags}"
 
+
 /-! ## Tag Constants for Validation -/
 
 /-- Valid tags for ObjectType -/
@@ -258,13 +259,64 @@ def parseLoc (j : Json) : Except String Loc := do
     .ok (.regions regions cursor)
   | other => .error s!"unknown location tag '{other}', expected Region, Point, Other, or Regions"
 
-/-- Parse annotations from JSON -/
+/-- Parse annotations from JSON (old format: extracts "loc" field) -/
 def parseAnnots (j : Json) : Except String Annots := do
   match getFieldOpt j "loc" with
   | some locJson =>
     let loc ← parseLoc locJson
     .ok [.loc loc]
   | none => .ok []
+
+/-- Parse a single annotation from JSON -/
+def parseAnnot (j : Json) : Except String Annot := do
+  let tag ← getTag j
+  match tag with
+  | "Aloc" =>
+    let locJ ← getField j "loc"
+    let loc ← parseLoc locJ
+    .ok (.loc loc)
+  | "Astd" =>
+    let text ← getStr j "text"
+    .ok (.std text)
+  | "Auid" =>
+    let uid ← getStr j "uid"
+    .ok (.uid uid)
+  | "Amarker" =>
+    let n ← getInt j "n"
+    .ok (.marker n.toNat)
+  | "Amarker_object_types" =>
+    let n ← getInt j "n"
+    .ok (.markerObjectTypes n.toNat)
+  | "Abmc" =>
+    let n ← getInt j "id"
+    .ok (.bmc (.id n.toNat))
+  | "Aattrs" =>
+    -- TODO: implement proper attribute parsing when needed
+    .error "parseAnnot: Aattrs parsing not yet implemented"
+  | "Atypedef" =>
+    let symJ ← getField j "symbol"
+    let id ← getInt symJ "id"
+    .ok (.typedef id.toNat)
+  | "Alabel" =>
+    -- TODO: implement proper label annotation parsing when needed
+    .error "parseAnnot: Alabel parsing not yet implemented"
+  | "Acerb" =>
+    -- TODO: implement proper cerb attribute parsing when needed
+    .error "parseAnnot: Acerb parsing not yet implemented"
+  | "Avalue" =>
+    -- TODO: implement proper value annotation parsing when needed
+    .error "parseAnnot: Avalue parsing not yet implemented"
+  | "Ainlined_label" =>
+    -- TODO: implement proper inlined label parsing when needed
+    .error "parseAnnot: Ainlined_label parsing not yet implemented"
+  | "Astmt" => .ok .stmt
+  | "Aexpr" => .ok .expr
+  | other => .error s!"unknown annotation tag '{other}'"
+
+/-- Parse annotations array from JSON (new format) -/
+def parseAnnots' (j : Json) : Except String Annots := do
+  let arr ← j.getArr?
+  arr.toList.mapM parseAnnot
 
 /-! ## Type Parsing -/
 
@@ -403,6 +455,7 @@ def parseBasicType (j : Json) : Except String BasicType := do
     .ok (.floating fty)
   | other => .error s!"unknown basic type tag '{other}', expected one of {basicTypeTags}"
 
+mutual
 /-- Parse a Ctype_ (inner type) from structured JSON -/
 partial def parseCtype_ (j : Json) : Except String Ctype_ := do
   let tag ← getTag j
@@ -414,45 +467,45 @@ partial def parseCtype_ (j : Json) : Except String Ctype_ := do
     let bty ← parseBasicType basicTy
     .ok (.basic bty)
   | "Array" =>
-    let (_, elemTy) ← getTaggedFieldMulti j "element_type" ctypeTags
-    let elem ← parseCtype_ elemTy
+    let elemTyJ ← getField j "element_type"
+    let elem ← parseCtype elemTyJ
     let sizeJ ← getField j "size"
     let size := if sizeJ.isNull then none else sizeJ.getInt?.toOption.map (·.toNat)
-    .ok (.array elem size)
+    .ok (.array elem.ty size)
   | "Function" =>
-    let (_, retTy) ← getTaggedFieldMulti j "return_type" ctypeTags
-    let ret ← parseCtype_ retTy
+    let retTyJ ← getField j "return_type"
+    let ret ← parseCtype retTyJ
     let retQualsJ ← getField j "return_qualifiers"
     let retQuals ← parseQualifiers retQualsJ
     let paramsJ ← getArr j "params"
     let params ← paramsJ.toList.mapM fun p => do
       let qualsJ ← getField p "qualifiers"
       let quals ← parseQualifiers qualsJ
-      let (_, tyJ) ← getTaggedFieldMulti p "type" ctypeTags
-      let ty ← parseCtype_ tyJ
+      let tyJ ← getField p "type"
+      let ty ← parseCtype tyJ
       -- Parse is_register, defaulting to false if not present
       let isRegister ← match j.getObjValD "is_register" with
         | .bool b => .ok b
         | _ => .ok false
-      .ok (quals, ty, isRegister)
+      .ok (quals, ty.ty, isRegister)
     let variadic ← getBool j "variadic"
-    .ok (.function retQuals ret params variadic)
+    .ok (.function retQuals ret.ty params variadic)
   | "FunctionNoParams" =>
-    let (_, retTy) ← getTaggedFieldMulti j "return_type" ctypeTags
-    let ret ← parseCtype_ retTy
+    let retTyJ ← getField j "return_type"
+    let ret ← parseCtype retTyJ
     let retQualsJ ← getField j "return_qualifiers"
     let retQuals ← parseQualifiers retQualsJ
-    .ok (.functionNoParams retQuals ret)
+    .ok (.functionNoParams retQuals ret.ty)
   | "Pointer" =>
     let qualsJ ← getField j "qualifiers"
     let quals ← parseQualifiers qualsJ
-    let (_, pointeeTy) ← getTaggedFieldMulti j "pointee_type" ctypeTags
-    let pointee ← parseCtype_ pointeeTy
-    .ok (.pointer quals pointee)
+    let pointeeTyJ ← getField j "pointee_type"
+    let pointee ← parseCtype pointeeTyJ
+    .ok (.pointer quals pointee.ty)
   | "Atomic" =>
-    let (_, innerTy) ← getTaggedFieldMulti j "inner_type" ctypeTags
-    let inner ← parseCtype_ innerTy
-    .ok (.atomic inner)
+    let innerTyJ ← getField j "inner_type"
+    let inner ← parseCtype innerTyJ
+    .ok (.atomic inner.ty)
   | "Struct" =>
     let tagSym ← getField j "struct_tag"
     let sym ← parseSym tagSym
@@ -463,13 +516,16 @@ partial def parseCtype_ (j : Json) : Except String Ctype_ := do
     .ok (.union_ sym)
   | other => .error s!"unknown ctype tag '{other}', expected one of {ctypeTags}"
 
-/-- Parse a Ctype (with annotations) from structured JSON -/
+/-- Parse a Ctype (with annotations) from structured JSON.
+    Format: {"annots": [...], "ty": {"tag": ...}}
+    No backwards compatibility - fails on old format. -/
 partial def parseCtype (j : Json) : Except String Ctype := do
-  -- Parse inner type
-  let ty ← parseCtype_ j
-  -- Parse annotations (currently just location, same as parseAnnots)
-  let annots ← parseAnnots j
+  let tyJ ← getField j "ty"
+  let ty ← parseCtype_ tyJ
+  let annotsJ ← getField j "annots"
+  let annots ← parseAnnots' annotsJ
   .ok { annots := annots, ty := ty }
+end
 
 /-! ## Value Parsing -/
 
@@ -525,7 +581,7 @@ def parseKillKind (j : Json) : Except String KillKind := do
   match tag with
   | "Dynamic" => .ok .dynamic
   | "Static" =>
-    let (_, ctyJ) ← getTaggedFieldMulti j "ctype" ctypeTags
+    let ctyJ ← getField j "ctype"
     let cty ← parseCtype ctyJ
     .ok (.static cty)
   | other => .error s!"unknown kill kind tag '{other}', expected one of {killKindTags}"
@@ -569,7 +625,7 @@ def parseIntegerTypeStr (s : String) : Except String IntegerType :=
     | "int" => .ok (.signed .int_)
     | "long" => .ok (.signed .long)
     | "long long" => .ok (.signed .longLong)
-    | _ => .ok (.signed .int_)  -- default
+    | other => .error s!"unknown signed integer type: '{other}'"
   else if s.startsWith "unsigned " then
     let rest := s.drop 9  -- drop "unsigned "
     match rest with
@@ -578,10 +634,9 @@ def parseIntegerTypeStr (s : String) : Except String IntegerType :=
     | "int" => .ok (.unsigned .int_)
     | "long" => .ok (.unsigned .long)
     | "long long" => .ok (.unsigned .longLong)
-    | _ => .ok (.unsigned .int_)  -- default
+    | other => .error s!"unknown unsigned integer type: '{other}'"
   else
-    -- Default to signed int for unrecognized
-    .ok (.signed .int_)
+    .error s!"unknown integer type format: '{s}'"
 
 /-- Parse a Binop from JSON -/
 def parseBinop (j : Json) : Except String Binop := do
@@ -603,11 +658,17 @@ def parseBinop (j : Json) : Except String Binop := do
   | "OpOr" => .ok .or
   | _ => .error "invalid binop"
 
-/-- Parse SymPrefix from JSON -/
+/-- Parse SymPrefix from JSON
+    Corresponds to: json_prefix in json_core.ml lines 112-127
+    Validates that the tag is a known prefix type, fails on unknown tags -/
 def parsePrefix (j : Json) : Except String SymPrefix := do
   let tag ← getTag j
-  -- For now just store as a string representation
-  .ok { val := tag }
+  -- Validate known prefix tags (from symbol.lem lines 214-221)
+  match tag with
+  | "PrefSource" | "PrefFunArg" | "PrefStringLiteral" | "PrefCompoundLiteral"
+  | "PrefMalloc" | "PrefTemporaryLifetime" | "PrefOther" =>
+    .ok { val := tag }
+  | other => .error s!"unknown prefix tag: '{other}'"
 
 /-- Parse a Memop from structured JSON -/
 def parseMemop (j : Json) : Except String Memop := do
@@ -644,12 +705,48 @@ def parseMemop (j : Json) : Except String Memop := do
     .ok (.cheriIntrinsic name)
   | _ => .error s!"unknown memop tag: {tag}"
 
-/-- Parse an ImplConst from a string representation -/
+/-- Parse an ImplConst from a string representation
+    Corresponds to: string_of_implementation_constant in implementation.lem lines 329-386
+    All known Cerberus implementation constants are explicitly matched. -/
 def parseImplConst (s : String) : Except String ImplConst :=
-  -- Implementation constants are exported as strings like "Characters.bits_in_byte",
-  -- "Sizeof(int)", "Alignof(struct foo)", etc.
-  -- For now, we store all as .other since parsing the full set is complex
-  .ok (.other s)
+  match s with
+  -- Environment constants (implementation.lem lines 330-333)
+  | "Environment.startup_name" => .ok (.other s)
+  | "Environment.startup_type" => .ok (.other s)
+  -- Characters constants (implementation.lem lines 334-359)
+  | "Characters.bits_in_byte" => .ok (.other s)
+  | "Characters.execution_character_set_values" => .ok (.other s)
+  | "Characters.TODO1" => .ok (.other s)
+  | "Characters.TODO2" => .ok (.other s)
+  | "Characters.plain_char_is_signed" => .ok (.other s)
+  | "Characters.TODO3" => .ok (.other s)
+  | "Characters.TODO4" => .ok (.other s)
+  | "Characters.TODO5" => .ok (.other s)
+  | "Characters.TODO6" => .ok (.other s)
+  | "Characters.TODO7" => .ok (.other s)
+  | "Characters.TODO8" => .ok (.other s)
+  | "Characters.TODO9" => .ok (.other s)
+  | "Characters.TODO10" => .ok (.other s)
+  -- Integer constants (implementation.lem lines 360-365)
+  | "Integer.encode" => .ok (.other s)
+  | "Integer.decode" => .ok (.other s)
+  | "Integer.conv_nonrepresentable_signed_integer" => .ok (.other s)
+  -- Type-related constants (implementation.lem lines 366-383)
+  | "sizeof" => .ok (.other s)
+  | "alignof" => .ok (.other s)
+  | "SHR_signed_negative" => .ok (.other s)
+  | "Bitwise_complement" => .ok (.other s)
+  | "Plain_bitfield_sign" => .ok (.other s)
+  | "Bitfield_other_types" => .ok (.other s)
+  | "Atomic_bitfield_permitted" => .ok (.other s)
+  | "ctype_min" => .ok (.other s)
+  | "ctype_max" => .ok (.other s)
+  | _ =>
+    -- BuiltinFunction: "builtin_X" format (implementation.lem lines 384-385)
+    if s.startsWith "builtin_" then
+      .ok (.other s)
+    else
+      .error s!"unknown implementation constant: '{s}'"
 
 /-- Parse a LinkingKind from JSON -/
 def parseLinkingKind (j : Json) : Except String LinkingKind := do
@@ -676,24 +773,25 @@ mutual
     match tag with
     | "OVinteger" =>
       let valStr ← getStr j "value"
-      let val := valStr.toInt?.getD 0
-      .ok (.integer { val := val })
+      match valStr.toInt? with
+      | some val => .ok (.integer { val := val })
+      | none => .error s!"invalid integer value: '{valStr}'"
     | "OVfloating" =>
       let valField ← getField j "value"
       match valField with
       | .str s =>
         -- Handle special string values - convert to Lean Float (matches Cerberus FVconcrete)
         -- Cerberus uses OCaml's native float which handles NaN/Inf internally
-        let fv := match s with
-          | "unspecified" => FloatingValue.unspecified
-          | "NaN" => FloatingValue.finite (0.0 / 0.0)  -- Lean Float NaN
-          | "Infinity" => FloatingValue.finite (1.0 / 0.0)  -- Lean Float +Inf
-          | "-Infinity" => FloatingValue.finite ((-1.0) / 0.0)  -- Lean Float -Inf
+        let fv ← match s with
+          | "unspecified" => pure FloatingValue.unspecified
+          | "NaN" => pure (FloatingValue.finite (0.0 / 0.0))  -- Lean Float NaN
+          | "Infinity" => pure (FloatingValue.finite (1.0 / 0.0))  -- Lean Float +Inf
+          | "-Infinity" => pure (FloatingValue.finite ((-1.0) / 0.0))  -- Lean Float -Inf
           | _ =>
             -- Try parsing as number string
             match s.toNat? with
-            | some n => FloatingValue.finite n.toFloat
-            | none => FloatingValue.finite 0.0  -- Fallback
+            | some n => pure (FloatingValue.finite n.toFloat)
+            | none => .error s!"invalid floating value string: '{s}'"
         .ok (.floating fv)
       | .num n => .ok (.floating (.finite n.toFloat))
       | _ => .error "OVfloating value must be string or number"
@@ -704,7 +802,7 @@ mutual
       match ptrTag with
       | "PVnull" =>
         -- Null pointer with ctype
-        let (_, ctypeJ) ← getTaggedFieldMulti valObj "ctype" ctypeTags
+        let ctypeJ ← getField valObj "ctype"
         let cty ← parseCtype ctypeJ
         .ok (.pointer { prov := .none, base := .null cty })
       | "PVfunction" =>
@@ -719,13 +817,16 @@ mutual
         -- Concrete pointer with optional alloc_id and address
         let allocIdJ ← getField valObj "alloc_id"
         let addrStr ← getStr valObj "addr"
-        let addr := addrStr.toNat?.getD 0
-        let prov := match allocIdJ with
-          | .str s => match s.toNat? with
-            | some id => Provenance.some id
-            | none => Provenance.none
-          | _ => Provenance.none
-        .ok (.pointer { prov := prov, base := .concrete none addr })
+        match addrStr.toNat? with
+        | some addr =>
+          let prov ← match allocIdJ with
+            | .str s => match s.toNat? with
+              | some id => pure (Provenance.some id)
+              | none => .error s!"invalid alloc_id value: '{s}'"
+            | .null => pure Provenance.none
+            | _ => .error s!"alloc_id must be string or null, got: {allocIdJ}"
+          .ok (.pointer { prov := prov, base := .concrete none addr })
+        | none => .error s!"invalid address value: '{addrStr}'"
       | _ => .error s!"unknown pointer tag: {ptrTag}"
     | "OVarray" =>
       let elems ← getArr j "elements"
@@ -738,7 +839,7 @@ mutual
       let members ← membersArr.toList.mapM fun m => do
         let nameJ ← getField m "name"
         let name ← parseIdentifier nameJ
-        let (_, ctypeJ) ← getTaggedFieldMulti m "ctype" ctypeTags
+        let ctypeJ ← getField m "ctype"
         let ctype ← parseCtype ctypeJ
         let valJ ← getField m "value"
         let value ← parseMemValue valJ
@@ -763,7 +864,7 @@ mutual
       let ov ← parseObjectValue v
       .ok (.specified ov)
     | "LVunspecified" =>
-      let (_, ctyJ) ← getTaggedFieldMulti j "ctype" ctypeTags
+      let ctyJ ← getField j "ctype"
       let cty ← parseCtype ctyJ
       .ok (.unspecified cty)
     | other => .error s!"unknown loaded value tag '{other}', expected one of {loadedValueTags}"
@@ -773,7 +874,7 @@ mutual
     let tag ← getTag j
     match tag with
     | "MVunspecified" =>
-      let (_, ctyJ) ← getTaggedFieldMulti j "ctype" ctypeTags
+      let ctyJ ← getField j "ctype"
       let cty ← parseCtype ctyJ
       .ok (.unspecified cty)
     | "MVconcurrent" =>
@@ -786,37 +887,38 @@ mutual
       let ityJ ← getField j "int_type"
       let ity ← parseIntegerTypeStruct ityJ
       let valStr ← getStr j "value"
-      let val := valStr.toInt?.getD 0
-      .ok (.integer ity { val := val })
+      match valStr.toInt? with
+      | some val => .ok (.integer ity { val := val })
+      | none => .error s!"invalid integer value: '{valStr}'"
     | "MVfloating" =>
       let ftyStr ← getStr j "float_type"
-      let fty := match ftyStr with
-        | "Float" => FloatingType.realFloating .float
-        | "Double" => FloatingType.realFloating .double
-        | "LongDouble" => FloatingType.realFloating .longDouble
-        | _ => FloatingType.realFloating .double  -- fallback
+      let fty ← match ftyStr with
+        | "Float" => pure (FloatingType.realFloating .float)
+        | "Double" => pure (FloatingType.realFloating .double)
+        | "LongDouble" => pure (FloatingType.realFloating .longDouble)
+        | other => .error s!"unknown float type: '{other}'"
       let valField ← getField j "value"
       -- Convert to Lean Float (matches Cerberus FVconcrete with OCaml native floats)
-      let fv := match valField with
-        | .str "unspecified" => FloatingValue.unspecified
-        | .str "NaN" => FloatingValue.finite (0.0 / 0.0)  -- Lean Float NaN
-        | .str "Infinity" => FloatingValue.finite (1.0 / 0.0)  -- Lean Float +Inf
-        | .str "-Infinity" => FloatingValue.finite ((-1.0) / 0.0)  -- Lean Float -Inf
+      let fv ← match valField with
+        | .str "unspecified" => pure FloatingValue.unspecified
+        | .str "NaN" => pure (FloatingValue.finite (0.0 / 0.0))  -- Lean Float NaN
+        | .str "Infinity" => pure (FloatingValue.finite (1.0 / 0.0))  -- Lean Float +Inf
+        | .str "-Infinity" => pure (FloatingValue.finite ((-1.0) / 0.0))  -- Lean Float -Inf
         | .str s => match s.toNat? with
-          | some n => FloatingValue.finite n.toFloat
-          | none => FloatingValue.finite 0.0
-        | .num n => FloatingValue.finite n.toFloat
-        | _ => FloatingValue.unspecified
+          | some n => pure (FloatingValue.finite n.toFloat)
+          | none => .error s!"invalid floating value string: '{s}'"
+        | .num n => pure (FloatingValue.finite n.toFloat)
+        | other => .error s!"invalid floating value: {other}"
       .ok (.floating fty fv)
     | "MVpointer" =>
-      let (_, ctyJ) ← getTaggedFieldMulti j "ctype" ctypeTags
+      let ctyJ ← getField j "ctype"
       let cty ← parseCtype ctyJ
       let valJ ← getField j "value"
       -- Parse pointer value (reuse logic from OVpointer)
       let ptrTag ← getStr valJ "tag"
       let pv ← match ptrTag with
         | "PVnull" =>
-          let (_, nullCtyJ) ← getTaggedFieldMulti valJ "ctype" ctypeTags
+          let nullCtyJ ← getField valJ "ctype"
           let nullCty ← parseCtype nullCtyJ
           pure { prov := .none, base := .null nullCty : PointerValue }
         | "PVfunction" =>
@@ -829,13 +931,16 @@ mutual
         | "PVconcrete" =>
           let allocIdJ ← getField valJ "alloc_id"
           let addrStr ← getStr valJ "addr"
-          let addr := addrStr.toNat?.getD 0
-          let prov := match allocIdJ with
-            | .str s => match s.toNat? with
-              | some id => Provenance.some id
-              | none => Provenance.none
-            | _ => Provenance.none
-          pure { prov := prov, base := .concrete none addr : PointerValue }
+          match addrStr.toNat? with
+          | some addr =>
+            let prov ← match allocIdJ with
+              | .str s => match s.toNat? with
+                | some id => pure (Provenance.some id)
+                | none => .error s!"invalid alloc_id value: '{s}'"
+              | .null => pure Provenance.none
+              | other => .error s!"alloc_id must be string or null, got: {other}"
+            pure { prov := prov, base := .concrete none addr : PointerValue }
+          | none => .error s!"invalid address value: '{addrStr}'"
         | _ => .error s!"unknown pointer tag in MVpointer: {ptrTag}"
       .ok (.pointer cty pv)
     | "MVarray" =>
@@ -849,7 +954,7 @@ mutual
       let members ← membersArr.toList.mapM fun m => do
         let nameJ ← getField m "name"
         let name ← parseIdentifier nameJ
-        let (_, ctyJ) ← getTaggedFieldMulti m "ctype" ctypeTags
+        let ctyJ ← getField m "ctype"
         let cty ← parseCtype ctyJ
         let valJ ← getField m "value"
         let val ← parseMemValue valJ
@@ -873,7 +978,7 @@ mutual
     | "Vtrue" => .ok .true_
     | "Vfalse" => .ok .false_
     | "Vctype" =>
-      let (_, ctyJ) ← getTaggedFieldMulti j "ctype" ctypeTags
+      let ctyJ ← getField j "ctype"
       let cty ← parseCtype ctyJ
       .ok (.ctype cty)
     | "Vobject" =>
@@ -921,6 +1026,8 @@ mutual
   /-- Parse a Pexpr (pure expression) from JSON -/
   partial def parsePexpr (j : Json) : Except String APexpr := do
     let annots ← parseAnnots j
+    let (_, tyJ) ← getTaggedFieldMulti j "ty" baseTypeTags
+    let ty ← parseBaseType tyJ
     let exprJ ← getField j "expr"
     let tag ← getTag exprJ
     let expr ← match tag with
@@ -965,7 +1072,7 @@ mutual
     | "PEarray_shift" =>
       let ptr ← getField exprJ "ptr"
       let p ← parsePexpr ptr
-      let (_, ctypeJ) ← getTaggedFieldMulti exprJ "ctype" ctypeTags
+      let ctypeJ ← getField exprJ "ctype"
       let ctype ← parseCtype ctypeJ
       let idx ← getField exprJ "index"
       let i ← parsePexpr idx
@@ -1112,7 +1219,7 @@ mutual
         .ok (c, pe.expr)
       .ok (Pexpr.constrained cs)
     | other => .error s!"unknown pexpr tag '{other}', expected one of {pexprTags}"
-    .ok { annots := annots, ty := none, expr := expr }
+    .ok { annots := annots, ty := some ty, expr := expr }
 
   /-- Parse an Action from JSON -/
   partial def parseAction (j : Json) : Except String AAction := do
@@ -1429,7 +1536,7 @@ def parseTagDef (j : Json) : Except String (Sym × Loc × TagDef) := do
     let fs ← fields.toList.mapM fun f => do
       let name ← getField f "name"
       let n ← parseIdentifier name
-      let (_, ctypeJ) ← getTaggedFieldMulti f "ctype" ctypeTags
+      let ctypeJ ← getField f "ctype"
       let cty ← parseCtype ctypeJ
       .ok { name := n, ty := cty : FieldDef }
     -- Parse optional flexible array member
@@ -1439,7 +1546,7 @@ def parseTagDef (j : Json) : Except String (Sym × Loc × TagDef) := do
         else do
           let name ← getField flexJ "name"
           let n ← parseIdentifier name
-          let (_, ctypeJ) ← getTaggedFieldMulti flexJ "ctype" ctypeTags
+          let ctypeJ ← getField flexJ "ctype"
           let cty ← parseCtype ctypeJ
           .ok (some { name := n, ty := cty : FieldDef })
       | none => .ok none
@@ -1449,7 +1556,7 @@ def parseTagDef (j : Json) : Except String (Sym × Loc × TagDef) := do
     let fs ← fields.toList.mapM fun f => do
       let name ← getField f "name"
       let n ← parseIdentifier name
-      let (_, ctypeJ) ← getTaggedFieldMulti f "ctype" ctypeTags
+      let ctypeJ ← getField f "ctype"
       let cty ← parseCtype ctypeJ
       .ok { name := n, ty := cty : FieldDef }
     .ok (TagDef.union_ fs)
@@ -1463,7 +1570,7 @@ def parseGlobDecl (j : Json) : Except String (Sym × GlobDecl) := do
   let tag ← getTag j
   let (_, coreTy) ← getTaggedFieldMulti j "core_type" baseTypeTags
   let ct ← parseBaseType coreTy
-  let (_, ctypeJ) ← getTaggedFieldMulti j "ctype" ctypeTags
+  let ctypeJ ← getField j "ctype"
   let cty ← parseCtype ctypeJ
   match tag with
   | "GlobalDef" =>
@@ -1554,7 +1661,7 @@ def parseFunInfoEntry (j : Json) : Except String (Sym × FunInfo) := do
     | some (.arr arr) => arr.toList.mapM parseCnMagicAnnotation
     | some _ => .error "cn_magic must be an array"
     | none => pure []
-  let (_, retTyJ) ← getTaggedFieldMulti j "return_type" ctypeTags
+  let retTyJ ← getField j "return_type"
   let returnType ← parseCtype retTyJ
   let paramsJ ← getArr j "params"
   let params ← paramsJ.toList.mapM fun p => do
@@ -1563,7 +1670,7 @@ def parseFunInfoEntry (j : Json) : Except String (Sym × FunInfo) := do
           let sym ← parseSym s
           pure (some sym)
       | none => pure none
-    let (_, tyJ) ← getTaggedFieldMulti p "type" ctypeTags
+    let tyJ ← getField p "type"
     let ty ← parseCtype tyJ
     pure { sym := symOpt, ty := ty : FunParam }
   let isVariadic ← match getFieldOpt j "is_variadic" with
