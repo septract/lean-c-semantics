@@ -355,6 +355,14 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
   | .wait _tid =>
     TypingM.fail (.other "wait expressions not supported")
 
+  -- Dynamic annotations for race detection (runtime construct, not used by CN)
+  | .annot _dynAnnots _e =>
+    TypingM.fail (.other "annot expressions not supported in CN type checking")
+
+  -- Excluded wrapper for neg action transformation (runtime construct, not used by CN)
+  | .excluded _exclId _act =>
+    TypingM.fail (.other "excluded expressions not supported in CN type checking")
+
 /-! ## check_expr_top: Top-Level Expression Checking
 
 Corresponds to: check_expr_top in check.ml lines 2317-2330

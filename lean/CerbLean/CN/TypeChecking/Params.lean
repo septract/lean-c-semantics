@@ -139,6 +139,8 @@ partial def scanForAliases
   | .run _ _ => aliases
   | .par es => es.foldl (scanForAliases paramIds) aliases
   | .wait _ => aliases
+  | .annot _ inner => scanForAliases paramIds aliases inner
+  | .excluded _ _ => aliases
 where
   /-- Try to track an alias from a binding pattern -/
   tryTrackAlias (paramIds : List Nat) (acc : AliasMap)

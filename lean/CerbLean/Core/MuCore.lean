@@ -88,7 +88,8 @@ These predicates characterize whether an expression is in "raw Core" form
 -/
 
 /-- Check if an expression contains any Esave nodes -/
-partial def containsSave : Expr → Bool
+partial def containsSave (e : Expr) : Bool :=
+  match e with
   | .pure _ => false
   | .memop _ _ => false
   | .action _ => false
@@ -106,6 +107,8 @@ partial def containsSave : Expr → Bool
   | .run _ _ => false
   | .par es => es.any fun e => containsSave e.expr
   | .wait _ => false
+  | .annot _ e => containsSave e.expr
+  | .excluded _ _ => false
 
 /-- An expression is "muCore" if it contains no Esave nodes.
     In muCore, all saves have been extracted to a separate LabelDefs map
@@ -133,7 +136,7 @@ partial def collectSaves (e : AExpr) : LabelDefs :=
   go [] e
 where
   go (acc : LabelDefs) (e : AExpr) : LabelDefs :=
-    match e.expr with
+    match (e.expr : Expr) with
     | .pure _ => acc
     | .memop _ _ => acc
     | .action _ => acc
@@ -186,6 +189,8 @@ where
     | .run _ _ => acc
     | .par es => es.foldl go acc
     | .wait _ => acc
+    | .annot _ e => go acc e
+    | .excluded _ _ => acc
 
 /-! ## Transformation: Remove Saves
 
@@ -201,7 +206,7 @@ This replaces all Esave nodes with Erun nodes.
     Corresponds to: remove_save in milicore.ml lines 49-88 -/
 partial def removeSave (e : AExpr) : AExpr :=
   let annots := e.annots
-  let expr' := match e.expr with
+  let expr' : Expr := match e.expr with
     | .pure pe => .pure pe
     | .memop op args => .memop op args
     | .action a => .action a
@@ -224,6 +229,8 @@ partial def removeSave (e : AExpr) : AExpr :=
     | .run label args => .run label args
     | .par es => .par (es.map removeSave)
     | .wait tid => .wait tid
+    | .annot dynAnnots e => .annot dynAnnots (removeSave e)
+    | .excluded exclId act => .excluded exclId act
   { annots := annots, expr := expr' }
 
 /-! ## muCore Procedure
