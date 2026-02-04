@@ -16,6 +16,13 @@ rev = "main"
 [[lean_lib]]
 name = "CerbLean"
 
+# Verified programs with native_decide proofs (slow to build)
+# Build separately with: lake build VerifiedPrograms
+# NOT in defaultTargets - only built explicitly or in CI
+[[lean_lib]]
+name = "VerifiedPrograms"
+roots = ["CerbLean.Verification.Programs"]
+
 [[lean_exe]]
 name = "cerblean_test"
 root = "CerbLean.Test"

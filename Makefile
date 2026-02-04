@@ -6,6 +6,7 @@
 .PHONY: test-interp test-interp-minimal test-interp-debug test-one
 .PHONY: test-interp-full test-interp-minimal-full test-interp-debug-full test-interp-ci
 .PHONY: test-genproof test-cn test-cn-unit
+.PHONY: test-verified verified-programs
 .PHONY: fuzz init update-cerberus help
 
 # Configuration
@@ -27,6 +28,10 @@ all: lean
 # Build Lean project (library and test executables)
 lean:
 	cd lean && lake build
+
+# Build verified programs (separate target due to slow native_decide proofs)
+verified-programs: lean
+	cd lean && lake build VerifiedPrograms
 
 # Build Cerberus (requires local opam switch in cerberus/_opam/)
 cerberus:
@@ -70,7 +75,11 @@ clean:
 test: test-unit test-interp test-genproof
 
 # Run exactly what CI runs (for local verification before pushing)
-ci: test-unit test-interp test-genproof
+ci: test-unit test-interp test-genproof test-verified
+
+# Verified programs (slow, native_decide proofs)
+test-verified: verified-programs
+	@echo "✓ Verified programs built successfully"
 
 # Unit Tests (No Cerberus required)
 test-unit: lean
@@ -177,14 +186,16 @@ help:
 	@echo ""
 	@echo "Build:"
 	@echo "  make                 Build Lean project (default)"
+	@echo "  make verified-programs  Build verified programs (slow)"
 	@echo "  make cerberus        Build Cerberus"
 	@echo "  make clean           Clean all build artifacts"
 	@echo ""
 	@echo "Quick Tests:"
 	@echo "  make test            Run quick tests (unit + interpreter + genproof)"
-	@echo "  make ci              Same as 'test' - verify before pushing"
+	@echo "  make ci              Full CI suite (includes verified programs)"
 	@echo "  make test-unit       Run Lean unit tests only"
 	@echo "  make test-genproof   Test proof generation pipeline"
+	@echo "  make test-verified   Build verified programs (slow native_decide)"
 	@echo "  make test-one FILE=path/to/test.c   Test a single C file"
 	@echo ""
 	@echo "Interpreter Tests:"
