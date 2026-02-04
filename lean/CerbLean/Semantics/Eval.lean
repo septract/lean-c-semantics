@@ -501,19 +501,25 @@ def evalCtor (c : Ctor) (args : List Value) : InterpM Value := do
 
   | .ivmax =>
     match args with
-    | [.ctype (.basic (.integer ity))] =>
-      let env ← InterpM.getTypeEnv
-      let iv := maxIval env ity
-      pure (.object (.integer iv))
-    | _ => InterpM.throwTypeError "IVmax requires integer ctype"
+    | [.ctype ct] =>
+      match ct.ty with
+      | .basic (.integer ity) =>
+        let env ← InterpM.getTypeEnv
+        let iv := maxIval env ity
+        pure (.object (.integer iv))
+      | _ => InterpM.throwTypeError s!"IVmax requires integer ctype, got {repr ct.ty}"
+    | _ => InterpM.throwTypeError "IVmax requires ctype argument"
 
   | .ivmin =>
     match args with
-    | [.ctype (.basic (.integer ity))] =>
-      let env ← InterpM.getTypeEnv
-      let iv := minIval env ity
-      pure (.object (.integer iv))
-    | _ => InterpM.throwTypeError "IVmin requires integer ctype"
+    | [.ctype ct] =>
+      match ct.ty with
+      | .basic (.integer ity) =>
+        let env ← InterpM.getTypeEnv
+        let iv := minIval env ity
+        pure (.object (.integer iv))
+      | _ => InterpM.throwTypeError s!"IVmin requires integer ctype, got {repr ct.ty}"
+    | _ => InterpM.throwTypeError "IVmin requires ctype argument"
 
   | .ivsizeof =>
     match args with
@@ -726,12 +732,16 @@ def evalImplCall (name : String) (args : List Value) : InterpM Value := do
   -- Corresponds to: gcc_4.9.0_x86_64-apple-darwin10.8.0.impl:17-19
   -- GCC behavior: "For conversion to a type of width N, the value is reduced
   -- modulo 2^N to be within range of the type; no signal is raised."
-  | "Integer.conv_nonrepresentable_signed_integer", [.ctype (.basic (.integer ity)), v] =>
-    convertInt ity v
+  | "Integer.conv_nonrepresentable_signed_integer", [.ctype ct, v] =>
+    match ct.ty with
+    | .basic (.integer ity) => convertInt ity v
+    | _ => InterpM.throwTypeError s!"Integer.conv_nonrepresentable_signed_integer requires integer ctype, got {repr ct.ty}"
 
   -- conv_int: standard integer conversion (also impl in some contexts)
-  | "conv_int", [.ctype (.basic (.integer ity)), v] =>
-    convertInt ity v
+  | "conv_int", [.ctype ct, v] =>
+    match ct.ty with
+    | .basic (.integer ity) => convertInt ity v
+    | _ => InterpM.throwTypeError s!"conv_int requires integer ctype, got {repr ct.ty}"
 
   -- SHR_signed_negative: right shift of negative signed integer (IMPL-DEFINED)
   -- Corresponds to: gcc_4.9.0_x86_64-apple-darwin10.8.0.impl:38-41
@@ -1112,9 +1122,10 @@ def evalPexpr (fuel : Nat) (env : List (HashMap Sym Value)) (pe : APexpr) : Inte
     let v2 ← evalPexpr fuel' env (mkAPexpr e2)
     match v1, v2 with
     | .ctype ty1, .ctype ty2 =>
-      -- Simple compatibility: structural equality
-      -- This is conservative - some compatible types may be rejected
-      if ty1 == ty2 then pure .true_ else pure .false_
+      -- Simple compatibility: structural equality of the inner Ctype_
+      -- Compare only .ty (not .annots) since annotations like source location
+      -- shouldn't affect type compatibility
+      if ty1.ty == ty2.ty then pure .true_ else pure .false_
     | _, _ =>
       InterpM.throwIllformed "are_compatible: operands must be ctypes"
   | .bmcAssume _e => InterpM.throwNotImpl "bmc_assume"

@@ -228,3 +228,11 @@ fi
 echo "JSON files saved to: $OUTPUT_DIR"
 echo "Parser error log: $ERROR_LOG"
 echo "Cerberus error log: $CERBERUS_ERROR_LOG"
+
+# Exit with failure if there were parser errors
+# This ensures CI fails when our parser has bugs
+if [[ $parse_fail -gt 0 ]]; then
+    echo ""
+    echo "FAILED: $parse_fail parser error(s)"
+    exit 1
+fi

@@ -212,4 +212,7 @@ if [[ $pp_mismatch -gt 0 ]]; then
     echo ""
     echo "To investigate a mismatch, e.g. '$first_mismatch':"
     echo "  diff $OUTPUT_DIR/${first_mismatch}_*.cerberus.core $OUTPUT_DIR/${first_mismatch}_*.lean.core"
+    echo ""
+    echo "FAILED: $pp_mismatch pretty-printer mismatch(es)"
+    exit 1
 fi

@@ -1195,12 +1195,18 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
 
     -- Pointer/integer conversions
     -- Corresponds to: driver.lem:762-773
-    | .intFromPtr, [.ctype _refTy, .ctype (.basic (.integer ity)), .object (.pointer p)] =>
-      let ival ← InterpM.liftMem (MemoryOps.intfromptr _refTy ity p)
-      pure (.object (.integer ival))
-    | .ptrFromInt, [.ctype (.basic (.integer ity)), .ctype refTy, .object (.integer ival)] =>
-      let pval ← InterpM.liftMem (MemoryOps.ptrfromint ity refTy ival)
-      pure (.object (.pointer pval))
+    | .intFromPtr, [.ctype _refTy, .ctype intTy, .object (.pointer p)] =>
+      match intTy.ty with
+      | .basic (.integer ity) =>
+        let ival ← InterpM.liftMem (MemoryOps.intfromptr _refTy ity p)
+        pure (.object (.integer ival))
+      | _ => throw (.typeError s!"intFromPtr: expected integer ctype, got {repr intTy.ty}")
+    | .ptrFromInt, [.ctype intTy, .ctype refTy, .object (.integer ival)] =>
+      match intTy.ty with
+      | .basic (.integer ity) =>
+        let pval ← InterpM.liftMem (MemoryOps.ptrfromint ity refTy ival)
+        pure (.object (.pointer pval))
+      | _ => throw (.typeError s!"ptrFromInt: expected integer ctype, got {repr intTy.ty}")
 
     -- Pointer validity checks
     -- Corresponds to: driver.lem:775-777

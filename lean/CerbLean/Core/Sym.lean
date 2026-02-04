@@ -120,9 +120,9 @@ Used for allocation naming.
 -/
 
 /-- Symbol prefix for allocation naming
-    Corresponds to: prefix in symbol.lem (commented out)
-    Audited: 2025-12-31
-    Deviations: Simplified to just a string -/
+    Corresponds to: prefix in symbol.lem lines 214-221
+    Audited: 2026-02-01
+    Deviations: Stored as string representation; full structure not needed for execution -/
 structure SymPrefix where
   val : String
   deriving Repr, BEq, Inhabited
