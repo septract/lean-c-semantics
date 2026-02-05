@@ -807,64 +807,102 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
 
       -- SeqRMW: sequential read-modify-write (increment/decrement)
       -- Corresponds to: core_reduction.lem:1214-1276 and driver.lem:704-714
-      -- Creates: Expr [] (Eannot [DA_pos [] fp_load; DA_pos [] fp_store] (mk_value_e cval))
       -- NOTE: Negative SeqRMW is forbidden by typecheck (core_reduction.lem:1215-1216)
       --
-      -- Algorithm (matching SeqRMWRequest2 in driver.lem:704-714):
+      -- SeqRMW performs its OWN neg action transformation for the store footprint.
+      -- This is critical for race detection: the store creates a DA_neg annotation
+      -- with a fresh exclusion ID, so it can't be falsely excluded by outer neg
+      -- transformations (DA_neg n1 vs DA_neg n2 where n1≠n2 → not excluded).
+      --
+      -- Algorithm (matching core_reduction.lem:1218-1277 and driver.lem:704-714):
       -- 1. Evaluate pe1 (type) and pe2 (pointer)
-      -- 2. Load current value from memory: mval ← Mem.load ty ptrval
-      -- 3. Bind sym to loaded value (valueFromMemValue mval) in environment
-      -- 4. Evaluate pe3 (update expression) with sym bound
-      -- 5. Convert result to mval': memValueFromValue ty cval3
-      -- 6. Store new value: Mem.store ty false ptrval mval'
-      -- 7. Return old value (if not with_forward) or new value (if with_forward)
-      --    with annotations for both load and store footprints
+      -- 2. Fresh exclusion ID n (core_reduction.lem:1223)
+      -- 3. Load current value from memory (driver.lem:705 DISCARDS load footprint)
+      -- 4. Bind sym to loaded value, evaluate update expression
+      -- 5. Store new value → get fpStore
+      -- 6. Build {DA_neg n [] fpStore}(unit) and result value expression
+      -- 7. Expression reconstruction: break_at_bound_and_sseq + unseq structure
+      --    (core_reduction.lem:1246-1271)
       | .seqRmw withForward tyPe ptrPe sym valPe =>
         -- Note: Negative SeqRMW is forbidden (core_reduction.lem:1215-1216)
         -- If we're here, we're in the .pos branch, so polarity is already positive.
-        -- Negative SeqRMW would have been caught by the outer neg action transformation.
-        let tyVal ← evalPexpr defaultPexprFuel st.env tyPe
-        let ptrVal ← evalPexpr defaultPexprFuel st.env ptrPe
-        match tyVal, ptrVal with
-        | .ctype ty, .object (.pointer ptr) =>
-          -- Step 2: Load current value (capture footprint)
-          let (fpLoad, mval) ← InterpM.liftMem (loadImpl ty ptr)
-          -- Step 3: Bind sym to loaded value in environment
-          let loadedVal := valueFromMemValue mval
-          let newEnv := bindInEnv sym loadedVal st.env
-          -- Step 4: Evaluate update expression with sym bound
-          let cval3 ← evalPexpr defaultPexprFuel newEnv valPe
-          -- Step 5: Convert to MemValue
-          let ty' : Ctype := { annots := [], ty := unatomic_ ty.ty }
-          match memValueFromValue ty' cval3 with
-          | some mval' =>
-            -- Step 6: Store new value (capture footprint)
-            let fpStore ← InterpM.liftMem (storeImpl ty false ptr mval')
-            -- Step 7: Return appropriate value with combined footprints
-            let resultVal := if withForward then valueFromMemValue mval' else loadedVal
-            -- SeqRMW always uses DA_pos (only Pos polarity allowed)
-            let dynAnnots : DynAnnotations := [.pos [] fpLoad, .pos [] fpStore]
-            pure (.continue_ { st with arena := mkAnnotatedValueExpr arenaAnnots dynAnnots resultVal })
-          | none =>
-            throw (.typeError "seq_rmw: update expression doesn't match lvalue type")
-        | .ctype ty, .loaded (.specified (.pointer ptr)) =>
-          -- Same as above but pointer is loaded value
-          let (fpLoad, mval) ← InterpM.liftMem (loadImpl ty ptr)
-          let loadedVal := valueFromMemValue mval
-          let newEnv := bindInEnv sym loadedVal st.env
-          let cval3 ← evalPexpr defaultPexprFuel newEnv valPe
-          let ty' : Ctype := { annots := [], ty := unatomic_ ty.ty }
-          match memValueFromValue ty' cval3 with
-          | some mval' =>
-            let fpStore ← InterpM.liftMem (storeImpl ty false ptr mval')
-            let resultVal := if withForward then valueFromMemValue mval' else loadedVal
-            -- SeqRMW always uses DA_pos (only Pos polarity allowed)
-            let dynAnnots : DynAnnotations := [.pos [] fpLoad, .pos [] fpStore]
-            pure (.continue_ { st with arena := mkAnnotatedValueExpr arenaAnnots dynAnnots resultVal })
-          | none =>
-            throw (.typeError "seq_rmw: update expression doesn't match lvalue type")
-        | _, _ =>
-          throw (.typeError "seq_rmw: expected ctype and pointer")
+        match stack with
+        | .cons currentProcOpt cont parent =>
+          let tyVal ← evalPexpr defaultPexprFuel st.env tyPe
+          let ptrVal ← evalPexpr defaultPexprFuel st.env ptrPe
+          -- Helper: given a resolved pointer, execute the RMW and do neg transformation
+          let doSeqRmw (ty : Ctype) (ptr : PointerValue) : InterpM StepResult := do
+            -- Step 2: Fresh exclusion ID (core_reduction.lem:1223)
+            let n ← InterpM.freshExclusionId
+            -- Step 3: Load current value (driver.lem:705 discards load footprint)
+            let (_, mval) ← InterpM.liftMem (loadImpl ty ptr)
+            -- Step 4: Bind sym to loaded value, evaluate update expression
+            let loadedVal := valueFromMemValue mval
+            let newEnv := bindInEnv sym loadedVal st.env
+            let cval3 ← evalPexpr defaultPexprFuel newEnv valPe
+            -- Step 5: Convert to MemValue and store
+            let ty' : Ctype := { annots := [], ty := unatomic_ ty.ty }
+            match memValueFromValue ty' cval3 with
+            | some mval' =>
+              let fpStore ← InterpM.liftMem (storeImpl ty false ptr mval')
+              -- Step 6: Build annotated unit and result value expression
+              let resultVal := if withForward then valueFromMemValue mval' else loadedVal
+              let cvalExpr := mkValueExpr [] resultVal
+              let annotatedUnit := mkAnnotatedValueExpr [] [.neg n [] fpStore] .unit
+              -- Step 7: Expression reconstruction (core_reduction.lem:1246-1271)
+              match Stack.breakAtBound cont with
+              | .noBound =>
+                throw (.illformedProgram "SeqRMW: no bound in continuation")
+              | .boundNoSseq _boundElem ctxA =>
+                -- BOUND_NO_SSEQ (core_reduction.lem:1249-1258)
+                let ctxA' := Stack.addExclusionToCont n ctxA
+                let sym' : Sym := { name := some s!"_unseq_{n}", id := n }
+                let ctx' := contToContext ctxA'
+                let ctxExpr := applyCtx ctx' cvalExpr
+                let unseqExpr := mkUnseqExpr [annotatedUnit, ctxExpr]
+                let wseqExpr := mkWseqExpr sym' unseqExpr (mkPureSym sym')
+                let newCont := Stack.dropUntilBound cont
+                pure (.continue_ { st with
+                  arena := wseqExpr
+                  stack := .cons currentProcOpt newCont parent
+                })
+              | .boundWithSseq _boundElem ctxA sseqPat ctxB sseqE2 =>
+                if ctxB.isEmpty then
+                  -- BOUND_WITH_SSEQ with empty ctxB (core_reduction.lem:1259-1262)
+                  let annotatedCval := mkAnnotatedValueExpr [] [.neg n [] fpStore] resultVal
+                  let sseqExpr := mkSseqExpr sseqPat annotatedCval sseqE2
+                  let ctxA' := contToContext ctxA
+                  let wrappedExpr := applyCtx ctxA' sseqExpr
+                  let newCont := Stack.dropUntilBound cont
+                  pure (.continue_ { st with
+                    arena := wrappedExpr
+                    stack := .cons currentProcOpt newCont parent
+                  })
+                else
+                  -- BOUND_WITH_SSEQ with non-empty ctxB (core_reduction.lem:1263-1271)
+                  let ctxB' := Stack.addExclusionToCont n ctxB
+                  let ctxB'' := contToContext ctxB'
+                  let ctxExpr := applyCtx ctxB'' cvalExpr
+                  let unseqExpr := mkUnseqExpr [annotatedUnit, ctxExpr]
+                  let sseqExpr := mkSseqTupleExpr sseqPat unseqExpr sseqE2
+                  let ctxA' := contToContext ctxA
+                  let wrappedExpr := applyCtx ctxA' sseqExpr
+                  let newCont := Stack.dropUntilBound cont
+                  pure (.continue_ { st with
+                    arena := wrappedExpr
+                    stack := .cons currentProcOpt newCont parent
+                  })
+            | none =>
+              throw (.typeError "seq_rmw: update expression doesn't match lvalue type")
+          match tyVal, ptrVal with
+          | .ctype ty, .object (.pointer ptr) =>
+            doSeqRmw ty ptr
+          | .ctype ty, .loaded (.specified (.pointer ptr)) =>
+            doSeqRmw ty ptr
+          | _, _ =>
+            throw (.typeError "seq_rmw: expected ctype and pointer")
+        | .empty =>
+          throw (.illformedProgram "seq_rmw with empty stack")
 
       -- Fence, RMW, CompareExchange - not implemented yet
       | .fence _ =>
