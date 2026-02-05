@@ -116,7 +116,8 @@ if [[ "$PRODUCTION" == "true" ]]; then
     LEAN_FILE="$OUTPUT_DIR/${MODULE_NAME}.lean"
     echo -e "${YELLOW}Production mode: outputting to $LEAN_FILE${NC}"
 elif [[ -z "$OUTPUT_DIR" ]]; then
-    OUTPUT_DIR=$(mktemp -d)
+    mkdir -p "$PROJECT_ROOT/tmp"
+    OUTPUT_DIR=$(mktemp -d "$PROJECT_ROOT/tmp/genproof.XXXXXXXXXX")
     if [[ "$KEEP" == "false" ]]; then
         trap "rm -rf $OUTPUT_DIR" EXIT
     fi

@@ -17,7 +17,8 @@ QUICK_MODE=false
 VERBOSE=false
 TEST_DIR=""
 MAX_TESTS=0  # 0 = unlimited
-OUTPUT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/c-to-lean-pp-test.XXXXXXXXXX")
+mkdir -p "$PROJECT_DIR/tmp"
+OUTPUT_DIR=$(mktemp -d "$PROJECT_DIR/tmp/c-to-lean-pp-test.XXXXXXXXXX")
 ERROR_LOG="$OUTPUT_DIR/errors.log"
 DIFF_LOG="$OUTPUT_DIR/diffs.log"
 
@@ -111,7 +112,7 @@ while IFS= read -r cfile; do
     fi
 
     # Run Cerberus to generate JSON
-    cerberus_err_file=$(mktemp)
+    cerberus_err_file=$(mktemp "$PROJECT_DIR/tmp/cerb-err.XXXXXXXXXX")
     if ! eval $CERBERUS --json_core_out="$json_file" "$cfile" 2>"$cerberus_err_file"; then
         ((cerberus_fail++)) || true
         rm -f "$cerberus_err_file"
