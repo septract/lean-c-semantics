@@ -609,6 +609,70 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
           | none => TypingM.fail (.other "Cannot determine type for Unspecified value")
       let symUndef : Sym := { id := 0, name := some "undef" }
       return AnnotTerm.mk (.sym symUndef) unspecBt loc
+    | .ivmax =>
+      -- ivmax(ctype) - maximum value for integer type
+      -- Corresponds to: Civmax in cn/lib/check.ml lines 584-595
+      match args with
+      | [ctypeArg] =>
+        let peArg : APexpr := ⟨[], none, ctypeArg⟩
+        let tArg ← checkPexpr peArg
+        match tArg.term with
+        | .const (.ctypeConst ct) =>
+          match ct.ty with
+          | .basic (.integer ity) =>
+            let maxVal := intTypeMax ity
+            let resBt ← requireCoreBaseTypeToCN pe.ty "ivmax result"
+            return numLit maxVal resBt loc
+          | _ => TypingM.fail (.other "ivmax requires integer ctype")
+        | _ => TypingM.fail (.other "ivmax requires ctype constant argument")
+      | _ => TypingM.fail (.other "ivmax requires exactly 1 argument")
+    | .ivmin =>
+      -- ivmin(ctype) - minimum value for integer type
+      -- Corresponds to: Civmin in cn/lib/check.ml lines 584-595
+      match args with
+      | [ctypeArg] =>
+        let peArg : APexpr := ⟨[], none, ctypeArg⟩
+        let tArg ← checkPexpr peArg
+        match tArg.term with
+        | .const (.ctypeConst ct) =>
+          match ct.ty with
+          | .basic (.integer ity) =>
+            let minVal := intTypeMin ity
+            let resBt ← requireCoreBaseTypeToCN pe.ty "ivmin result"
+            return numLit minVal resBt loc
+          | _ => TypingM.fail (.other "ivmin requires integer ctype")
+        | _ => TypingM.fail (.other "ivmin requires ctype constant argument")
+      | _ => TypingM.fail (.other "ivmin requires exactly 1 argument")
+    | .ivsizeof =>
+      -- ivsizeof(ctype) - size of type in bytes
+      -- Corresponds to: Civsizeof in cn/lib/check.ml lines 596-613
+      match args with
+      | [ctypeArg] =>
+        let peArg : APexpr := ⟨[], none, ctypeArg⟩
+        let tArg ← checkPexpr peArg
+        match tArg.term with
+        | .const (.ctypeConst ct) =>
+          let resBt ← requireCoreBaseTypeToCN pe.ty "ivsizeof result"
+          return AnnotTerm.mk (.sizeOf ct) resBt loc
+        | _ => TypingM.fail (.other "ivsizeof requires ctype constant argument")
+      | _ => TypingM.fail (.other "ivsizeof requires exactly 1 argument")
+    | .ivalignof =>
+      -- ivalignof(ctype) - alignment of type in bytes
+      -- Corresponds to: Civalignof in cn/lib/check.ml lines 596-613
+      match args with
+      | [ctypeArg] =>
+        let peArg : APexpr := ⟨[], none, ctypeArg⟩
+        let tArg ← checkPexpr peArg
+        match tArg.term with
+        | .const (.ctypeConst ct) =>
+          match alignOfCtype ct with
+          | some align =>
+            let resBt ← requireCoreBaseTypeToCN pe.ty "ivalignof result"
+            return numLit (Int.ofNat align) resBt loc
+          | none =>
+            TypingM.fail (.other s!"ivalignof: cannot compute alignment for {repr ct.ty} (requires type environment)")
+        | _ => TypingM.fail (.other "ivalignof requires ctype constant argument")
+      | _ => TypingM.fail (.other "ivalignof requires exactly 1 argument")
     | _ =>
       -- Other constructors (nil, cons, array, etc.) are not supported
       -- Do not create symbolic terms - fail explicitly

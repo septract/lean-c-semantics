@@ -36,7 +36,9 @@ else
     TEST_FILES=("$@")
 fi
 
-TMP_JSON="/tmp/cn-test-$$.json"
+TMP_DIR="$PROJECT_ROOT/tmp"
+mkdir -p "$TMP_DIR"
+TMP_JSON="$TMP_DIR/cn-test-$$.json"
 
 cleanup() {
     rm -f "$TMP_JSON"

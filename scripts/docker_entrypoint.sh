@@ -129,7 +129,7 @@ fi
 
 # Mode: Full pipeline (Cerberus → Lean)
 # Create temporary file for JSON
-JSON_FILE=$(mktemp /tmp/cerblean.XXXXXX.json)
+JSON_FILE=$(mktemp "${TMPDIR:-/tmp}/cerblean.XXXXXX.json")
 trap "rm -f $JSON_FILE" EXIT
 
 # Generate Core IR JSON

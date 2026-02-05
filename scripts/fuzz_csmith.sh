@@ -24,7 +24,8 @@ mkdir -p "$OUTPUT_DIR"
 mkdir -p "$OUTPUT_DIR/bugs"      # FAIL, MISMATCH, DIFF - any difference is a BUG
 mkdir -p "$OUTPUT_DIR/timeouts"  # TIMEOUT cases (may need more fuel)
 
-TEMP_DIR=$(mktemp -d)
+mkdir -p "$PROJECT_DIR/tmp"
+TEMP_DIR=$(mktemp -d "$PROJECT_DIR/tmp/fuzz.XXXXXXXXXX")
 # Don't auto-cleanup - we need to save interesting cases
 cleanup() {
     # Only cleanup temp dir after we've saved interesting cases

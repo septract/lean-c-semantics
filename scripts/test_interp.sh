@@ -40,7 +40,8 @@ NO_LIBC=false  # Skip libc linking for faster JSON (2MB vs 200MB)
 MODE="exhaustive"  # Execution mode: "exhaustive" (default) or "deterministic"
 SEQUENTIALISE=false  # Use Cerberus's sequentialise pass
 EXCLUDE_PATTERN=""  # Exclude files matching this pattern
-OUTPUT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/c-to-lean-interp-test.XXXXXXXXXX")
+mkdir -p "$PROJECT_DIR/tmp"
+OUTPUT_DIR=$(mktemp -d "$PROJECT_DIR/tmp/c-to-lean-interp-test.XXXXXXXXXX")
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
