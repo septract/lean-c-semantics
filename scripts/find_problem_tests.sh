@@ -12,6 +12,7 @@ CERBERUS="$PROJECT_DIR/scripts/cerberus"
 OUTPUT_DIR="$PROJECT_DIR/tests/problem_tests"
 
 mkdir -p "$OUTPUT_DIR"
+mkdir -p "$PROJECT_DIR/tmp"
 
 # Test directories to search (gcc-torture has more variety)
 TEST_DIRS="$CERBERUS_DIR/tests/gcc-torture/execute"
@@ -35,8 +36,8 @@ for f in $(find "$TEST_DIRS" -name "*.c" ! -name "*.syntax-only.c" | sort | head
     ((count++)) || true
 
     # Try to generate JSON and compare
-    json_file=$(mktemp)
-    cerb_pp=$(mktemp)
+    json_file=$(mktemp "$PROJECT_DIR/tmp/find-prob-json.XXXXXXXXXX")
+    cerb_pp=$(mktemp "$PROJECT_DIR/tmp/find-prob-cerb.XXXXXXXXXX")
 
     if ! "$CERBERUS" --json_core_out="$json_file" "$f" 2>/dev/null; then
         rm -f "$json_file" "$cerb_pp"

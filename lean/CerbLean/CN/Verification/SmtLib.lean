@@ -399,12 +399,39 @@ partial def termToSmtTerm : Types.Term → TranslateResult
   | .good ct _val =>
     -- good(ct, val) checks val is representable in ct - needs proper handling
     .unsupported s!"good (type check for {repr ct.ty})"
-  | .wrapI intType _val =>
-    -- wrapI wraps to representation - needs proper handling
-    .unsupported s!"wrapI (wrap to {repr intType})"
-  | .cast targetType _val =>
-    -- cast changes type - needs proper handling
-    .unsupported s!"cast (to {repr targetType})"
+  | .wrapI _intType val =>
+    -- wrapI wraps integer value to representation type (modular arithmetic)
+    -- Corresponds to: wrapI in CN's indexTerms.ml
+    -- For bitvec SMT sorts, modular wrapping is enforced by the sort itself,
+    -- so this is identity. If we ever use unbounded integer sorts, this would
+    -- need explicit modular arithmetic (bvmod or similar).
+    match annotTermToSmtTerm val with
+    | .unsupported r => .unsupported r
+    | .ok valTm => .ok valTm
+  | .cast targetType val =>
+    -- cast changes type between CN base types
+    -- Corresponds to: cast_ in CN's indexTerms.ml
+    match annotTermToSmtTerm val with
+    | .unsupported r => .unsupported r
+    | .ok valTm =>
+      let sourceBt := val.bt
+      match sourceBt, targetType with
+      | .bits _ sw, .bits _ tw =>
+        if sw == tw then .ok valTm  -- Same width: identity
+        else if sw < tw then
+          -- Extend: use zero_extend
+          .ok (Term.appT (Term.symbolT (s!"(_ zero_extend {tw - sw})")) valTm)
+        else
+          -- Truncate: use extract
+          .ok (Term.appT (Term.symbolT (s!"(_ extract {tw - 1} 0)")) valTm)
+      | .integer, .bits _ tw =>
+        -- Int → BitVec: use int2bv
+        .ok (Term.appT (Term.symbolT (s!"(_ int2bv {tw})")) valTm)
+      | .loc, .bits _ tw =>
+        -- Loc (represented as Int) → BitVec
+        .ok (Term.appT (Term.symbolT (s!"(_ int2bv {tw})")) valTm)
+      | _, _ =>
+        .unsupported s!"cast from {repr sourceBt} to {repr targetType}"
   | .copyAllocId _addr _loc =>
     -- copyAllocId copies allocation ID from one pointer to another
     .unsupported "copyAllocId"
@@ -412,8 +439,32 @@ partial def termToSmtTerm : Types.Term → TranslateResult
     -- hasAllocId checks if pointer has a valid allocation ID
     .unsupported "hasAllocId"
   | .sizeOf ct =>
-    -- sizeOf needs actual type layout
-    .unsupported s!"sizeOf ({repr ct.ty})"
+    -- sizeOf(ctype) as a concrete integer
+    -- For simple types we can compute statically; structs need TypeEnv
+    match ct.ty with
+    | .void => .ok (Term.literalT "0")
+    | .basic (.integer ity) =>
+      let size : Option Nat := match ity with
+        | .bool => some 1
+        | .char => some 1
+        | .signed .ichar | .unsigned .ichar => some 1
+        | .signed .short | .unsigned .short => some 2
+        | .signed .int_ | .unsigned .int_ => some 4
+        | .signed .long | .unsigned .long => some 8
+        | .signed .longLong | .unsigned .longLong => some 8
+        | .signed .intptr | .unsigned .intptr => some 8
+        | .size_t | .ptrdiff_t | .ptraddr_t => some 8
+        | .wchar_t | .wint_t => some 4
+        | .enum _ => some 4
+        | _ => none
+      match size with
+      | some n => .ok (Term.literalT (toString n))
+      | none => .unsupported s!"sizeOf integer type ({repr ity})"
+    | .basic (.floating (.realFloating .float)) => .ok (Term.literalT "4")
+    | .basic (.floating (.realFloating .double)) => .ok (Term.literalT "8")
+    | .basic (.floating (.realFloating .longDouble)) => .ok (Term.literalT "16")
+    | .pointer _ _ => .ok (Term.literalT "8")
+    | _ => .unsupported s!"sizeOf ({repr ct.ty})"
   | .offsetOf tag member =>
     -- offsetOf needs actual struct layout
     let tagStr := tag.name.getD "?"
@@ -464,32 +515,79 @@ partial def termToSmtTerm : Types.Term → TranslateResult
   | .mapGet _ _ => .unsupported "mapGet"
   | .mapDef _ _ => .unsupported "mapDef"
   | .match_ scrutinee cases =>
-    -- Support common match patterns from CN
+    -- Support match patterns from CN.
+    -- For tuple destructuring, we create SMT let-bindings that tie pattern
+    -- variables to the corresponding scrutinee components.
+    -- Corresponds to: match handling in CN's solver translation
     match cases with
-    | [(_, body)] =>
-      -- Single case: just use the body
-      annotTermToSmtTerm body
-    | [(_, body1), (_, body2)] =>
-      -- Two cases: convert to if-then-else if scrutinee is boolean
-      let isBoolType : BaseType → Bool
-        | .bool => true
-        | _ => false
-      if isBoolType scrutinee.bt then
-        match annotTermToSmtTerm scrutinee, annotTermToSmtTerm body1, annotTermToSmtTerm body2 with
-        | .ok s, .ok b1, .ok b2 => .ok (Term.mkApp3 (Term.symbolT "ite") s b1 b2)
-        | .unsupported r, _, _ => .unsupported r
-        | _, .unsupported r, _ => .unsupported r
-        | _, _, .unsupported r => .unsupported r
-      else
-        .unsupported s!"match on non-boolean scrutinee (type {repr scrutinee.bt})"
     | [] => .unsupported "match with no cases"
-    | _ => .unsupported s!"match with {cases.length} cases"
+    | (pat, body) :: rest =>
+      -- Try to create let-bindings from pattern + scrutinee
+      match extractPatternBindings pat scrutinee with
+      | .error r => .unsupported s!"match pattern bindings: {r}"
+      | .ok bindings =>
+        let bodyTm := annotTermToSmtTerm body
+        match bodyTm with
+        | .unsupported r => .unsupported r
+        | .ok bodySmtTm =>
+          if bindings.isEmpty then
+            -- No bindings to create
+            if rest.isEmpty then .ok bodySmtTm
+            else if scrutinee.bt matches .bool then
+              -- Boolean match: use if-then-else
+              match rest with
+              | [(_, body2)] =>
+                match annotTermToSmtTerm scrutinee, annotTermToSmtTerm body2 with
+                | .ok s, .ok b2 => .ok (Term.mkApp3 (Term.symbolT "ite") s bodySmtTm b2)
+                | .unsupported r, _ => .unsupported r
+                | _, .unsupported r => .unsupported r
+              | _ => .unsupported s!"match on boolean with {rest.length + 1} cases (expected 2)"
+            else .unsupported s!"match on non-boolean ({repr scrutinee.bt}) with {rest.length + 1} cases"
+          else
+            -- Create nested let-bindings for pattern variables
+            let result := bindings.foldl (init := bodySmtTm) fun acc (name, valTm) =>
+              Term.letT name valTm acc
+            .ok result
   | .cnNone _ => .unsupported "cnNone"
   | .isSome _ => .unsupported "isSome"
 
 /-- Convert an AnnotTerm to Smt.Term -/
 partial def annotTermToSmtTerm (at_ : AnnotTerm) : TranslateResult :=
   termToSmtTerm at_.term
+
+/-- Extract pattern bindings from a match: pairs of (smt_name, scrutinee_component_term).
+    For a tuple destructuring match, this creates let-bindings that tie
+    pattern variables to the corresponding scrutinee components. -/
+partial def extractPatternBindings (pat : Types.Pattern) (scrutinee : AnnotTerm)
+    : Except String (List (String × Smt.Term)) :=
+  match pat.pat with
+  | .sym s =>
+    -- Single variable pattern: bind to whole scrutinee
+    match annotTermToSmtTerm scrutinee with
+    | .ok tm => .ok [(symToSmtName s, tm)]
+    | .unsupported r => .error s!"pattern binding: {r}"
+  | .constructor _ctor args =>
+    -- Constructor pattern: handle tuple destructuring and wrappers like Specified(x)
+    match scrutinee.term with
+    | .tuple components =>
+      -- Tuple destructuring: match up pattern args with tuple components
+      let pairs := args.zip components
+      let results := pairs.map fun ((_, subPat), component) =>
+        extractPatternBindings subPat component
+      -- Collect all results, propagating any errors
+      let collected := results.foldl (init := Except.ok ([] : List (String × Smt.Term))) fun acc r =>
+        match acc, r with
+        | .error e, _ => .error e
+        | _, .error e => .error e
+        | .ok ls, .ok rs => .ok (ls ++ rs)
+      collected
+    | _ =>
+      -- Non-tuple scrutinee: for single-arg constructors (like Specified(x)),
+      -- unwrap and bind the inner pattern to the scrutinee directly
+      match args with
+      | [(_, innerPat)] => extractPatternBindings innerPat scrutinee
+      | _ => .error s!"constructor pattern with {args.length} args on non-tuple scrutinee"
+  | .wild => .ok []  -- Wildcard: no binding
 
 end
 

@@ -11,6 +11,7 @@ PROBLEM_DIR="$PROJECT_DIR/tests/problem_tests"
 LEAN_PP="$PROJECT_DIR/lean/.lake/build/bin/cerblean_pp"
 CERBERUS="$PROJECT_DIR/scripts/cerberus"
 
+mkdir -p "$PROJECT_DIR/tmp"
 CATEGORY="${1:-all}"
 VERBOSE="${2:---verbose}"
 
@@ -44,8 +45,8 @@ while IFS= read -r f; do
     ((total++)) || true
 
     basename=$(basename "$f" .c)
-    json_file=$(mktemp)
-    cerb_pp=$(mktemp)
+    json_file=$(mktemp "$PROJECT_DIR/tmp/pp-cat-json.XXXXXXXXXX")
+    cerb_pp=$(mktemp "$PROJECT_DIR/tmp/pp-cat-cerb.XXXXXXXXXX")
 
     if ! "$CERBERUS" --json_core_out="$json_file" "$f" 2>/dev/null; then
         echo "[$total] $basename: CERBERUS_FAIL"
