@@ -84,7 +84,7 @@ where
       | .ok file =>
         -- Generate module name from output path
         -- If path contains "CerbLean/", use that as the namespace prefix
-        let pathParts := outputPath.replace ".lean" "" |>.split (· == '/')
+        let pathParts := outputPath.replace ".lean" "" |>.splitToList (· == '/')
         let moduleName :=
           -- Find the CerbLean prefix if present
           match pathParts.findIdx? (· == "CerbLean") with
@@ -94,21 +94,25 @@ where
             let cleanParts := relevant.map fun part =>
               let clean := part.toList
                 |>.filter (fun c => c.isAlpha || c.isDigit || c == '_')
-                |> String.mk
+                |> String.ofList
               -- Split on underscores and capitalize each part
-              let subParts := clean.split (· == '_') |>.map String.capitalize
-              String.intercalate "" subParts
+              let subParts := clean.splitToList (· == '_') |>.map String.capitalize
+              let name := String.intercalate "" subParts
+              -- Ensure namespace component doesn't start with a digit
+              if name.isEmpty then "M"
+              else if name.front.isDigit then "M" ++ name
+              else name
             String.intercalate "." cleanParts
           | none =>
             -- Fallback: just use the filename
             let rawName := pathParts.getLast!
             let cleanName := rawName.toList
               |>.filter (fun c => c.isAlpha || c.isDigit || c == '_')
-              |> String.mk
-            let parts := cleanName.split (· == '_') |>.map String.capitalize
+              |> String.ofList
+            let parts := cleanName.splitToList (· == '_') |>.map String.capitalize
             let name := String.intercalate "" parts
             if name.isEmpty then "Generated"
-            else if name.get! 0 |>.isDigit then "M" ++ name
+            else if name.front.isDigit then "M" ++ name
             else name
 
         -- Generate and write output
