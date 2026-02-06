@@ -343,6 +343,9 @@ partial def resolveAnnotTerm (ctx : ResolveContext) (at_ : AnnotTerm)
       return .mk (.sym resolvedSym) resolvedBt loc
     | none =>
       throw (.symbolNotFound (s.name.getD "?"))
+  | .mk (.const (.bits sign width n)) _bt loc =>
+    -- Typed literal (e.g. 42i32, 0u8): type is already known
+    return .mk (.const (.bits sign width n)) (.bits sign width) loc
   | .mk (.const (.z n)) _bt loc =>
     -- For integer constants, handle based on mode:
     -- CHECK mode (expectedBt = some): use expected type if it's Bits
@@ -383,6 +386,10 @@ partial def resolveAnnotTerm (ctx : ResolveContext) (at_ : AnnotTerm)
     let e' ← resolveAnnotTerm ctx e expectedBt
     -- Result type comes from branches (should match)
     return .mk (.ite c' t' e') t'.bt loc
+  | .mk (.cast targetBt value) _bt loc =>
+    -- Cast: result type is the target base type
+    let value' ← resolveAnnotTerm ctx value none
+    return .mk (.cast targetBt value') targetBt loc
   | .mk t bt loc =>
     -- For other terms, resolve recursively with expected type, preserve original type
     let t' ← resolveTerm ctx t expectedBt
@@ -455,6 +462,11 @@ def resolveClause (ctx : ResolveContext) (c : Clause) : ResolveResult (ResolveCo
     -- Constraint uses current context, doesn't add bindings
     let assertion' ← resolveAnnotTerm ctx assertion
     return (ctx, .constraint assertion')
+  | .letBinding name value =>
+    -- Let binding resolves the expression, then adds a new binding to context
+    let value' ← resolveAnnotTerm ctx value
+    let (ctx', freshSym) := ctx.fresh (name.name.getD "anon") value'.bt
+    return (ctx', .letBinding freshSym value')
 
 /-- Resolve all clauses in order, threading context through -/
 def resolveClauses (ctx : ResolveContext) (clauses : List Clause) : ResolveResult (ResolveContext × List Clause) := do
