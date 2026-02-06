@@ -51,7 +51,7 @@ def nameSubsumed (name1 name2 : ResourceName) : Bool :=
   match name1, name2 with
   | .owned ct1 .init, .owned ct2 .init => ctypeEqualIgnoringAnnots ct1 ct2
   | .owned ct1 .uninit, .owned ct2 _ => ctypeEqualIgnoringAnnots ct1 ct2
-  | .pname pn1, .pname pn2 => pn1.id == pn2.id
+  | .pname pn1, .pname pn2 => pn1 == pn2  -- Uses BEq Sym (digest + id, matching CN)
   | _, _ => false
 
 /-! ## Index Term Equality
@@ -65,7 +65,7 @@ def termSyntacticEq (t1 t2 : IndexTerm) : Bool :=
   -- Simple structural equality for now - just check symbols
   -- In full CN, this uses Simplify.IndexTerms.simp first
   match t1.term, t2.term with
-  | .sym s1, .sym s2 => s1.id == s2.id
+  | .sym s1, .sym s2 => s1 == s2  -- Uses BEq Sym (digest + id, matching CN)
   | _, _ => false
 
 /-- Build an equality constraint for two index terms -/

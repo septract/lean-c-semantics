@@ -32,10 +32,13 @@ def testIncompleteJson : IO Unit := do
 def testMinimalValid : IO Unit := do
   -- Minimal valid structure - empty file with just required fields
   let minJson := r#"{
-    "main": { "id": 1, "name": "main" },
+    "main": { "id": 1, "name": "main", "digest": "" },
+    "calling_convention": "Normal",
     "tagDefs": [],
     "globs": [],
-    "funs": []
+    "funs": [],
+    "loop_attributes": [],
+    "visible_objects_env": []
   }"#
   match parseFileFromString minJson with
   | .ok file =>

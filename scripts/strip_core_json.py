@@ -109,6 +109,7 @@ def strip_json(data, verbose=False, strip_locs=False, strip_funinfo=False, strip
     # Create stripped JSON
     stripped = {
         'main': data['main'],
+        'calling_convention': data['calling_convention'],
         'tagDefs': data.get('tagDefs', []),
         'stdlib': [fn for fn in data.get('stdlib', []) if fn['symbol']['name'] in needed],
         'impl': data.get('impl', []),
@@ -116,6 +117,8 @@ def strip_json(data, verbose=False, strip_locs=False, strip_funinfo=False, strip
         'funs': [fn for fn in data.get('funs', []) if fn['symbol']['name'] in needed],
         'extern': [] if strip_extern else data.get('extern', {}),
         'funinfo': funinfo,
+        'loop_attributes': data['loop_attributes'],
+        'visible_objects_env': data['visible_objects_env'],
     }
 
     # Optionally strip location data

@@ -283,12 +283,30 @@ structure FunInfo where
     Deviations: None -/
 abbrev FunInfoMap := Std.HashMap Sym FunInfo
 
+/-! ## Calling Convention
+
+Corresponds to: core.lem lines 406-408
+```lem
+type calling_convention =
+  | Normal_callconv
+  | Inner_arg_callconv
+```
+-/
+
+/-- Calling convention for function arguments
+    Corresponds to: calling_convention in core.lem lines 406-408 -/
+inductive CallingConvention where
+  | normal
+  | innerArg
+  deriving Repr, BEq, Inhabited
+
 /-! ## Core File
 
 Corresponds to: core.ott lines 547-560 (generic_file)
 ```lem
 type generic_file 'bty 'a = <|
   main    : maybe Symbol.sym;
+  calling_convention : calling_convention;
   tagDefs : core_tag_definitions;
   stdlib  : generic_fun_map 'bty 'a;
   impl    : generic_impl 'bty;
@@ -309,6 +327,8 @@ type generic_file 'bty 'a = <|
 structure File where
   /-- Entry point (main function symbol) -/
   main : Option Sym := none
+  /-- Calling convention for function arguments -/
+  callingConvention : CallingConvention := .normal
   /-- Struct/union tag definitions -/
   tagDefs : TagDefs := {}
   /-- Standard library functions -/
