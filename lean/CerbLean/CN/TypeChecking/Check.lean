@@ -51,6 +51,10 @@ def processPreClause (clause : Clause) (loc : Loc) : TypingM Unit := do
   | .constraint assertion =>
     -- Add the constraint as an assumption
     TypingM.addC (.t assertion)
+  | .letBinding name value =>
+    -- Let binding: bind the name to the expression's value in context
+    -- Corresponds to: mDefine in core_to_mucore.ml → addLValue in typing monad
+    TypingM.addLValue name value loc s!"let binding {name.name.getD ""}"
 
 /-- Process a single clause from a postcondition.
     - Resource clauses: CONSUME from context (verify function produces them)
@@ -72,6 +76,9 @@ def processPostClause (clause : Clause) (loc : Loc) : TypingM Unit := do
     -- Postcondition constraints are OBLIGATIONS to prove, not assumptions
     -- They are accumulated with current assumptions as context
     TypingM.requireConstraint (.t assertion) loc "postcondition constraint"
+  | .letBinding name value =>
+    -- Let binding works the same in postconditions
+    TypingM.addLValue name value loc s!"let binding {name.name.getD ""}"
 
 /-! ## Checking Function Specifications
 
@@ -153,6 +160,7 @@ def extractPreconditionResources (spec : FunctionSpec) : List Resource :=
     match clause with
     | .resource _ res => some res
     | .constraint _ => none
+    | .letBinding _ _ => none
 
 /-! ## Checking Function with Body
 

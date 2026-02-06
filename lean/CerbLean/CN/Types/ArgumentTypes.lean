@@ -134,6 +134,9 @@ def ofPostcondition {α : Type} (post : Postcondition) (rest : LAT α) : LAT α 
                 acc
     | .constraint assertion =>
       .constraint (.t assertion) { loc := assertion.loc } acc
+    | .letBinding name value =>
+      -- Let binding becomes Define in LAT
+      .define_ name value { loc := value.loc } acc
 
 end LAT
 

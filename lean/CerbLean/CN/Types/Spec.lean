@@ -35,6 +35,9 @@ inductive Clause where
   | resource (name : Sym) (resource : Resource)
   /-- Pure constraint assertion -/
   | constraint (assertion : IndexTerm)
+  /-- Let binding: `let <name> = <expr>` — binds name for subsequent clauses
+      Corresponds to: CN_cletExpr in c_parser.mly → mDefine in core_to_mucore.ml -/
+  | letBinding (name : Sym) (value : IndexTerm)
   deriving Inhabited
 
 /-! ## Function Specifications
@@ -74,6 +77,7 @@ Used to substitute the return symbol with the actual return value.
 def Clause.subst (σ : Subst) : Clause → Clause
   | .resource n r => .resource n r  -- TODO: subst in resource if needed
   | .constraint assertion => .constraint (assertion.subst σ)
+  | .letBinding n v => .letBinding n (v.subst σ)
 
 /-- Substitute in a postcondition.
     Corresponds to: LRT.subst in logicalReturnTypes.ml -/

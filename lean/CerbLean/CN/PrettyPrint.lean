@@ -236,6 +236,7 @@ def ppResource (res : Resource) : String :=
 def ppClause : Clause → String
   | .resource name res => s!"take {ppSym name} = {ppResource res};"
   | .constraint assertion => s!"{ppAnnotTerm assertion};"
+  | .letBinding name value => s!"let {ppSym name} = {ppAnnotTerm value};"
 
 /-! ## Specification Printing -/
 

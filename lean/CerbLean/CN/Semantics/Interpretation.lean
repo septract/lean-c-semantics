@@ -139,12 +139,14 @@ structure SpecInferenceValid where
     ((∀ clause, clause ∈ spec.requires.clauses →
       match clause with
       | Clause.resource _ res => res ∈ preCtx.resources
-      | Clause.constraint _ => True) ∧
+      | Clause.constraint _ => True
+      | Clause.letBinding _ _ => True) ∧
     -- All postcondition resources are in postCtx
     (∀ clause, clause ∈ spec.ensures.clauses →
       match clause with
       | Clause.resource _ res => res ∈ postCtx.resources
-      | Clause.constraint _ => True))
+      | Clause.constraint _ => True
+      | Clause.letBinding _ _ => True))
 
 /-! ## Level 2: Semantic Interpretation
 

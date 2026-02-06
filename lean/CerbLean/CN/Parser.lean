@@ -21,24 +21,28 @@
   constraint     = expr
 
   resource       = pred "(" expr_list ")"
-  pred           = "Owned" ["<" ctype ">"]
-                 | "Block" ["<" ctype ">"]
+  pred           = ("Owned" | "RW") ["<" ctype ">"]
+                 | ("Block" | "W")  ["<" ctype ">"]
                  | UNAME                     -- user-defined predicate
 
-  expr           = term (binop term)*
-  term           = IDENT | NUMBER | "(" expr ")" | "return" | "null" | "true" | "false"
-                 | term "." IDENT            -- member access
+  expr           = binary_expr ["?" expr ":" expr]
+  binary_expr    = unary_expr (binop unary_expr)*
+  unary_expr     = "-" unary_expr | "!" unary_expr | "~" unary_expr | postfix_expr
+  postfix_expr   = atom_expr ("." IDENT | "->" IDENT)*
+  atom_expr      = IDENT | NUMBER | "(" expr ")" | "(" cn_base_type ")" unary_expr
+                 | "return" | "null" | "true" | "false"
                  | IDENT "(" expr_list ")"   -- function call
-  binop          = "==" | "!=" | "<" | "<=" | ">" | ">=" | "&&" | "||" | "+" | "-" | "*" | "/"
+  binop          = "==" | "!=" | "<" | "<=" | ">" | ">=" | "&&" | "||" | "+" | "-" | "*" | "/" | "%"
 
-  ctype          = IDENT ["*"]*              -- simplified C type
+  cn_base_type   = "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | ...
+  ctype          = [sign] [size] [base] ["*"]*  -- C type for resources
+  NUMBER         = DIGITS [("i" | "u") DIGITS]  -- optional type suffix (e.g. 42i32, 0u8)
   IDENT          = [a-zA-Z_][a-zA-Z0-9_]*
   UNAME          = [A-Z][a-zA-Z0-9_]*        -- starts with uppercase
-  NUMBER         = [0-9]+
   ```
 
   Reference: cerberus/parsers/c/c_parser.mly lines 2300-2500
-  Audited: 2025-01-17
+  Audited: 2026-02-06
 -/
 
 import Std.Internal.Parsec
@@ -97,11 +101,27 @@ def ident : P String := lexeme do
   let rest ← manyChars (satisfy isIdentCont)
   pure (first.toString ++ rest)
 
-/-- Parse a signed integer -/
-def signedNumber : P Int := lexeme do
+/-- Result of parsing a number: either untyped integer or typed bits -/
+inductive NumLit where
+  | untyped (value : Int)
+  | typed (sign : Sign) (width : Nat) (value : Int)
+
+/-- Parse a signed integer, possibly with a type suffix (e.g., 42i32, 0u8) -/
+def signedNumber : P NumLit := lexeme do
   let neg ← optional (pchar '-')
   let n ← digits
-  pure (if neg.isSome then -(Int.ofNat n) else Int.ofNat n)
+  let value : Int := if neg.isSome then -(Int.ofNat n) else Int.ofNat n
+  -- Check for optional type suffix: i<N> or u<N>
+  let suffix ← optional (attempt do
+    let signChar ← satisfy (fun c => c == 'i' || c == 'u')
+    let width ← digits
+    pure (signChar, width))
+  match suffix with
+  | some (signChar, width) =>
+    let sign : Sign := if signChar == 'u' then .unsigned else .signed
+    pure (.typed sign width value)
+  | none =>
+    pure (.untyped value)
 
 /-! ## CN Type Parsers -/
 
@@ -261,8 +281,11 @@ def ctypeStr : P String := lexeme do
   let stars ← manyChars (satisfy (· == '*'))
   pure (base ++ stars)
 
-/-- Parse a CN base type (for CN-specific type names like i32, u64, etc.) -/
-def cnBaseType : P BaseType := do
+/-- Parse a CN base type.
+    Corresponds to: base_type_explicit / base_type in CN grammar.
+    base_type_explicit covers keyword-prefixed types (void, bool, i32, struct X, etc.)
+    base_type also allows bare cn_variable for type synonyms (not yet supported). -/
+partial def cnBaseType : P BaseType := do
   let name ← ident
   match name with
   | "void" => pure .unit
@@ -279,7 +302,27 @@ def cnBaseType : P BaseType := do
   | "real" => pure .real
   | "pointer" => pure .loc
   | "alloc_id" => pure .allocId
-  | _ => pure (.struct_ { id := 0, name := some name })
+  -- Corresponds to: STRUCT <cn_variable> in base_type_explicit
+  | "struct" => do
+    let tag ← ident
+    pure (.struct_ { id := 0, name := some tag })
+  -- Corresponds to: CN_DATATYPE <cn_variable> in base_type_explicit
+  | "datatype" => do
+    let tag ← ident
+    pure (.datatype { id := 0, name := some tag })
+  -- Corresponds to: CN_MAP LT base_type COMMA base_type GT
+  | "map" => do
+    symbol "<"; let k ← cnBaseType; symbol ","; let v ← cnBaseType; symbol ">"
+    pure (.map k v)
+  -- Corresponds to: CN_LIST LT base_type GT
+  | "list" => do
+    symbol "<"; let t ← cnBaseType; symbol ">"
+    pure (.list t)
+  -- Corresponds to: CN_SET LT base_type GT
+  | "set" => do
+    symbol "<"; let t ← cnBaseType; symbol ">"
+    pure (.set t)
+  | other => fail s!"unrecognized CN base type: {other}"
 
 /-! ## Helper Functions -/
 
@@ -314,6 +357,15 @@ partial def exprList : P (List AnnotTerm) := do
       expr
     pure (e :: rest.toList)
 
+/-- Parse a cast expression: (cnBaseType) expr
+    Reference: c_parser.mly line 1948: LPAREN base_type_explicit RPAREN expr -/
+partial def castExpr : P AnnotTerm := do
+  symbol "("
+  let bt ← cnBaseType
+  symbol ")"
+  let e ← unaryExpr
+  pure (mkTerm (.cast bt e))
+
 /-- Parse a parenthesized expression -/
 partial def parenExpr : P AnnotTerm := do
   symbol "("
@@ -326,11 +378,20 @@ partial def atomExpr : P AnnotTerm := do
   ws
   let c ← peek?
   match c with
-  | some '(' => parenExpr
+  | some '(' =>
+    -- Try cast expression: (cnBaseType) expr
+    -- Falls back to parenthesized expression if not a cast
+    match ← optional (attempt castExpr) with
+    | some e => pure e
+    | none => parenExpr
   | some c =>
     if c.isDigit || c == '-' then do
       let n ← signedNumber
-      pure (mkTerm (.const (.z n)))
+      match n with
+      | .untyped v => pure (mkTerm (.const (.z v)))
+      | .typed sign width v =>
+        -- Typed literals get the correct base type immediately
+        pure (AnnotTerm.mk (.const (.bits sign width v)) (.bits sign width) default)
     else if isIdentStart c then do
       let name ← ident
       match name with
@@ -375,6 +436,44 @@ where
         postfixRest newExpr
       | none => pure e
     | _ => pure e
+
+/-- Parse a unary prefix expression: -expr, !expr, ~expr
+    Reference: c_parser.mly lines 1937-1946 -/
+partial def unaryExpr : P AnnotTerm := do
+  ws
+  let c ← peek?
+  match c with
+  | some '!' =>
+    -- Must not be != (which is a binop)
+    match ← optional (attempt (pstring "!" *> notFollowedBy (pchar '='))) with
+    | some _ =>
+      ws
+      let e ← unaryExpr
+      pure (mkTerm (.unop .not e))
+    | none => postfixExpr
+  | some '~' =>
+    let _ ← any
+    ws
+    let e ← unaryExpr
+    pure (mkTerm (.unop .bwCompl e))
+  | some '-' =>
+    -- Unary minus: try to parse as negative number first (for literals),
+    -- but this also handles -expr for variables
+    -- We use attempt to distinguish unary - from binary -
+    -- If followed by a digit, signedNumber handles it. Otherwise treat as unary op.
+    match ← optional (attempt (do
+      let _ ← pchar '-'
+      -- If next char is a digit, let atomExpr handle the negative literal
+      let next ← peek?
+      match next with
+      | some c => if c.isDigit then fail "let atomExpr handle negative literal" else pure ()
+      | none => fail "unexpected end")) with
+    | some _ =>
+      ws
+      let e ← unaryExpr
+      pure (mkTerm (.unop .negate e))
+    | none => postfixExpr
+  | _ => postfixExpr
 
 /-- Parse a binary operator. Returns (opString, binop, swapOperands).
     For `>` and `>=`, we return the corresponding `<`/`<=` op with swap=true,
@@ -436,25 +535,42 @@ partial def binopPrec : String → Nat
 
 /-- Parse a binary expression using precedence climbing -/
 partial def expr : P AnnotTerm := do
-  let lhs ← postfixExpr
-  exprRest lhs 0
+  let lhs ← unaryExpr
+  binExprRest lhs 0
 where
-  exprRest (lhs : AnnotTerm) (minPrec : Nat) : P AnnotTerm := do
-    let opOpt ← optional (attempt binop)
-    match opOpt with
-    | none => pure lhs
-    | some (opStr, op, swap) =>
+  binExprRest (lhs : AnnotTerm) (minPrec : Nat) : P AnnotTerm := do
+    -- Parse a binop only if its precedence is high enough.
+    -- The precedence check is inside `attempt` so that a too-low-precedence
+    -- operator doesn't consume input (the caller needs to see it).
+    let opOpt ← optional (attempt do
+      let (opStr, op, swap) ← binop
       let prec := binopPrec opStr
-      if prec < minPrec then
+      if prec < minPrec then fail "precedence too low"
+      pure (opStr, op, swap, prec))
+    match opOpt with
+    | none =>
+      -- Check for ternary: expr ? expr : expr (lowest precedence)
+      -- Only check at outermost level to avoid precedence bugs
+      if minPrec == 0 then
+        let ternary ← optional (attempt (symbol "?"))
+        match ternary with
+        | some _ =>
+          let thenE ← expr
+          symbol ":"
+          let elseE ← expr
+          pure (mkTerm (.ite lhs thenE elseE))
+        | none => pure lhs
+      else
         pure lhs
-      else do
-        let rhs ← postfixExpr
-        let rhs ← exprRest rhs (prec + 1)
+    | some (opStr, op, swap, _prec) => do
+        let prec := binopPrec opStr
+        let rhs ← unaryExpr
+        let rhs ← binExprRest rhs (prec + 1)
         -- If swap is true, flip operands (e.g., a > b becomes b < a)
         let binExpr := if swap then mkTerm (.binop op rhs lhs) else mkTerm (.binop op lhs rhs)
         -- If != operator, wrap in NOT: a != b becomes !(a == b)
         let newLhs := if opStr == "!=" then mkTerm (.unop .not binExpr) else binExpr
-        exprRest newLhs minPrec
+        binExprRest newLhs minPrec
 
 end
 
@@ -464,20 +580,22 @@ end
 def predName : P ResourceName := do
   let name ← ident
   match name with
-  | "Owned" =>
-    -- Parse required type parameter: Owned<type>
+  | "Owned" | "RW" =>
+    -- Parse required type parameter: Owned<type> or RW<type>
+    -- RW is the production name in CN; Owned is deprecated
     -- CN requires explicit type; no defaulting
     symbol "<"
     let ct ← parseCtype
     symbol ">"
     pure (.owned ct .init)
-  | "Block" =>
-    -- Parse required type parameter: Block<type>
+  | "Block" | "W" =>
+    -- Parse required type parameter: Block<type> or W<type>
+    -- W is the production name in CN; Block is deprecated
     -- CN requires explicit type; no defaulting
     symbol "<"
     let ct ← parseCtype
     symbol ">"
-    -- Block represents uninitialized memory
+    -- Block/W represents uninitialized memory
     pure (.owned ct .uninit)
   | _ =>
     if name.front.isUpper then
@@ -509,14 +627,16 @@ def takeClause : P Clause := do
   let output : Output := { value := mkTerm (.sym sym) }
   pure (.resource sym { request := res, output := output })
 
-/-- Parse a let clause: let v = expr -/
+/-- Parse a let clause: let v = expr
+    Binds variable name for use in subsequent clauses.
+    Reference: c_parser.mly CN_LET condition -/
 def letClause : P Clause := do
   keyword "let"
-  let _ ← ident
+  let name ← ident
   symbol "="
   let e ← expr
   symbol ";"
-  pure (.constraint e)
+  pure (.letBinding (mkSym name) e)
 
 /-- Keywords that should not be parsed as identifiers in expressions -/
 def cnKeywords : List String := ["requires", "ensures", "take", "let", "trusted"]
