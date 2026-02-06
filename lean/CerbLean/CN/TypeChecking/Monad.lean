@@ -107,10 +107,17 @@ inductive TypeError where
 
 instance : ToString TypeError where
   toString
-    | .missingResource req _ctx =>
-      match req with
-      | .p pred => s!"missing resource: predicate {repr pred.name}"
-      | .q qpred => s!"missing resource: quantified predicate {repr qpred.name}"
+    | .missingResource req ctx =>
+      let reqStr := match req with
+        | .p pred => s!"predicate {repr pred.name}"
+        | .q qpred => s!"quantified predicate {repr qpred.name}"
+      let ctxStr := if ctx.resources.isEmpty then "  (context has no resources)"
+        else ctx.resources.foldl (init := "") fun acc r =>
+          let rName := match r.request with
+            | .p p => s!"predicate {repr p.name}"
+            | .q q => s!"quantified predicate {repr q.name}"
+          acc ++ s!"\n    - {rName}"
+      s!"missing resource: {reqStr}\n  Available resources:{ctxStr}"
     | .unprovableConstraint _lc _ctx => "unprovable constraint"
     | .unboundVariable sym => s!"unbound variable: {sym.name.getD "?"}"
     | .other msg => msg

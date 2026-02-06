@@ -35,15 +35,22 @@ Key insight: Uninit can be satisfied by either Init or Uninit (W<T> ≤ RW<T>)
 because initialized memory can always be treated as uninitialized.
 -/
 
+/-- Compare Ctypes by their inner type only, ignoring annotations.
+    Corresponds to: Sctypes.equal in CN which works on annotation-free Sctypes.
+    Our Ctype has an annots field that CN's Sctypes doesn't have. -/
+def ctypeEqualIgnoringAnnots (ct1 ct2 : Core.Ctype) : Bool :=
+  ct1.ty == ct2.ty
+
 /-- Check if name1 can be satisfied by name2 (subsumption)
     `Owned<T>(Uninit)` can be satisfied by `Owned<T>(Init)` - initialized memory
     can be treated as uninitialized.
 
-    Corresponds to: subsumed in request.ml lines 130-140 -/
+    Corresponds to: subsumed in request.ml lines 130-140
+    Uses ctypeEqualIgnoringAnnots to match CN's Sctypes.equal. -/
 def nameSubsumed (name1 name2 : ResourceName) : Bool :=
   match name1, name2 with
-  | .owned ct1 .init, .owned ct2 .init => ct1 == ct2  -- exact match for init
-  | .owned ct1 .uninit, .owned ct2 _ => ct1 == ct2    -- uninit matches both
+  | .owned ct1 .init, .owned ct2 .init => ctypeEqualIgnoringAnnots ct1 ct2
+  | .owned ct1 .uninit, .owned ct2 _ => ctypeEqualIgnoringAnnots ct1 ct2
   | .pname pn1, .pname pn2 => pn1.id == pn2.id
   | _, _ => false
 
