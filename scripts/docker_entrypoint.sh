@@ -108,7 +108,7 @@ if [[ ! -f "$INPUT_FILE" ]]; then
 fi
 
 # Build Cerberus flags
-CERBERUS_FLAGS="--sequentialise"
+CERBERUS_FLAGS=""
 if $NO_LIBC; then
     CERBERUS_FLAGS="$CERBERUS_FLAGS --nolibc"
 fi

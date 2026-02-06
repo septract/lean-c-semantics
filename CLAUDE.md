@@ -19,17 +19,23 @@ C source → Cerberus → Core IR (JSON) → Lean Parser → Lean AST → Lean I
 
 ## Project Structure
 ```
-lean-c-semantics/
+cn-types/
 ├── cerberus/          # Git submodule - Cerberus C semantics tool (fork with JSON export)
 ├── docs/              # Documentation (YYYY-MM-DD_title.md format)
 │   └── 2025-12-24_DETAILED_PLAN.md   # Full implementation roadmap
 ├── lean/              # Lean 4 project
 │   └── CerbLean/
-│       ├── Core/      # Core AST types
+│       ├── Core/      # Core AST types (Sym, Expr, File, etc.)
+│       ├── CN/        # CN separation logic type system
+│       │   ├── Types/ # CN types (base types, index terms, resources, specs)
+│       │   ├── TypeChecking/ # Type checker (monad, inference, check)
+│       │   ├── Parser.lean   # CN spec parser (from magic annotations)
+│       │   ├── Verification/ # CN verification driver
+│       │   └── Semantics/    # CN semantics
 │       ├── Parser.lean      # JSON parser (100% success on test suite)
 │       ├── PrettyPrint.lean # Pretty-printer matching Cerberus output
 │       ├── Memory/    # Memory model (concrete with allocation-ID provenance)
-│       ├── Semantics/ # Interpreter
+│       ├── Semantics/ # Core interpreter
 │       ├── Verification/    # Verified C programs (see Program Verification section)
 │       │   └── Programs/    # Individual verified programs
 │       ├── GenProof.lean    # Generates proof skeleton files from Core JSON
@@ -39,14 +45,16 @@ lean-c-semantics/
 │   ├── test_parser.sh # Run parser against Cerberus test suite
 │   ├── test_pp.sh     # Run pretty-printer comparison tests
 │   ├── test_interp.sh # Run interpreter differential testing
+│   ├── test_cn.sh     # Run CN verification tests
 │   ├── test_genproof.sh # Test proof generation pipeline
 │   ├── strip_core_json.py # Strip Core JSON to minimal dependencies (for smaller proofs)
 │   ├── fuzz_csmith.sh # Fuzz testing with csmith
 │   ├── creduce_interestingness.sh # For minimizing failing tests with creduce
 │   └── docker_entrypoint.sh # Docker container entrypoint
 ├── tests/             # C test files for differential testing
-│   ├── minimal/       # Core test suite (NNN-description.c)
-│   ├── debug/         # Debug/investigation tests (category-NN-description.c)
+│   ├── minimal/       # Core test suite (NNN-description.c, 93 tests)
+│   ├── debug/         # Debug/investigation tests (category-NN-description.c, 86 tests)
+│   ├── cn/            # CN verification tests (28 tests)
 │   └── csmith/        # Csmith fuzz testing infrastructure
 ├── .github/workflows/ # CI/CD workflows
 │   ├── ci.yml         # Build and test on push/PR
@@ -146,17 +154,14 @@ We modify Cerberus to export Core IR as JSON rather than parsing pretty-printed 
 - Cleaner, unambiguous parsing
 - Structured data easier to work with
 
-### 3. Memory Model Type Class
-Memory operations use a type class for incremental complexity:
-- **Simple**: Integer addresses, no provenance (start here)
-- **Concrete**: Allocation IDs, bounds checking (Cerberus default)
-- **PNVI**: Full provenance semantics (future)
+### 3. Concrete Memory Model
+Memory operations use a concrete memory model with allocation-ID provenance, matching Cerberus's default `impl_mem.ml`. The model tracks allocation IDs, bounds, liveness, and read-only status. PNVI/CHERI models are out of scope.
 
-### 4. Sequential Fragment First
-Focus on sequential Core initially:
-- Use `core_sequentialise` pass to eliminate concurrency
-- Parallel semantics (`Epar`, `Ewait`) deferred
-- Note: Unsequenced expressions (`Eunseq`) are now fully supported with race detection
+### 4. Sequential Execution with Unsequenced Race Detection
+The interpreter handles sequential Core with full support for unsequenced expressions:
+- `Eunseq` expressions fully supported with race detection via neg action transformation
+- No `core_sequentialise` pass required (though available as `--sequentialise` flag)
+- Parallel semantics (`Epar`, `Ewait`) remain out of scope
 
 ## Cerberus Reference
 
@@ -201,7 +206,7 @@ The driver (`driver.lem`) uses `core_reduction.lem`, NOT `core_run.lem`.
 
 ### Cerberus Setup
 
-**IMPORTANT**: Cerberus requires OCaml 4.14.1 or 5.4.0+. The version is configured in the Makefile via `OCAML_VERSION`.
+**IMPORTANT**: Cerberus requires OCaml 5.4.0. The version is configured in the Makefile via `OCAML_VERSION`.
 
 First-time setup:
 ```bash
@@ -304,8 +309,9 @@ make test-cn-unit                         # Run unit tests only (fast, no Cerber
 Test files in `tests/cn/` follow these conventions:
 - `NNN-description.c` - Tests expected to pass
 - `NNN-description.fail.c` - Tests expected to fail (e.g., double-free, use-after-free)
+- `NNN-description.smt-fail.c` - Tests expected to fail at the SMT level (postcondition violations)
 
-The `.fail.c` suffix indicates the test should fail verification. The test infrastructure automatically passes `--expect-fail` to the test runner for these files.
+The `.fail.c` and `.smt-fail.c` suffixes indicate the test should fail verification. The test infrastructure automatically passes `--expect-fail` to the test runner for these files.
 
 Example test structure:
 ```c
@@ -419,7 +425,7 @@ Compare Lean interpreter output against Cerberus:
 3. Execute in Lean interpreter
 4. Compare results (return value, UB detection)
 
-Target: 90%+ agreement on sequential tests.
+Current status: 100% match rate on minimal and debug test suites.
 
 **Generating a full test log:**
 ```bash
@@ -737,7 +743,13 @@ If string manipulation is needed:
 - Write a proper Lean program to do the transformation
 - Or wrap the shell commands in a well-designed, tested shell script in `scripts/`
 
-Always run long-running commands in the background, and work on other tasks. Do not wait for a task unless it is blocking further progress. 
+Always run long-running commands in the background, and work on other tasks. Do not wait for a task unless it is blocking further progress.
+
+### Git Commits and the Sandbox
+
+The sandbox prevents creating temp files in most locations, which breaks heredoc syntax (`$(cat <<'EOF' ... EOF)`). **Use regular double-quoted strings for commit messages** (with escaped inner quotes if needed), not heredocs.
+
+For submodule commits: always `cd` into the submodule directory, commit there, **push the submodule first**, then `cd` back to the parent repo and commit/push the submodule reference update.
 
 ### Building
 
