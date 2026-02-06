@@ -421,6 +421,11 @@ def runJsonTest (jsonPath : String) (expectFail : Bool := false) : IO UInt32 := 
       IO.println s!"Parse: {parseSuccess} success, {parseFail} failures"
       IO.println s!"Verify: {verifySuccess} success, {verifyFail} failures"
 
+      -- Parse failures always count as test failures (spec couldn't be understood)
+      if parseFail > 0 then
+        IO.eprintln s!"=== TEST FAILED: {parseFail} spec(s) failed to parse ==="
+        return 1
+
       -- Return code based on expectations
       if expectFail then
         -- For .fail.c tests: pass if verification failed
@@ -613,6 +618,11 @@ def runJsonTestWithVerify (jsonPath : String) (expectFail : Bool := false) : IO 
       IO.println s!"Total: {count} function(s) with CN annotations"
       IO.println s!"Parse: {parseSuccess} success, {parseFail} failures"
       IO.println s!"Verify: {verifySuccess} success, {verifyFail} failures"
+
+      -- Parse failures always count as test failures
+      if parseFail > 0 then
+        IO.eprintln s!"=== TEST FAILED: {parseFail} spec(s) failed to parse ==="
+        return 1
 
       if expectFail then
         if verifyFail > 0 then
