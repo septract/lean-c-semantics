@@ -104,14 +104,20 @@ structure Sym where
   name : Option String := none
   deriving Repr, Inhabited
 
-/-- Symbols are equal if they have the same digest, id, and name
-    Note: We include name because Cerberus JSON export may have symbol ID collisions
-    across different translation units when digest is empty -/
+/-- Symbols are equal if they have the same digest and id.
+    Matches CN's symbolEqual in symbol.lem lines 133-135:
+    ```lem
+    let inline symbolEqual sym1 sym2 =
+      match (sym1, sym2) with
+        | (Symbol d1 n1 sd1, Symbol d2 n2 sd2) ->
+            if d1 = d2 && n1 = n2 then true else false
+    ```
+    The digest field disambiguates symbols from different compilation units. -/
 instance : BEq Sym where
-  beq a b := a.digest == b.digest && a.id == b.id && a.name == b.name
+  beq a b := a.digest == b.digest && a.id == b.id
 
 instance : Hashable Sym where
-  hash s := mixHash (mixHash (hash s.digest) (hash s.id)) (hash s.name)
+  hash s := mixHash (hash s.digest) (hash s.id)
 
 /-! ## Symbol Prefix
 

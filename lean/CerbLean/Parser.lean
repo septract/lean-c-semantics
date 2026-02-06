@@ -172,13 +172,21 @@ def globDeclTags : List String := ["GlobalDef", "GlobalDecl"]
 
 /-! ## Symbol Parsing -/
 
-/-- Parse a Sym from JSON -/
+/-- Parse a Sym from JSON.
+    Parses the "digest" field (hex string from Digest.to_hex).
+    Corresponds to: json_sym in json_core.ml -/
 def parseSym (j : Json) : Except String Sym := do
   let id ← getNat j "id"
-  let name := match getFieldOpt j "name" with
-    | some (Json.str s) => some s
-    | _ => none
-  .ok { id := id, name := name }
+  let name ← match getFieldOpt j "name" with
+    | some (Json.str s) => .ok (some s)
+    | some Json.null => .ok none
+    | some other => .error s!"expected name to be string or null, got: {truncateJson other}"
+    | none => .ok none
+  let digestJ ← getField j "digest"
+  let digest ← match digestJ.getStr? with
+    | .ok s => .ok s
+    | .error e => .error s!"expected digest string: {e}"
+  .ok { id := id, name := name, digest := digest }
 
 /-- Parse an optional Sym (handles null) -/
 def parseSymOpt (j : Json) : Except String (Option Sym) :=
@@ -1681,6 +1689,70 @@ def parseFunInfoEntry (j : Json) : Except String (Sym × FunInfo) := do
     | _ => pure true
   pure (sym, { loc, cnMagic, returnType, params, isVariadic, hasProto })
 
+/-- Parse a CallingConvention from JSON.
+    Corresponds to: json_calling_convention in json_core.ml -/
+def parseCallingConvention (j : Json) : Except String CallingConvention := do
+  let s ← j.getStr?
+  match s with
+  | "Normal" => .ok .normal
+  | "InnerArg" => .ok .innerArg
+  | other => .error s!"unknown calling convention: {other}"
+
+/-- Parse C2X attributes from JSON.
+    Corresponds to: json_attributes in json_core.ml -/
+def parseAttributes (j : Json) : Except String Attributes := do
+  let arr ← j.getArr?
+  let attrs ← arr.toList.mapM fun attrJ => do
+    let idJ ← getField attrJ "id"
+    let nameJ ← getField idJ "name"
+    let name ← nameJ.getStr?
+    let nsJ ← getField attrJ "ns"
+    let ns ← if nsJ.isNull then .ok none
+      else do
+        let nsNameJ ← getField nsJ "name"
+        let nsName ← nsNameJ.getStr?
+        .ok (some nsName)
+    let argsJ ← getArr attrJ "args"
+    let args ← argsJ.toList.mapM fun argJ => do
+      let locJ ← getField argJ "loc"
+      let loc ← parseLoc locJ
+      let text ← getStr argJ "text"
+      let extraArgsJ ← getArr argJ "extra_args"
+      let tokens ← extraArgsJ.toList.mapM fun eJ => do
+        let eLoc ← getField eJ "loc" >>= parseLoc
+        let eText ← getStr eJ "text"
+        .ok (eLoc, eText)
+      .ok ({ loc := loc, arg := text, tokens := tokens : AttrArg })
+    .ok ({ ns := ns, id := name, args := args : Attribute })
+  .ok { attrs := attrs }
+
+/-- Parse a LoopAttribute from JSON.
+    Corresponds to: json_loop_attributes in json_core.ml -/
+def parseLoopAttribute (j : Json) : Except String (LoopId × LoopAttribute) := do
+  let loopId ← getNat j "loop_id"
+  let markerId ← getNat j "marker_id"
+  let attrsJ ← getField j "attributes"
+  let attrs ← parseAttributes attrsJ
+  let locCondJ ← getField j "loc_condition"
+  let locCond ← parseLoc locCondJ
+  let locLoopJ ← getField j "loc_loop"
+  let locLoop ← parseLoc locLoopJ
+  .ok (loopId, { markerId := markerId, attributes := attrs,
+                  locCondition := locCond, locLoop := locLoop })
+
+/-- Parse visible objects env entry from JSON.
+    Corresponds to: json_visible_objects_env in json_core.ml -/
+def parseVisibleObjectsEntry (j : Json) : Except String (Nat × List (Sym × Ctype)) := do
+  let markerId ← getNat j "marker_id"
+  let objectsJ ← getArr j "objects"
+  let objects ← objectsJ.toList.mapM fun objJ => do
+    let symJ ← getField objJ "symbol"
+    let sym ← parseSym symJ
+    let ctypeJ ← getField objJ "ctype"
+    let ctype ← parseCtype ctypeJ
+    .ok (sym, ctype)
+  .ok (markerId, objects)
+
 /-- Parse a complete Core File from JSON -/
 def parseFile (j : Json) : Except String File := do
   -- Parse main symbol
@@ -1745,8 +1817,26 @@ def parseFile (j : Json) : Except String File := do
       .ok map
     | none => .ok {}
 
+  -- Parse calling convention
+  let callingConvention ← do
+    let ccJ ← getField j "calling_convention"
+    parseCallingConvention ccJ
+
+  -- Parse loop attributes
+  let loopAttributes ← do
+    let laJ ← getField j "loop_attributes"
+    let arr ← laJ.getArr?
+    arr.toList.mapM parseLoopAttribute
+
+  -- Parse visible objects environment
+  let visibleObjectsEnv ← do
+    let voeJ ← getField j "visible_objects_env"
+    let arr ← voeJ.getArr?
+    arr.toList.mapM parseVisibleObjectsEntry
+
   .ok {
     main := main
+    callingConvention := callingConvention
     tagDefs := tagDefs
     stdlib := stdlib
     impl := impl
@@ -1754,6 +1844,8 @@ def parseFile (j : Json) : Except String File := do
     funs := funs
     extern := extern
     funinfo := funinfo
+    loopAttributes := loopAttributes
+    visibleObjectsEnv := visibleObjectsEnv
   }
 
 /-- Parse a Core File from a JSON string -/
