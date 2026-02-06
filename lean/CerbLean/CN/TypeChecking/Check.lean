@@ -87,6 +87,18 @@ Uses TypeCheckResult from CN.Verification.Obligation which includes
 accumulated proof obligations.
 -/
 
+/-- Check for leaked resources at function exit.
+    In CN, all resources must be accounted for (consumed or returned).
+
+    Corresponds to: check for leaked resources in check_procedure -/
+def checkNoLeakedResources : TypingM Unit := do
+  let ctx ← TypingM.getContext
+  if ctx.resources.isEmpty then
+    pure ()
+  else
+    -- Fail on leaked resources - CN requires all resources to be accounted for
+    TypingM.fail (.other s!"Leaked resources: {ctx.resources.length} resource(s) not consumed")
+
 /-- Process all precondition clauses (requires).
     Consumes resources and binds outputs.
 
@@ -126,9 +138,12 @@ def checkFunctionSpec
   if spec.trusted then
     TypeCheckResult.ok
   else
-    -- Run type checking with obligation accumulation enabled
+    -- Run type checking with obligation accumulation enabled.
+    -- Start with empty resources — processPrecondition will produce them.
+    -- (initialResources parameter is kept for API compatibility but not used
+    --  since processPrecondition produces resources from the spec.)
     let initialState : TypingState := {
-      context := { Context.empty with resources := initialResources }
+      context := Context.empty
       oracle := .trivial  -- Not used when accumulating obligations
       accumulateObligations := true
     }
@@ -139,6 +154,11 @@ def checkFunctionSpec
 
       -- Process postcondition (generates obligations)
       processPostcondition spec.ensures loc
+
+      -- Check for leaked resources: all precondition resources must be
+      -- accounted for (consumed by postcondition or returned)
+      -- Corresponds to: resource leak check in check_procedure
+      checkNoLeakedResources
 
     match TypingM.run computation initialState with
     | .ok (_, finalState) =>
@@ -166,18 +186,6 @@ def extractPreconditionResources (spec : FunctionSpec) : List Resource :=
 
 Full function verification: check that a function body satisfies its specification.
 -/
-
-/-- Check for leaked resources at function exit.
-    In CN, all resources must be accounted for (consumed or returned).
-
-    Corresponds to: check for leaked resources in check_procedure -/
-def checkNoLeakedResources : TypingM Unit := do
-  let ctx ← TypingM.getContext
-  if ctx.resources.isEmpty then
-    pure ()
-  else
-    -- Fail on leaked resources - CN requires all resources to be accounted for
-    TypingM.fail (.other s!"Leaked resources: {ctx.resources.length} resource(s) not consumed")
 
 /-- Type check a function body against its specification.
 
