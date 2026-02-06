@@ -42,10 +42,10 @@ def unitTestCases : List (String × String × Bool) := [
              return == v; ",
    false),
 
-  -- Just requires
-  ("requires only",
+  -- Just requires — this is a resource leak (precondition resource never consumed)
+  ("requires only (expect fail: leak)",
    "requires take x = Owned<int>(ptr);",
-   false),
+   true),
 
   -- Just ensures (expected to fail - can't produce resources without having them)
   ("ensures only (expect fail)",

@@ -80,6 +80,54 @@ def fresh (ctx : ResolveContext) (name : String) (bt : BaseType) : ResolveContex
 
 end ResolveContext
 
+/-! ## CN Builtin Functions
+
+CN defines MIN/MAX builtins as zero-argument functions returning integer bounds.
+Corresponds to: cn/lib/builtins.ml (min_bits_def, max_bits_def, max_min_bits)
+
+These are called as e.g. MINi32(), MAXu8() and return the min/max representable
+value for the given type as a Bits constant.
+-/
+
+/-- Try to resolve a CN builtin function call.
+    Recognizes patterns: MIN/MAX + i/u + 8/16/32/64
+    Returns (constant value, base type) if the name matches a builtin.
+
+    Corresponds to: builtins.ml min_bits_def/max_bits_def -/
+def resolveBuiltin (name : String) : Option (Const × BaseType) :=
+  -- Parse the name: (MIN|MAX)(i|u)(8|16|32|64)
+  let pfx := if name.startsWith "MIN" then some false  -- false = min
+             else if name.startsWith "MAX" then some true  -- true = max
+             else none
+  match pfx with
+  | none => none
+  | some isMax =>
+    let rest := name.drop 3  -- drop MIN or MAX
+    if rest.length < 2 then none else
+    let signChar := rest.get ⟨0⟩
+    let widthStr := rest.drop 1
+    let sign := if signChar == 'u' then some Sign.unsigned
+                else if signChar == 'i' then some Sign.signed
+                else none
+    match sign with
+    | none => none
+    | some s =>
+      match widthStr.toNat? with
+      | none => none
+      | some width =>
+        if width != 8 && width != 16 && width != 32 && width != 64 then none else
+        let bt := BaseType.bits s width
+        let value : Int :=
+          if isMax then
+            match s with
+            | .unsigned => (2 ^ width) - 1
+            | .signed => (2 ^ (width - 1)) - 1
+          else
+            match s with
+            | .unsigned => 0
+            | .signed => -(2 ^ (width - 1))
+        some (.bits s width value, bt)
+
 /-! ## Output Type Computation
 
 When processing Owned<T> resources, we need to compute the proper base type for
@@ -390,6 +438,24 @@ partial def resolveAnnotTerm (ctx : ResolveContext) (at_ : AnnotTerm)
     -- Cast: result type is the target base type
     let value' ← resolveAnnotTerm ctx value none
     return .mk (.cast targetBt value') targetBt loc
+  | .mk (.apply fn args) _bt loc =>
+    -- Check for builtin functions first (e.g. MINi32(), MAXu8())
+    -- Corresponds to: CN's builtins.ml - zero-arg functions returning constants
+    match fn.name, args with
+    | some name, [] =>
+      match resolveBuiltin name with
+      | some (constVal, bt) => return .mk (.const constVal) bt loc
+      | none =>
+        match resolveSym ctx fn with
+        | some resolved => return .mk (.apply resolved []) _bt loc
+        | none => throw (.symbolNotFound name)
+    | _, _ =>
+      -- Non-builtin function call: resolve symbol and args normally
+      match resolveSym ctx fn with
+      | some resolved =>
+        let args' ← args.mapM (resolveAnnotTerm ctx · none)
+        return .mk (.apply resolved args') _bt loc
+      | none => throw (.symbolNotFound (fn.name.getD "?"))
   | .mk t bt loc =>
     -- For other terms, resolve recursively with expected type, preserve original type
     let t' ← resolveTerm ctx t expectedBt

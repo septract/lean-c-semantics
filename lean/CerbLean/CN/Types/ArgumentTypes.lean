@@ -47,12 +47,15 @@ return normally. In CN, when you have `AT.lt = False.t AT.t`, the inner
 labels are terminal.
 -/
 
-/-- False type (uninhabited).
-    Used for label types to indicate they never return normally.
+/-- False type for label types.
     Corresponds to: type t = False in cn/lib/false.ml
 
-    We use Lean's standard Empty type which is uninhabited. -/
-abbrev False_ := Empty
+    CN's False.t has a single constructor `False`. It is used to mark label
+    types as terminal, but the continuation IS reachable (it's where CN's
+    all_empty leak check runs). We model it as a unit-like inductive. -/
+inductive False_ where
+  | false_
+  deriving Inhabited
 
 /-! ## Logical Argument Types (LAT)
 
@@ -74,9 +77,7 @@ The logical part of an argument type. Processes:
       | Constraint of LC.t * info * 'i t
       | I of 'i
 
-    We add a `terminal` constructor for label types (where α = False_/Empty).
-    In CN's OCaml, this is handled by `LAT.I False.False` which can never be
-    pattern-matched. In Lean, we make this explicit to avoid runtime panics. -/
+    Corresponds to: 'i t in logicalArgumentTypes.ml -/
 inductive LAT (α : Type) where
   /-- Define a logical variable with a value.
       `Define (name, value) info rest` means: let name = value in rest -/
@@ -86,11 +87,10 @@ inductive LAT (α : Type) where
   | resource (name : Sym) (request : Request) (outputBt : BaseType) (info : Info) (rest : LAT α)
   /-- Constraint clause: a logical constraint to verify/assume. -/
   | constraint (lc : LogicalConstraint) (info : Info) (rest : LAT α)
-  /-- Inner return type (base case). -/
+  /-- Inner return type (base case).
+      For label types, `I False_.false_` is the terminal case matching CN's
+      `LAT.I False.False`. The continuation IS called (CN checks all_empty there). -/
   | I (inner : α)
-  /-- Terminal case for label types. Corresponds to LAT.I False.False in CN.
-      When spineL reaches this, processing is complete and no continuation is called. -/
-  | terminal
 
 namespace LAT
 
@@ -105,7 +105,6 @@ partial def subst {α : Type} (innerSubst : Subst → α → α) (σ : Subst) : 
   | .constraint lc info rest =>
     .constraint (lc.subst σ) info (subst innerSubst σ rest)
   | .I inner => .I (innerSubst σ inner)
-  | .terminal => .terminal
 
 /-- Convert a Postcondition (list of clauses) to LAT.
     Corresponds to: LAT.of_lrt in logicalArgumentTypes.ml line 181
@@ -212,14 +211,9 @@ abbrev LT := AT False_
 /-- The terminal LAT value for label types.
     Corresponds to: LAT.I False.False in CN
 
-    This represents the end of a label type - since False_ (Empty) is uninhabited,
-    the continuation should never be called. We use the explicit `.terminal`
-    constructor which signals to spineL that processing is complete.
-
-    Note: In CN's OCaml, `LAT.I False.False` is pattern matched but never
-    actually executed because False is uninhabited. Our `.terminal` constructor
-    makes this explicit without requiring `sorry`. -/
-def LAT.terminalValue : LAT False_ := .terminal
+    CN's False.t has a single constructor `False`. The continuation IS reachable
+    (CN checks all_empty there). We use `I False_.false_` to match. -/
+def LAT.terminalValue : LAT False_ := .I .false_
 
 /-- Create a label type for a return label.
     Corresponds to: AT.of_rt function_rt (LAT.I False.False) in wellTyped.ml

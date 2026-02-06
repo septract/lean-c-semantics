@@ -95,14 +95,11 @@ partial def spineL {α : Type} (loc : Loc) (situation : CallSituation)
     spineL loc situation rest k
 
   | .I inner =>
-    -- Base case: call the continuation with the inner type
+    -- Base case: call the continuation with the inner type.
+    -- For label types (α = False_), inner = False_.false_ and the continuation
+    -- IS called — CN checks all_empty (leaked resources) there.
+    -- Corresponds to: LAT.I case in spine_l, including LAT.I False.False
     k inner
-
-  | .terminal =>
-    -- Terminal case for label types (corresponds to LAT.I False.False in CN)
-    -- Processing is complete; don't call the continuation as it expects
-    -- an uninhabited type. This is the expected endpoint for label types.
-    pure ()
 
 where
   /-- Consume a resource matching a request and bind the output.
