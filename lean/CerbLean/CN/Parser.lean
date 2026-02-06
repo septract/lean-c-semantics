@@ -365,17 +365,15 @@ where
       let member ← ident
       let newExpr := mkTerm (.structMember e (mkIdent member))
       postfixRest newExpr
-    | some '-' => do
-      let _ ← any
-      let c2 ← peek?
-      if c2 == some '>' then do
-        let _ ← any
+    | some '-' =>
+      -- Try -> (member access); if not followed by >, leave '-' for binop parser
+      match ← optional (attempt (pstring "->")) with
+      | some _ => do
         ws
         let member ← ident
         let newExpr := mkTerm (.structMember e (mkIdent member))
         postfixRest newExpr
-      else
-        fail "expected '>' after '-'"
+      | none => pure e
     | _ => pure e
 
 /-- Parse a binary operator. Returns (opString, binop, swapOperands).
