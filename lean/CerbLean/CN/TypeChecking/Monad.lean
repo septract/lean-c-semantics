@@ -476,6 +476,7 @@ def pure_ (m : TypingM α) : TypingM α := do
   setState { s with obligations := newObligations }
   return result
 
+
 end TypingM
 
 end CerbLean.CN.TypeChecking

@@ -221,14 +221,25 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
       pure ()
 
   -- Case expression
-  -- Each branch is checked speculatively with its pattern binding
-  -- Corresponds to: Ecase case in check.ml (similar pattern to Eif)
+  -- Filter Unspecified branches (muCore strips these), then check ALL
+  -- remaining branches speculatively with pure_ (like Eif checks both branches).
+  -- CN asserts Ecase away (core_to_mucore.ml:451) — it never reaches check.ml.
+  -- Our filterSpecifiedBranches simulates the muCore transformation.
+  -- After filtering, remaining branches are all reachable paths (like if/else).
+  -- Corresponds to: Eif in check.ml lines 1985-2002 (similar pattern)
   | .case_ scrut branches =>
     checkPexprK scrut fun scrutVal => do
       if branches.isEmpty then
         TypingM.fail (.other "Empty case expression")
 
-      -- Check each branch speculatively
+      -- Filter branches: remove Unspecified patterns and wildcard catch-alls
+      -- This mirrors CN's muCore transformation which strips non-Specified branches
+      let branches := filterSpecifiedBranches branches
+
+      if branches.isEmpty then
+        TypingM.fail (.other "All case branches filtered (no Specified branch found)")
+
+      -- Check each remaining branch speculatively (errors propagate)
       for (pat, body) in branches do
         let _ ← TypingM.pure_ do
           let bindings ← bindPattern pat scrutVal

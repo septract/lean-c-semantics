@@ -16,8 +16,62 @@ import CerbLean.Core.Value
 
 namespace CerbLean.CN.TypeChecking
 
-open CerbLean.Core (Sym Identifier Pexpr APexpr Value Binop Pattern APattern ObjectValue)
+open CerbLean.Core (Sym Identifier Pexpr APexpr Value Binop Pattern APattern ObjectValue Ctor)
+
+/-- Check if a pattern contains an Unspecified constructor.
+    CN's muCore transformation strips Unspecified branches from case expressions
+    (since CN assumes loaded values are always Specified). We mirror this by
+    skipping branches whose patterns contain Unspecified constructors.
+    Corresponds to: core_to_mucore.ml stripping of Unspecified branches -/
+def patternContainsUnspecified : Pattern → Bool
+  | .base _ _ => false
+  | .ctor c args =>
+    c == .unspecified || goUnspec args
+where
+  goUnspec : List Pattern → Bool
+    | [] => false
+    | p :: ps => patternContainsUnspecified p || goUnspec ps
+
+/-- Check if a pattern contains a Specified constructor -/
+def patternContainsSpecified : Pattern → Bool
+  | .base _ _ => false
+  | .ctor c args =>
+    c == .specified || goSpec args
+where
+  goSpec : List Pattern → Bool
+    | [] => false
+    | p :: ps => patternContainsSpecified p || goSpec ps
+
+/-- Filter case branches to keep only Specified branches.
+    CN's muCore transformation strips Unspecified branches from case
+    expressions on loaded values. We mirror this by:
+    1. Removing branches with Unspecified patterns
+    2. If any remaining branch has Specified patterns, removing wildcard
+       branches (which are catch-alls for the Unspecified case)
+    Corresponds to: core_to_mucore.ml stripping of Unspecified branches -/
+def filterSpecifiedBranches (branches : List (APattern × α))
+    : List (APattern × α) :=
+  -- Step 1: remove branches with explicit Unspecified patterns
+  let filtered := branches.filter fun (pat, _) =>
+    !patternContainsUnspecified pat.pat
+  -- Step 2: if any branch has Specified, keep only Specified branches
+  -- (removes wildcards that are catch-alls for the Unspecified case)
+  let hasSpecified := filtered.any fun (pat, _) =>
+    patternContainsSpecified pat.pat
+  if hasSpecified then
+    filtered.filter fun (pat, _) => patternContainsSpecified pat.pat
+  else
+    filtered
 open CerbLean.CN.Types
+
+/-- The canonical undef symbol used for undefined behavior markers.
+    All code that creates undef terms should use this symbol for consistency.
+    Code that detects undef terms (e.g., simplifyPointerForResource) checks
+    against this symbol's id and name. -/
+def undefSym : Core.Sym := { id := 0, name := some "undef", description := .none_ }
+
+/-- Check if a symbol is the canonical undef marker -/
+def isUndefSym (s : Core.Sym) : Bool := s.id == 0 && s.name == some "undef"
 
 /-! ## Helper Functions -/
 
@@ -274,7 +328,6 @@ def valueToTerm (v : Value) (loc : Core.Loc) (expectedBt : Option BaseType := no
   | .error (.other "unspecified_value") =>
     -- Unspecified (uninitialized) value: return a symbolic "undef" term
     -- The CN verifier will ensure this value is never actually used
-    let symUndef : Core.Sym := { id := 0, name := some "undef" }
     -- Infer type from the loaded value - MUST have valid type
     let bt ← match v with
       | .loaded (.unspecified ct) =>
@@ -282,7 +335,7 @@ def valueToTerm (v : Value) (loc : Core.Loc) (expectedBt : Option BaseType := no
         | some bt => pure bt
         | none => throw (.other s!"Unsupported type in unspecified value: {repr ct.ty}")
       | _ => throw (.other "Cannot determine type for unspecified value")
-    return AnnotTerm.mk (.sym symUndef) bt loc
+    return AnnotTerm.mk (.sym undefSym) bt loc
   | .error e => throw e
 where
   baseTypeOfConst : Const → BaseType
@@ -402,12 +455,16 @@ partial def bindPattern (pat : APattern) (value : IndexTerm) : TypingM PatternBi
       -- We skip binding here (matches any value, binds nothing useful)
       return { boundVars := [] }
     | .tuple =>
-      -- Tuple patterns - bind each component
-      -- We create symbolic projection terms for each element
+      -- Tuple patterns - bind each component using nthTuple projections.
+      --
+      -- Corresponds to: Ctuple case in check_and_match_pattern, check.ml lines 60-75
+      -- CN uses Simplify.IndexTerms.tuple_nth_reduce to extract the ith element:
+      --   - If value is a concrete Tuple: extract element directly
+      --   - Otherwise: create NthTuple(i, value) structural projection
+      -- This preserves symbolic value flow through tuple destructuring.
       --
       -- Type handling: Extract element types from the tuple type.
       -- If value.bt is BaseType.tuple elemTypes, use elemTypes[idx] for each element.
-      -- This ensures proper type propagation through tuple destructuring.
       let elemTypes ← match value.bt with
         | .tuple ts => pure ts
         | other =>
@@ -423,10 +480,6 @@ partial def bindPattern (pat : APattern) (value : IndexTerm) : TypingM PatternBi
       let mut idx := 0
       for innerPat in args do
         let innerAPat : APattern := ⟨pat.annots, innerPat⟩
-        -- Get a fresh symbol for this projection
-        let state ← TypingM.getState
-        let projId := state.freshCounter
-        TypingM.modifyState fun s => { s with freshCounter := s.freshCounter + 1 }
 
         -- Determine element type: prefer tuple element type, then pattern type
         let projBt ← match elemTypes[idx]? with
@@ -441,12 +494,23 @@ partial def bindPattern (pat : APattern) (value : IndexTerm) : TypingM PatternBi
               | some t => pure t
               | none => TypingM.fail (.other s!"Unsupported Core base type in tuple pattern element {idx}: {repr bt}")
             | .ctor _ _ =>
-              -- Constructor pattern without tuple type info - need pattern's enclosing type
-              -- For Specified/Unspecified patterns, the type should come from context
               TypingM.fail (.other s!"Cannot determine type for constructor pattern at index {idx} - value is not a proper tuple")
 
-        let projSym : Sym := { id := projId, name := some s!"proj_{idx}" }
-        let projTerm : IndexTerm := AnnotTerm.mk (.sym projSym) projBt value.loc
+        -- Use nthTuple projection with eager reduction (tuple_nth_reduce)
+        -- Corresponds to: Simplify.IndexTerms.tuple_nth_reduce in simplify.ml:174-180
+        let projTerm : IndexTerm ← match value.term with
+          | .tuple elems =>
+            -- Concrete tuple: extract element directly
+            -- Corresponds to: Tuple items -> List.nth items n
+            -- (OCaml List.nth raises Invalid_argument on out-of-bounds)
+            match elems[idx]? with
+            | some elem => pure elem
+            | none => TypingM.fail (.other s!"Tuple index {idx} out of bounds (tuple has {elems.length} elements)")
+          | _ =>
+            -- Symbolic/non-concrete: create structural nthTuple projection
+            -- Corresponds to: _ -> IT.nthTuple_ ~item_bt (n, it) loc
+            pure (AnnotTerm.mk (.nthTuple idx value) projBt value.loc)
+
         -- Recursively bind the inner pattern
         let innerBindings ← bindPattern innerAPat projTerm
         allBindings := allBindings ++ innerBindings.boundVars
@@ -591,10 +655,14 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
       return AnnotTerm.mk (.tuple argTerms) tupleBt loc
     | .specified =>
       -- Specified(value) - the value is known/defined
-      -- Propagate expected type to inner value (Specified wraps a value of that type)
+      -- Unwrap loaded type: Specified wraps an object value, so loaded(ot) → object(ot)
+      -- Corresponds to: muCore stripping loaded wrapper from Specified values
       match args with
       | [innerArg] =>
-        let peArg : APexpr := ⟨[], none, innerArg⟩
+        let innerTy := pe.ty.map fun
+          | .loaded ot => .object ot
+          | other => other
+        let peArg : APexpr := ⟨[], innerTy, innerArg⟩
         let innerVal ← checkPexpr peArg expectedBt
         return innerVal
       | _ => TypingM.fail (.other "Specified requires exactly 1 argument")
@@ -607,8 +675,7 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
         | none => match pe.ty.bind coreBaseTypeToCN with
           | some bt => pure bt
           | none => TypingM.fail (.other "Cannot determine type for Unspecified value")
-      let symUndef : Sym := { id := 0, name := some "undef" }
-      return AnnotTerm.mk (.sym symUndef) unspecBt loc
+      return AnnotTerm.mk (.sym undefSym) unspecBt loc
     | .ivmax =>
       -- ivmax(ctype) - maximum value for integer type
       -- Corresponds to: Civmax in cn/lib/check.ml lines 584-595
@@ -758,6 +825,21 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
         let fnStr := fnName.getD "unknown"
         let resBt ← requireCoreBaseTypeToCN pe.ty s!"function call {fnStr}"
         return AnnotTerm.mk (.apply fnSym argTerms) resBt loc
+    -- is_representable_integer: check if value fits in integer type
+    -- Corresponds to: is_representable_integer in Core eval
+    -- Returns a boolean representability term
+    else if fnName == some "is_representable_integer" then
+      match args with
+      | [valArg, tyArg] =>
+        let peVal : APexpr := ⟨[], none, valArg⟩
+        let argVal ← checkPexpr peVal
+        match tyArg with
+        | .val (.ctype ct) =>
+          return AnnotTerm.mk (.representable ct argVal) .bool loc
+        | _ =>
+          TypingM.fail (.other "is_representable_integer: could not extract ctype")
+      | _ =>
+        TypingM.fail (.other "is_representable_integer requires exactly 2 arguments")
     else
       -- General function call
       let argTerms ← args.mapM fun arg => do
@@ -773,11 +855,16 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
       return AnnotTerm.mk (.apply fnSym argTerms) resBt loc
 
   -- Case/match expression
-  -- Propagate expected type to branch bodies
+  -- Filter out Unspecified branches (CN muCore strips these).
+  -- Then convert remaining branches.
+  -- Corresponds to: core_to_mucore.ml stripping of Unspecified branches
   | .case_ scrut branches =>
     let peScrut : APexpr := ⟨[], none, scrut⟩
     let tScrut ← checkPexpr peScrut
-    -- Convert branches
+    -- Filter branches: remove Unspecified patterns and wildcard catch-alls
+    -- This mirrors CN's muCore transformation which strips non-Specified branches
+    let branches := filterSpecifiedBranches branches
+    -- Convert remaining branches
     let cnBranches ← branches.mapM fun (pat, body) => do
       let bindings ← bindPattern pat tScrut
       let peBody : APexpr := ⟨[], pe.ty, body⟩
@@ -809,12 +896,7 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
     -- The CN verifier will ensure this value is never actually used
     -- (i.e., the path condition leading here is unsatisfiable).
     let resBt ← requireCoreBaseTypeToCN pe.ty "undef expression"
-    let symUndef : Core.Sym := {
-      id := 0,
-      name := some "undef",
-      description := .none_
-    }
-    return AnnotTerm.mk (.sym symUndef) resBt loc
+    return AnnotTerm.mk (.sym undefSym) resBt loc
 
   -- Error expression
   | .error msg _ =>

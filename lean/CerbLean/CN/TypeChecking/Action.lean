@@ -86,6 +86,26 @@ def mkUnitTerm (loc : Core.Loc) : IndexTerm :=
 def mkDefaultValue (bt : BaseType) (loc : Core.Loc) : IndexTerm :=
   AnnotTerm.mk (.const (.default bt)) bt loc
 
+/-- Simplify a pointer expression for resource matching.
+    Core IR wraps pointer dereferences in validity checks:
+      if PtrValidForDeref then ptr else undef(...)
+    CN's muCore transformation strips these wrappers since validity is
+    ensured by the resource system (having Owned<T>(ptr) implies ptr is valid).
+    Our lazy muCore approach simulates this by simplifying the ITE pattern.
+
+    Corresponds to: core_to_mucore pointer dereference simplification -/
+def simplifyPointerForResource (ptr : IndexTerm) : IndexTerm :=
+  match ptr.term with
+  | .ite _cond thenBranch elseBranch =>
+    -- If else branch is an undef marker, strip the ITE wrapper
+    -- Undef symbols are created in checkPexpr with id=0, name="undef"
+    match elseBranch.term with
+    | .sym s =>
+      if isUndefSym s then thenBranch
+      else ptr
+    | _ => ptr
+  | _ => ptr
+
 /-- Convert Ctype to CN BaseType.
     Fails on unsupported types rather than silently returning a default.
 
@@ -270,7 +290,9 @@ def handleStore (_locking : Bool) (tyPe : APexpr) (ptrPe : APexpr) (valPe : APex
   let ct ← extractCtype tyPe loc
 
   -- Evaluate pointer and value expressions
-  let ptr ← checkPexpr ptrPe
+  -- Simplify pointer for resource matching (strip PtrValidForDeref wrappers)
+  let ptrRaw ← checkPexpr ptrPe
+  let ptr := simplifyPointerForResource ptrRaw
   let val ← checkPexpr valPe
 
   -- Check if we're storing an unspecified value (uninitialized memory)
@@ -367,8 +389,10 @@ def handleLoad (tyPe : APexpr) (ptrPe : APexpr) (_order : Core.MemoryOrder) (loc
   -- Corresponds to: act.ct in check.ml
   let ct ← extractCtype tyPe loc
 
-  -- Evaluate pointer expression
-  let ptr ← checkPexpr ptrPe
+  -- Evaluate pointer expression and simplify for resource matching
+  -- Core IR wraps pointers in ite(PtrValidForDeref, ptr, undef) — strip this
+  let ptrRaw ← checkPexpr ptrPe
+  let ptr := simplifyPointerForResource ptrRaw
 
   -- Request (consume) Owned<T>(Init) - we need readable permission
   -- Load requires initialized memory (reading uninitialized is UB)

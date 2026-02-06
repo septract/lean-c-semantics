@@ -60,7 +60,7 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
 
     # Determine if this is an expected-failure test
     EXPECT_FAIL=""
-    if [[ "$BASENAME" == *.fail.c ]]; then
+    if [[ "$BASENAME" == *.fail.c ]] || [[ "$BASENAME" == *.smt-fail.c ]]; then
         EXPECT_FAIL="--expect-fail"
         echo "  (expecting failure)"
     fi
