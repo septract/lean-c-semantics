@@ -183,23 +183,18 @@ def constToTerm : Const → TranslateResult
   | .allocId id => .ok (Term.literalT (toString id))
   | .pointer p => .ok (Term.literalT (toString p.addr))
   | .memByte m => .ok (Term.literalT (toString m.value))
-  | .ctypeConst _ => .ok (Term.literalT "0")
-  | .default _ => .ok (Term.literalT "0")
+  | .ctypeConst _ => .unsupported "ctypeConst in SMT query"
+  | .default _ => .unsupported "default value in SMT query"
 
 /-- Check if a base type is a bitvector type -/
 def isBitsType : BaseType → Bool
   | .bits _ _ => true
   | _ => false
 
-/-- Get width from a bits type (defaults to 32) -/
-def bitsWidth : BaseType → Nat
-  | .bits _ width => width
-  | _ => 32
-
-/-- Get signedness from a bits type (defaults to unsigned) -/
-def bitsSignedness : BaseType → Sign
-  | .bits sign _ => sign
-  | _ => .unsigned
+/-- Check if a base type is signed bits (for bitvector operation dispatch) -/
+def isSignedBits : BaseType → Bool
+  | .bits .signed _ => true
+  | _ => false
 
 /-- Check if a term is an integer literal -/
 def isIntLiteral (tm : Smt.Term) : Option Int :=
@@ -244,7 +239,7 @@ def binOpToTerm (op : BinOp) (lBt rBt : BaseType) (l r : Smt.Term) : TranslateRe
   -- Both operands should have matching types after Pexpr type fixup
   -- Use left operand's type to determine if we need bitvector ops
   let useBv := isBitsType lBt
-  let sign := bitsSignedness lBt
+  let signed := isSignedBits lBt  -- Only meaningful when useBv = true
   let mkBinApp (sym : String) := .ok (Term.mkApp2 (Term.symbolT sym) l r)
   match op with
   -- Arithmetic operations
@@ -254,36 +249,36 @@ def binOpToTerm (op : BinOp) (lBt rBt : BaseType) (l r : Smt.Term) : TranslateRe
   | .mulNoSMT => if useBv then mkBinApp "bvmul" else mkBinApp "*"
   | .div =>
     if useBv then
-      if sign == .signed then mkBinApp "bvsdiv" else mkBinApp "bvudiv"
+      if signed then mkBinApp "bvsdiv" else mkBinApp "bvudiv"
     else mkBinApp "div"
   | .divNoSMT =>
     if useBv then
-      if sign == .signed then mkBinApp "bvsdiv" else mkBinApp "bvudiv"
+      if signed then mkBinApp "bvsdiv" else mkBinApp "bvudiv"
     else mkBinApp "div"
   | .rem =>
     if useBv then
-      if sign == .signed then mkBinApp "bvsrem" else mkBinApp "bvurem"
+      if signed then mkBinApp "bvsrem" else mkBinApp "bvurem"
     else mkBinApp "mod"
   | .remNoSMT =>
     if useBv then
-      if sign == .signed then mkBinApp "bvsrem" else mkBinApp "bvurem"
+      if signed then mkBinApp "bvsrem" else mkBinApp "bvurem"
     else mkBinApp "mod"
   | .mod_ =>
     if useBv then
-      if sign == .signed then mkBinApp "bvsmod" else mkBinApp "bvurem"
+      if signed then mkBinApp "bvsmod" else mkBinApp "bvurem"
     else mkBinApp "mod"
   | .modNoSMT =>
     if useBv then
-      if sign == .signed then mkBinApp "bvsmod" else mkBinApp "bvurem"
+      if signed then mkBinApp "bvsmod" else mkBinApp "bvurem"
     else mkBinApp "mod"
   -- Comparison operations
   | .lt =>
     if useBv then
-      if sign == .signed then mkBinApp "bvslt" else mkBinApp "bvult"
+      if signed then mkBinApp "bvslt" else mkBinApp "bvult"
     else mkBinApp "<"
   | .le =>
     if useBv then
-      if sign == .signed then mkBinApp "bvsle" else mkBinApp "bvule"
+      if signed then mkBinApp "bvsle" else mkBinApp "bvule"
     else mkBinApp "<="
   | .eq => mkBinApp "="  -- Equality is the same for all types
   -- Logical operations (type-independent)
@@ -300,7 +295,7 @@ def binOpToTerm (op : BinOp) (lBt rBt : BaseType) (l r : Smt.Term) : TranslateRe
   | .shiftLeft => if useBv then mkBinApp "bvshl" else .unsupported "shiftLeft requires Bits type"
   | .shiftRight =>
     if useBv then
-      if sign == .signed then mkBinApp "bvashr" else mkBinApp "bvlshr"
+      if signed then mkBinApp "bvashr" else mkBinApp "bvlshr"
     else .unsupported "shiftRight requires Bits type"
   -- Unsupported operations
   | .exp => .unsupported "exp"
@@ -419,17 +414,21 @@ partial def termToSmtTerm : Types.Term → TranslateResult
       | .bits _ sw, .bits _ tw =>
         if sw == tw then .ok valTm  -- Same width: identity
         else if sw < tw then
-          -- Extend: use zero_extend
-          .ok (Term.appT (Term.symbolT (s!"(_ zero_extend {tw - sw})")) valTm)
+          -- Extend: use zero_extend (indexed identifier)
+          let zeroExt := Term.mkApp2 (Term.symbolT "_") (Term.symbolT "zero_extend") (Term.literalT (toString (tw - sw)))
+          .ok (Term.appT zeroExt valTm)
         else
-          -- Truncate: use extract
-          .ok (Term.appT (Term.symbolT (s!"(_ extract {tw - 1} 0)")) valTm)
+          -- Truncate: use extract (indexed identifier with two args: high, low)
+          let extract := Term.mkApp3 (Term.symbolT "_") (Term.symbolT "extract") (Term.literalT (toString (tw - 1))) (Term.literalT "0")
+          .ok (Term.appT extract valTm)
       | .integer, .bits _ tw =>
-        -- Int → BitVec: use int2bv
-        .ok (Term.appT (Term.symbolT (s!"(_ int2bv {tw})")) valTm)
+        -- Int → BitVec: use int2bv (indexed identifier)
+        let int2bv := Term.mkApp2 (Term.symbolT "_") (Term.symbolT "int2bv") (Term.literalT (toString tw))
+        .ok (Term.appT int2bv valTm)
       | .loc, .bits _ tw =>
-        -- Loc (represented as Int) → BitVec
-        .ok (Term.appT (Term.symbolT (s!"(_ int2bv {tw})")) valTm)
+        -- Loc (represented as Int) → BitVec (indexed identifier)
+        let int2bv := Term.mkApp2 (Term.symbolT "_") (Term.symbolT "int2bv") (Term.literalT (toString tw))
+        .ok (Term.appT int2bv valTm)
       | _, _ =>
         .unsupported s!"cast from {repr sourceBt} to {repr targetType}"
   | .copyAllocId _addr _loc =>
