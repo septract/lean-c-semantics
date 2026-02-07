@@ -69,7 +69,7 @@ private def evalArgsK (args : List APexpr) (k : List IndexTerm → TypingM Unit)
         go rest (argVal :: acc)
   go args []
 
-/-- Check an effectful expression using continuation-passing style.
+/- Check an effectful expression using continuation-passing style.
 
     The continuation `k` is called with the result value for each
     path through the expression. For branches, this means `k` may
@@ -82,6 +82,7 @@ private def evalArgsK (args : List APexpr) (k : List IndexTerm → TypingM Unit)
     Corresponds to: check_expr in check.ml lines 1506-2315
 
     let rec check_expr labels (e : BT.t Mu.expr) (k : IT.t -> unit m) : unit m -/
+
 partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → TypingM Unit)
     : TypingM Unit := do
   let loc := getAnnotsLoc e.annots
@@ -204,20 +205,38 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
         k result
 
   -- Conditional: if cond then thenE else elseE
-  -- CPS style: both branches call the same continuation independently
-  -- Each branch is checked speculatively with `pure_` to isolate state
   -- Corresponds to: Eif case in check.ml lines 1985-2002
+  --
+  -- CN uses inline solver access (`provable(false)`) to detect dead branches.
+  -- We use conditional failures instead: try each branch, catch errors, create
+  -- obligations proving the branch is dead. Post-hoc SMT discharge validates.
+  --
+  -- Each branch is checked under its condition (via addC). If a branch fails,
+  -- tryPure catches the error and we create a conditional failure obligation
+  -- proving ¬branchCondition under the outer assumptions. If the branch is
+  -- truly dead, the SMT solver proves this vacuously.
   | .if_ cond thenE elseE =>
     checkPexprK cond fun condVal => do
-      -- Helper: check a branch with a path condition
+      let outerAssumptions ← TypingM.getConstraints
+
       let checkBranch (branchCond : IndexTerm) (branchE : AExpr) : TypingM Unit := do
         TypingM.addC (.t branchCond)
         checkExpr labels branchE k
 
-      -- Check both branches speculatively (state changes are discarded)
-      -- This matches CN's: pure (aux carg "true" e1)
-      let _ ← TypingM.pure_ (checkBranch condVal thenE)
-      let _ ← TypingM.pure_ (checkBranch (negTerm condVal) elseE)
+      -- Check then-branch under condition
+      let thenResult ← TypingM.tryPure (checkBranch condVal thenE)
+      match thenResult with
+      | .ok _ => pure ()
+      | .error e =>
+        TypingM.addConditionalFailure condVal e outerAssumptions loc
+
+      -- Check else-branch under ¬condition
+      let elseResult ← TypingM.tryPure (checkBranch (negTerm condVal) elseE)
+      match elseResult with
+      | .ok _ => pure ()
+      | .error e =>
+        TypingM.addConditionalFailure (negTerm condVal) e outerAssumptions loc
+
       pure ()
 
   -- Case expression
@@ -249,14 +268,82 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
       pure ()
 
   -- C function call
-  -- Corresponds to: Eccall case in check.ml lines 2018-2080
-  | .ccall _funPtr _funTy _args =>
-    -- C function call requires:
-    -- 1. Looking up the function's specification
-    -- 2. Checking precondition resources via Spine.calltype_ft
-    -- 3. Consuming/producing resources
-    -- 4. Calling continuation with result
-    TypingM.fail (.other "ccall not implemented - requires function specification lookup")
+  -- Corresponds to: Eccall case in check.ml lines 1935-1984
+  --
+  -- IMPORTANT: Core IR vs muCore argument mismatch.
+  -- In Core IR, ccall passes stack slot ADDRESSES as arguments:
+  --   create(slot) → store(val, slot) → ccall(f, slot) → kill(slot)
+  -- CN's core_to_mucore eliminates this pattern, passing actual VALUES:
+  --   ccall(f, val)
+  -- We handle this lazily by resolving arguments through the store map.
+  | .ccall funPtr _funTy args =>
+    -- 1. Evaluate function pointer and extract function symbol
+    -- Corresponds to: known_function_pointer in check.ml lines 363-379
+    -- CN evaluates the function pointer IT, then calls IT.is_sym to extract the symbol.
+    -- In Core IR, the function pointer goes through intermediaries (e.g., a_547),
+    -- so we must EVALUATE it (not just read the AST) to get the actual function symbol.
+    let funPtrVal ← checkPexpr funPtr
+    let funSym ← match funPtrVal.term with
+      | .sym s => pure s
+      | _ => TypingM.fail (.other s!"Indirect function calls not yet supported")
+
+    -- 2. Look up pre-built function type
+    -- Corresponds to: Global.get_fun_decl loc fsym in check.ml
+    let ft ← match (← TypingM.lookupFunctionSpec funSym.id) with
+      | some ft => pure ft
+      | none => TypingM.fail (.other s!"Call to function with no spec: {funSym.name.getD "<unnamed>"}")
+
+    -- 3. Process computational args with store resolution, then spine_l for precondition
+    -- This inlines spine's computational arg processing with an additional
+    -- store-resolution step for the lazy muCore transformation.
+    -- Corresponds to: Spine.calltype_ft → spine → spine_l
+    let rec processComputationalArgs (argsList : List APexpr) (at_ : AT ReturnType)
+        : TypingM Unit := do
+      match argsList, at_ with
+      | arg :: restArgs, .computational s bt _info rest =>
+        -- Evaluate the argument expression
+        -- Corresponds to: spine computational case, check.ml lines 1163-1173
+        checkPexprK arg (fun argVal => do
+          -- Resolve through store map: if this is a stack slot with a stored
+          -- value, use the stored value instead of the slot address.
+          -- This is the lazy muCore transformation for ccall arguments.
+          let resolvedVal ← match argVal.term with
+            | .sym sym =>
+              match ← TypingM.lookupStore sym.id with
+              | some storedVal => pure storedVal
+              | none => pure argVal
+            | _ => pure argVal
+          -- Substitute resolved value for parameter in rest of type
+          let σ := Subst.single s resolvedVal
+          let rest' := AT.subst ReturnType.subst σ rest
+          processComputationalArgs restArgs rest') (some bt)
+      | _, .ghost _s _bt _info rest =>
+        -- Skip ghost args (not yet supported)
+        processComputationalArgs argsList rest
+      | [], .L lat =>
+        -- All computational args processed, now process precondition via spine_l
+        -- Corresponds to: spine delegates to spine_l for LAT processing
+        spineL loc (.functionCall funSym) lat (fun rt => do
+          -- 4. Create fresh return symbol
+          -- Corresponds to: let s' = Sym.fresh_make_uniq_kind ~prefix "return" in
+          let s' ← TypingM.freshSym "return"
+          TypingM.addL s' rt.bt loc "function return value"
+
+          -- 5. Rename return symbol and process postcondition
+          -- Corresponds to: let su = IT.make_rename ~from:s ~to_:s' in
+          --                 bind_logical_return loc prefix (LRT.subst su lrt)
+          let σ := Subst.single rt.sym (AnnotTerm.mk (.sym s') rt.bt loc)
+          let lrt' := rt.lrt.subst σ
+          bindLogicalReturn loc lrt'
+
+          -- 6. Continue with return value
+          -- Corresponds to: k (IT.sym_ (s', bt, here))
+          k (AnnotTerm.mk (.sym s') rt.bt loc))
+      | _ :: _, .L _ =>
+        TypingM.fail (.other s!"Too many arguments in call to {funSym.name.getD "<unnamed>"}")
+      | [], .computational _ _ _ _ =>
+        TypingM.fail (.other s!"Not enough arguments in call to {funSym.name.getD "<unnamed>"}")
+    processComputationalArgs args ft
 
   -- Named procedure call
   -- Corresponds to: Eproc case in check.ml
