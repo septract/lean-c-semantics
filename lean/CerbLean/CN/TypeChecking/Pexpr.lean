@@ -81,7 +81,7 @@ def isUndefSym (s : Core.Sym) : Bool := s.id == 0 && s.name == some "undef"
 def integerTypeToBaseType (ity : Core.IntegerType) : BaseType :=
   match ity with
   | .bool => .bool
-  | .char => .integer  -- char signedness is implementation-defined
+  | .char => .bits .signed 8  -- Cerberus treats char as signed 8-bit
   | .signed kind =>
     let width := match kind with
       | .ichar => 8
@@ -128,9 +128,10 @@ def numLit (n : Int) (bt : BaseType) (loc : Core.Loc) : IndexTerm :=
     AnnotTerm.mk (.const (.bits sign width n)) bt loc
   | .integer =>
     AnnotTerm.mk (.const (.z n)) .integer loc
-  | _ =>
-    -- Fallback to integer for other types (matches CN's default)
-    AnnotTerm.mk (.const (.z n)) .integer loc
+  | other =>
+    -- numLit should only be called with Bits or Integer types.
+    -- Any other type indicates a bug in the caller.
+    panic! s!"numLit called with unexpected base type: {repr other}"
 
 /-- Extract a location from an annotation -/
 def getAnnotLoc : Core.Annot → Option Core.Loc
@@ -285,7 +286,7 @@ def ctypeInnerToBaseType (ty : Core.Ctype_) : BaseType :=
     -- This matches CN's Memory.bt_of_sct behavior
     match ity with
     | .bool => .bool
-    | .char => .integer  -- char signedness is implementation-defined
+    | .char => .bits .signed 8  -- Cerberus treats char as signed 8-bit
     | .signed kind => .bits .signed (intBaseKindWidth kind)
     | .unsigned kind => .bits .unsigned (intBaseKindWidth kind)
     | .size_t => .bits .unsigned 64  -- platform-dependent, assume 64-bit
@@ -783,7 +784,10 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
             | .bits _ _, _ =>
               -- For non-constant values, wrap in cast (symbolic)
               AnnotTerm.mk (.cast targetBt v) targetBt v.loc
-            | _, _ => v  -- Non-bits target, keep as-is
+            | _, _ =>
+              -- CN asserts expect must be Bits in check_conv_int
+              -- If targetBt isn't Bits, this is a type error
+              panic! s!"convertToBits called with non-Bits target type: {repr targetBt}"
 
           -- Check what kind of integer type this is
           match ct.ty with
@@ -805,6 +809,30 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
           | .basic (.integer (.signed _)) =>
             -- Signed: CN checks representable, then casts (lines 424-429)
             -- Add representability constraint as obligation
+            let reprTerm := AnnotTerm.mk (.representable ct argVal) .bool loc
+            TypingM.requireConstraint (.t reprTerm) loc "integer representability"
+            return convertToBits argVal
+
+          | .basic (.integer .char) =>
+            -- Char: signed 8-bit on most platforms (Cerberus treats as signed)
+            -- Treat like signed with representability check
+            let reprTerm := AnnotTerm.mk (.representable ct argVal) .bool loc
+            TypingM.requireConstraint (.t reprTerm) loc "integer representability"
+            return convertToBits argVal
+
+          | .basic (.integer (.enum _)) =>
+            -- Enum: typically int-sized (signed 32-bit)
+            -- Treat like signed with representability check
+            let reprTerm := AnnotTerm.mk (.representable ct argVal) .bool loc
+            TypingM.requireConstraint (.t reprTerm) loc "integer representability"
+            return convertToBits argVal
+
+          | .basic (.integer .size_t) =>
+            -- size_t: unsigned, cast directly
+            return convertToBits argVal
+
+          | .basic (.integer .ptrdiff_t) =>
+            -- ptrdiff_t: signed, add representability check
             let reprTerm := AnnotTerm.mk (.representable ct argVal) .bool loc
             TypingM.requireConstraint (.t reprTerm) loc "integer representability"
             return convertToBits argVal
@@ -1049,36 +1077,33 @@ where
     | .unspecified => { id := 0, name := some "Unspecified" }
     | _ => { id := 0, name := some "Unknown" }
 
-  /-- Get maximum value of integer type -/
+  /-- Get maximum value of integer type.
+      Uses 2^(w-1)-1 for signed, 2^w-1 for unsigned. -/
   intTypeMax : CerbLean.Core.IntegerType → Int
-    | .char => 127
+    | .char => 127  -- signed 8-bit (Cerberus default)
     | .bool => 1
-    | .signed .short => 32767
-    | .signed .int_ => 2147483647
-    | .signed .long => 9223372036854775807
-    | .signed .longLong => 9223372036854775807
-    | .unsigned .short => 65535
-    | .unsigned .int_ => 4294967295
-    | .unsigned .long => 18446744073709551615
-    | .unsigned .longLong => 18446744073709551615
-    | .size_t => 18446744073709551615
-    | .ptrdiff_t => 9223372036854775807
-    | .ptraddr_t => 18446744073709551615
-    | _ => 0
+    | .signed kind => 2 ^ (intBaseKindWidth kind - 1) - 1
+    | .unsigned kind => 2 ^ intBaseKindWidth kind - 1
+    | .size_t => 2 ^ 64 - 1  -- unsigned 64-bit
+    | .ptrdiff_t => 2 ^ 63 - 1  -- signed 64-bit
+    | .ptraddr_t => 2 ^ 64 - 1  -- unsigned 64-bit
+    | .wchar_t => 2 ^ 31 - 1  -- signed 32-bit (platform-dependent)
+    | .wint_t => 2 ^ 31 - 1  -- signed 32-bit
+    | .enum _ => 2 ^ 31 - 1  -- enums are typically int-sized (signed 32-bit)
 
-  /-- Get minimum value of integer type -/
+  /-- Get minimum value of integer type.
+      Uses -2^(w-1) for signed, 0 for unsigned. -/
   intTypeMin : CerbLean.Core.IntegerType → Int
-    | .char => -128
+    | .char => -(2 ^ 7)  -- signed 8-bit (Cerberus default)
     | .bool => 0
-    | .signed .short => -32768
-    | .signed .int_ => -2147483648
-    | .signed .long => -9223372036854775808
-    | .signed .longLong => -9223372036854775808
+    | .signed kind => -(2 ^ (intBaseKindWidth kind - 1))
     | .unsigned _ => 0
-    | .size_t => 0
-    | .ptrdiff_t => -9223372036854775808
-    | .ptraddr_t => 0
-    | _ => 0
+    | .size_t => 0  -- unsigned
+    | .ptrdiff_t => -(2 ^ 63)  -- signed 64-bit
+    | .ptraddr_t => 0  -- unsigned
+    | .wchar_t => -(2 ^ 31)  -- signed 32-bit (platform-dependent)
+    | .wint_t => -(2 ^ 31)  -- signed 32-bit
+    | .enum _ => -(2 ^ 31)  -- enums are typically int-sized (signed 32-bit)
 
 /-! ## CPS Version
 

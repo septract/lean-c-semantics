@@ -158,7 +158,7 @@ def ctypeInnerToOutputBaseType : Core.Ctype_ → BaseType
   | .basic (.integer ity) =>
     match ity with
     | .bool => .bool
-    | .char => .integer  -- char signedness is implementation-defined
+    | .char => .bits .signed 8  -- Cerberus treats char as signed 8-bit
     | .signed kind => .bits .signed (intBaseKindWidth kind)
     | .unsigned kind => .bits .unsigned (intBaseKindWidth kind)
     | .size_t => .bits .unsigned 64
