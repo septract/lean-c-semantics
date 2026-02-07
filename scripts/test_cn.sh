@@ -12,29 +12,39 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 LEAN_DIR="$PROJECT_ROOT/lean"
 TEST_CN="$LEAN_DIR/.lake/build/bin/test_cn"
 
-# Build Lean project first
-echo "=== Building Lean project ==="
-cd "$LEAN_DIR"
-if ! lake build test_cn 2>&1 | tail -5; then
-    echo "ERROR: Lean build failed"
-    exit 1
-fi
-echo ""
-
-# Handle --unit flag: run unit tests only
+# Handle --unit flag: run unit tests only (before build to avoid unnecessary work)
 if [ "$1" == "--unit" ]; then
+    echo "=== Building Lean project ==="
+    (cd "$LEAN_DIR" && lake build test_cn 2>&1 | tail -5)
+    echo ""
     echo "=== CN Unit Tests ==="
     exec "$TEST_CN"
 fi
 
-# Determine test files
+# Determine test files (resolve paths before any cd)
 if [ $# -eq 0 ]; then
     # No args: run all integration tests in tests/cn/
     TEST_FILES=("$PROJECT_ROOT"/tests/cn/*.c)
 else
-    # Specific files provided
-    TEST_FILES=("$@")
+    # Specific files provided — resolve to absolute paths
+    TEST_FILES=()
+    for arg in "$@"; do
+        if [[ "$arg" = /* ]]; then
+            TEST_FILES+=("$arg")
+        else
+            TEST_FILES+=("$PROJECT_ROOT/$arg")
+        fi
+    done
 fi
+
+# Build Lean project (in subshell to avoid changing cwd)
+echo "=== Building Lean project ==="
+(cd "$LEAN_DIR" && lake build test_cn 2>&1 | tail -5)
+if [ $? -ne 0 ]; then
+    echo "ERROR: Lean build failed"
+    exit 1
+fi
+echo ""
 
 TMP_DIR="$PROJECT_ROOT/tmp"
 mkdir -p "$TMP_DIR"

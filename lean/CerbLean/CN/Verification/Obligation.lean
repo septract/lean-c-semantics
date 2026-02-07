@@ -47,6 +47,10 @@ inductive ObligationCategory where
   | resourceMatch
   /-- Pointer-related obligations -/
   | pointer
+  /-- Branch dead proof: prove ¬branchCondition to eliminate a failing branch.
+      Corresponds to: CN's provable(false) dead-branch detection in check.ml:1985-2002,
+      deferred to post-hoc SMT discharge. -/
+  | branchDead
   /-- Custom obligations needing specialized handling -/
   | custom
   deriving Repr, BEq, Inhabited
@@ -57,6 +61,7 @@ instance : ToString ObligationCategory where
     | .equality => "equality"
     | .resourceMatch => "resourceMatch"
     | .pointer => "pointer"
+    | .branchDead => "branchDead"
     | .custom => "custom"
 
 /-! ## Proof Obligation Type
@@ -144,13 +149,19 @@ The result of type checking includes success status and accumulated obligations.
 
 /-- Result of type checking a function or statement.
 
-    Even if `success = true`, the obligations still need to be discharged
-    by an SMT solver for the program to be verified. -/
+    Even if `success = true`, the obligations and conditional failures still
+    need to be discharged by an SMT solver for the program to be verified. -/
 structure TypeCheckResult where
   /-- Did structural type checking succeed? -/
   success : Bool
   /-- Proof obligations to discharge -/
   obligations : ObligationSet
+  /-- Conditional failures: type errors from branches that may be dead.
+      Each pairs an obligation (prove branch is dead) with the original error.
+      Must be discharged post-hoc by SMT:
+      - If obligation valid (branch IS dead): error is vacuous, discard.
+      - If obligation invalid (branch is live): error is genuine, report. -/
+  conditionalFailures : List (Obligation × String) := []
   /-- Error message if success = false -/
   error : Option String
   deriving Inhabited
@@ -164,6 +175,10 @@ def ok : TypeCheckResult :=
 /-- A successful result with obligations -/
 def okWithObligations (obs : ObligationSet) : TypeCheckResult :=
   { success := true, obligations := obs, error := none }
+
+/-- A successful result with obligations and conditional failures -/
+def okWithAll (obs : ObligationSet) (cfs : List (Obligation × String)) : TypeCheckResult :=
+  { success := true, obligations := obs, conditionalFailures := cfs, error := none }
 
 /-- A failed result -/
 def fail (msg : String) : TypeCheckResult :=

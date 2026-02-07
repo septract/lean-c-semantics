@@ -89,6 +89,18 @@ structure Predicate where
   iargs : List IndexTerm
   deriving Inhabited
 
+namespace Predicate
+
+/-- Substitute in a simple predicate.
+    Replaces symbol references in the pointer and index args.
+    Corresponds to: Predicate substitution in CN -/
+def subst (σ : Subst) (p : Predicate) : Predicate :=
+  { p with
+    pointer := p.pointer.subst σ
+    iargs := p.iargs.map (·.subst σ) }
+
+end Predicate
+
 /-! ## Quantified Predicates
 
 Corresponds to: cn/lib/request.ml lines 73-83 (QPredicate module)
@@ -130,6 +142,19 @@ structure QPredicate where
   iargs : List IndexTerm
   deriving Inhabited
 
+namespace QPredicate
+
+/-- Substitute in a quantified predicate.
+    Replaces symbol references in pointer, permission, and index args.
+    Corresponds to: QPredicate substitution in CN -/
+def subst (σ : Subst) (qp : QPredicate) : QPredicate :=
+  { qp with
+    pointer := qp.pointer.subst σ
+    permission := qp.permission.subst σ
+    iargs := qp.iargs.map (·.subst σ) }
+
+end QPredicate
+
 /-! ## Resource Requests
 
 Corresponds to: cn/lib/request.ml lines 151-154
@@ -150,6 +175,16 @@ inductive Request where
   /-- Quantified predicate -/
   | q (qpred : QPredicate)
   deriving Inhabited
+
+namespace Request
+
+/-- Substitute in a resource request.
+    Corresponds to: Request substitution in CN -/
+def subst (σ : Subst) : Request → Request
+  | .p pred => .p (pred.subst σ)
+  | .q qpred => .q (qpred.subst σ)
+
+end Request
 
 /-! ## Resource (Request with Output)
 
