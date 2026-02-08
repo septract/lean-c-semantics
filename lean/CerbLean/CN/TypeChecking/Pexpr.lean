@@ -694,12 +694,19 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
     return AnnotTerm.mk (.structMember tStruct member) resBt loc
 
   -- Array/pointer shift
+  -- Corresponds to: check.ml lines 669-692 (PEarray_shift)
   | .arrayShift ptr ty idx =>
     let pePtr : APexpr := ⟨[], some (.object .pointer), ptr⟩
     let peIdx : APexpr := ⟨[], some (.object .integer), idx⟩
     let tPtr ← checkPexpr pePtr
     let tIdx ← checkPexpr peIdx
-    return AnnotTerm.mk (.arrayShift tPtr ty tIdx) .loc loc
+    -- Cast index to uintptr type (CN invariant: ArrayShift index must be uintptr)
+    -- Corresponds to: cast_ Memory.uintptr_bt vt2 loc in check.ml:681
+    let uintptrBt : BaseType := .bits .unsigned 64
+    let castIdx := match tIdx.bt with
+      | .bits .unsigned 64 => tIdx  -- Already uintptr: no-op (matches cast_ identity check)
+      | _ => AnnotTerm.mk (.cast uintptrBt tIdx) uintptrBt loc
+    return AnnotTerm.mk (.arrayShift tPtr ty castIdx) .loc loc
 
   -- Member shift (pointer to member)
   | .memberShift ptr tag member =>
@@ -1067,11 +1074,24 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
       TypingM.fail (.other s!"Unknown implementation constant: {name}")
 
   -- Integer conversion (conv_int)
-  | .convInt _ty e =>
-    -- Integer conversion: just evaluate the inner expression
-    -- The type system handles the conversion semantically
+  -- Corresponds to: check_conv_int in cn/lib/check.ml lines 394-431
+  -- PEconv_int converts an integer expression to the target IntegerType.
+  -- The target type determines the output BaseType (e.g., signed int → bits signed 32).
+  | .convInt ty e =>
+    let targetBt := integerTypeToBaseType ty
     let pe' : APexpr := ⟨[], pe.ty, e⟩
-    checkPexpr pe'
+    let argVal ← checkPexpr pe' (some targetBt)
+    -- Cast to target type (matches CN's cast_ which is no-op when types match)
+    match targetBt, argVal.term with
+    | .bits sign width, .const (.z n) =>
+      -- Constant integer: directly create Bits literal
+      return AnnotTerm.mk (.const (.bits sign width n)) targetBt argVal.loc
+    | .bits _ _, _ =>
+      -- Non-constant: wrap in cast (symbolic conversion)
+      return AnnotTerm.mk (.cast targetBt argVal) targetBt argVal.loc
+    | _, _ =>
+      -- Non-Bits target type: pass through
+      return argVal
 
   -- Wrap integer (modular arithmetic)
   | .wrapI ty _op e1 e2 =>

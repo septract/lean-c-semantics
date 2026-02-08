@@ -233,6 +233,9 @@ def unOpToTerm (op : UnOp) (argBt : BaseType) (arg : Smt.Term) : TranslateResult
 def binOpToTerm (op : BinOp) (lBt rBt : BaseType) (l r : Smt.Term) : TranslateResult :=
   -- Type consistency check: both operands should have matching types
   -- If they don't, the type checker has a bug - don't mask it
+  -- NOTE: loc + bits mismatches (pointer arithmetic) are expected with our
+  -- simplified flat Int pointer model. These will be fixed when we implement
+  -- CN's proper structured pointer model.
   if isBitsType lBt != isBitsType rBt then
     .unsupported s!"Type mismatch in binop {repr op}: left={repr lBt}, right={repr rBt}"
   else
@@ -308,35 +311,32 @@ def binOpToTerm (op : BinOp) (lBt rBt : BaseType) (l r : Smt.Term) : TranslateRe
   | .setMember => .unsupported "setMember"
   | .subset => .unsupported "subset"
 
-/-- When one operand is Bits and the other is Integer, coerce the integer
-    operand to bitvector using int2bv. Returns (lBt', rBt', lTm', rTm')
-    with the types and terms unified to bitvector.
-    This handles the case where Core IR case expressions contain integer
-    literals that don't receive type hints from the expected type context.
-    Corresponds to: CN's solver.ml transparent coercion between Int and BitVec -/
-def coerceBitsInteger (lBt rBt : BaseType) (lTm rTm : Smt.Term)
-    : BaseType × BaseType × Smt.Term × Smt.Term :=
-  match lBt, rBt with
-  | .bits _ w, .integer =>
-    -- Left is bits, right is integer: coerce right to bitvector
-    -- Use literalT to pre-render indexed identifier; the Smt library's appToList
-    -- doesn't special-case int2bv, so structured terms render incorrectly
-    let int2bv := Term.literalT s!"(_ int2bv {w})"
-    (lBt, lBt, lTm, Term.appT int2bv rTm)
-  | .integer, .bits _ w =>
-    -- Left is integer, right is bits: coerce left to bitvector
-    let int2bv := Term.literalT s!"(_ int2bv {w})"
-    (rBt, rBt, Term.appT int2bv lTm, rTm)
-  | .loc, .bits _ _ =>
-    -- Pointer + bitvector offset: coerce bits to integer (pointers are Int in SMT)
-    -- Used for array/pointer arithmetic: arr + idx
-    let bv2int := Term.symbolT "bv2int"
-    (.loc, .loc, lTm, Term.appT bv2int rTm)
-  | .bits _ _, .loc =>
-    -- Bitvector offset + pointer: coerce bits to integer
-    let bv2int := Term.symbolT "bv2int"
-    (.loc, .loc, Term.appT bv2int lTm, rTm)
-  | _, _ => (lBt, rBt, lTm, rTm)
+/-- Compute sizeof for an integer type.
+    Extracted from the .sizeOf case for reuse in arrayShift. -/
+def sizeOfIntTypeNat : IntegerType → Option Nat
+  | .bool => some 1
+  | .char => some 1
+  | .signed .ichar | .unsigned .ichar => some 1
+  | .signed .short | .unsigned .short => some 2
+  | .signed .int_ | .unsigned .int_ => some 4
+  | .signed .long | .unsigned .long => some 8
+  | .signed .longLong | .unsigned .longLong => some 8
+  | .signed .intptr | .unsigned .intptr => some 8
+  | .size_t | .ptrdiff_t | .ptraddr_t => some 8
+  | .wchar_t | .wint_t => some 4
+  | .enum _ => some 4
+  | _ => none
+
+/-- Compute sizeof for a C type as a Nat.
+    Corresponds to: Memory.size_of_ctype in CN's solver.ml:866 -/
+def sizeOfCtypeNat : CerbLean.Core.Ctype_ → Option Nat
+  | .void => some 0
+  | .basic (.integer ity) => sizeOfIntTypeNat ity
+  | .basic (.floating (.realFloating .float)) => some 4
+  | .basic (.floating (.realFloating .double)) => some 8
+  | .basic (.floating (.realFloating .longDouble)) => some 16
+  | .pointer _ _ => some 8
+  | _ => none
 
 mutual
 
@@ -351,15 +351,11 @@ partial def termToSmtTerm : Types.Term → TranslateResult
     | .ok argTm => unOpToTerm op arg.bt argTm
     | .unsupported r => .unsupported r
   | .binop op l r =>
-    -- Pass both operand types to binOpToTerm for type-aware dispatch.
-    -- When one operand is Bits and the other is Integer (from Core IR case
-    -- expressions where literal constants don't receive type hints), coerce
-    -- the integer operand to bitvector using int2bv. This matches CN's
-    -- solver.ml which handles such coercions transparently.
+    -- CN's arith_binop (indexTerms.ml:597) asserts BT.equal for both operands.
+    -- Types should match after the type checker.
     match annotTermToSmtTerm l, annotTermToSmtTerm r with
     | .ok lTm, .ok rTm =>
-      let (lBt, rBt, lTm', rTm') := coerceBitsInteger l.bt r.bt lTm rTm
-      binOpToTerm op lBt rBt lTm' rTm'
+      binOpToTerm op l.bt r.bt lTm rTm
     | .unsupported r, _ => .unsupported r
     | _, .unsupported r => .unsupported r
   | .ite cond thenB elseB =>
@@ -388,12 +384,19 @@ partial def termToSmtTerm : Types.Term → TranslateResult
     | .ok b, .ok bd => .ok (Term.letT name b bd)
     | .unsupported r, _ => .unsupported r
     | _, .unsupported r => .unsupported r
-  | .arrayShift base _ct index =>
+  | .arrayShift base ct index =>
+    -- CN computes: ptr_shift(ptr, el_size * index, null_case) (solver.ml:865-871)
+    -- Our simplified model (pointers as Int): base + bv2int(el_size * index)
+    -- Index is already uintptr_bt (Bits Unsigned 64) from type checker cast
     match annotTermToSmtTerm base, annotTermToSmtTerm index with
     | .ok b, .ok i =>
-      -- Pointer (loc=Int) + index (bits=BitVec): coerce index to Int
-      let (_, _, b', i') := coerceBitsInteger base.bt index.bt b i
-      .ok (Term.mkApp2 (Term.symbolT "+") b' i')
+      match sizeOfCtypeNat ct.ty with
+      | some elSize =>
+        let sizeAsBv := Term.appT (Term.literalT "(_ int2bv 64)") (Term.literalT (toString elSize))
+        let offset := Term.mkApp2 (Term.symbolT "bvmul") sizeAsBv i
+        let offsetInt := Term.appT (Term.symbolT "bv2int") offset
+        .ok (Term.mkApp2 (Term.symbolT "+") b offsetInt)
+      | none => .unsupported s!"arrayShift element size: {repr ct.ty}"
     | .unsupported r, _ => .unsupported r
     | _, .unsupported r => .unsupported r
   | .aligned ptr align =>
@@ -469,6 +472,13 @@ partial def termToSmtTerm : Types.Term → TranslateResult
         -- Loc (represented as Int) → BitVec (indexed identifier)
         let int2bv := Term.literalT s!"(_ int2bv {tw})"
         .ok (Term.appT int2bv valTm)
+      | .bits _ _, .integer =>
+        -- BitVec → Int: use bv2int
+        -- Corresponds to: solver.ml Cast case for Loc → Bits (addr_of), reversed
+        .ok (Term.appT (Term.symbolT "bv2int") valTm)
+      | .bits _ _, .loc =>
+        -- BitVec → Loc (pointer is Int in our simplified model): use bv2int
+        .ok (Term.appT (Term.symbolT "bv2int") valTm)
       | _, _ =>
         .unsupported s!"cast from {repr sourceBt} to {repr targetType}"
   | .copyAllocId _addr _loc =>
@@ -480,30 +490,9 @@ partial def termToSmtTerm : Types.Term → TranslateResult
   | .sizeOf ct =>
     -- sizeOf(ctype) as a concrete integer
     -- For simple types we can compute statically; structs need TypeEnv
-    match ct.ty with
-    | .void => .ok (Term.literalT "0")
-    | .basic (.integer ity) =>
-      let size : Option Nat := match ity with
-        | .bool => some 1
-        | .char => some 1
-        | .signed .ichar | .unsigned .ichar => some 1
-        | .signed .short | .unsigned .short => some 2
-        | .signed .int_ | .unsigned .int_ => some 4
-        | .signed .long | .unsigned .long => some 8
-        | .signed .longLong | .unsigned .longLong => some 8
-        | .signed .intptr | .unsigned .intptr => some 8
-        | .size_t | .ptrdiff_t | .ptraddr_t => some 8
-        | .wchar_t | .wint_t => some 4
-        | .enum _ => some 4
-        | _ => none
-      match size with
-      | some n => .ok (Term.literalT (toString n))
-      | none => .unsupported s!"sizeOf integer type ({repr ity})"
-    | .basic (.floating (.realFloating .float)) => .ok (Term.literalT "4")
-    | .basic (.floating (.realFloating .double)) => .ok (Term.literalT "8")
-    | .basic (.floating (.realFloating .longDouble)) => .ok (Term.literalT "16")
-    | .pointer _ _ => .ok (Term.literalT "8")
-    | _ => .unsupported s!"sizeOf ({repr ct.ty})"
+    match sizeOfCtypeNat ct.ty with
+    | some n => .ok (Term.literalT (toString n))
+    | none => .unsupported s!"sizeOf ({repr ct.ty})"
   | .offsetOf tag member =>
     -- offsetOf needs actual struct layout
     let tagStr := tag.name.getD "?"
@@ -759,7 +748,12 @@ def obligationToCommands (ob : Obligation) : List Command × List String :=
     (fun (terms, errs) lc =>
       match constraintToSmtTerm lc with
       | .ok tm => (tm :: terms, errs)
-      | .unsupported r => (terms, r :: errs))
+      | .unsupported r =>
+        -- Include the source constraint description in the error
+        let lcDesc := match lc with
+          | .t at_ => s!"bt={repr at_.bt}"
+          | .forall_ _ _ => "forall"
+        (terms, s!"{r} (from: {lcDesc})" :: errs))
     ([], [])
 
   -- No need for explicit range constraints - BitVec types handle this
@@ -779,7 +773,10 @@ def obligationToCommands (ob : Obligation) : List Command × List String :=
     | .ok tm => (tm, [])
     | .unsupported r => (Term.symbolT "false", [r])
 
-  let allErrors := declErrors ++ assumptionErrors.reverse ++ goalErrors
+  let allErrors :=
+    (declErrors.map (s!"[decl] " ++ ·)) ++
+    (assumptionErrors.reverse.map (s!"[assumption] " ++ ·)) ++
+    (goalErrors.map (s!"[goal] " ++ ·))
 
   -- Build implication: assumptions => goal
   let implication := Term.mkApp2 (Term.symbolT "=>") assumptionConj goalTerm
