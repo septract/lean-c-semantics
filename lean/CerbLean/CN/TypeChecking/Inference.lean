@@ -68,21 +68,18 @@ def termSyntacticEq (t1 t2 : IndexTerm) : Bool :=
   | .sym s1, .sym s2 => s1 == s2  -- Uses BEq Sym (digest + id, matching CN)
   | _, _ => false
 
-/-- Build an equality constraint for two index terms -/
-def mkEqConstraint (t1 t2 : IndexTerm) : LogicalConstraint :=
-  -- Construct: t1 == t2 as a logical constraint
-  let eqTerm : IndexTerm := AnnotTerm.mk (.binop .eq t1 t2) .bool t1.loc
-  .t eqTerm
-
 /-! ## Predicate Request Scan
 
 Corresponds to: cn/lib/resourceInference.ml lines 169-226 (predicate_request_scan)
 
 This is the core matching algorithm. For each resource in context:
 1. Check if names match (with subsumption)
-2. Check if pointers match (syntactic first, then SMT)
+2. Check if pointers match (syntactic equality)
 3. Check if iargs match
 4. If all match, consume the resource and return its output
+
+Currently uses syntactic matching only. SMT-based matching (for
+semantically-equal but syntactically-different pointers) is a future task.
 -/
 
 /-- Result of scanning for a resource -/
@@ -94,13 +91,13 @@ inductive ScanResult where
   deriving Inhabited
 
 /-- Scan context for a resource matching the requested predicate.
-    Uses two-phase matching: syntactic fast path, then SMT slow path.
+    Uses syntactic matching: names must subsume, pointers and iargs must be
+    syntactically equal.
 
     Corresponds to: predicate_request_scan in resourceInference.ml lines 169-226 -/
 def predicateRequestScan (requested : Predicate) : TypingM ScanResult := do
   let resources ← TypingM.getResources
 
-  -- Phase 1: Fast path - syntactic matching
   for h : idx in [:resources.length] do
     let r := resources[idx]
     match r.request with
@@ -117,41 +114,32 @@ def predicateRequestScan (requested : Predicate) : TypingM ScanResult := do
             return .found p' r.output
     | .q _ => pure ()  -- Quantified predicates handled separately
 
-  -- Phase 2: Slow path - SMT matching
+  -- Phase 2: Obligation-based matching (SMT slow path)
+  -- If syntactic matching fails, look for resources with matching name/type
+  -- but different pointers. Add a pointer equality obligation for SMT to check.
+  -- Corresponds to: the solver path in cn/lib/resourceInference.ml
+  let mut candidates : List (Nat × Predicate × Output) := []
   for h : idx in [:resources.length] do
     let r := resources[idx]
     match r.request with
     | .p p' =>
       if nameSubsumed requested.name p'.name then
-        -- Build equality constraint for pointer
-        let ptrEq := mkEqConstraint requested.pointer p'.pointer
-
-        -- Build equality constraints for iargs
-        let iargEqs := List.zipWith mkEqConstraint requested.iargs p'.iargs
-
-        -- TODO: Also check alloc_id equality (CN does this)
-        -- For now we just check address equality
-
-        -- Check if all equalities are provable
-        let mut allProvable := true
-        match ← TypingM.provable ptrEq with
-        | .true_ => pure ()
-        | .false_ _ => allProvable := false
-
-        for eq in iargEqs do
-          if allProvable then
-            match ← TypingM.provable eq with
-            | .true_ => pure ()
-            | .false_ _ => allProvable := false
-
-        if allProvable then
-          -- Found a match via SMT! Consume the resource.
-          TypingM.removeResourceAt idx
-          return .found p' r.output
+        let iargsMatch := requested.iargs.length == p'.iargs.length &&
+          (List.zip requested.iargs p'.iargs).all fun (a, b) => termSyntacticEq a b
+        if iargsMatch then
+          candidates := (idx, p', r.output) :: candidates
     | .q _ => pure ()
 
-  -- No match found
-  return .notFound
+  match candidates with
+  | [(idx, p', output)] =>
+    -- Single candidate: use it and add pointer equality obligation
+    TypingM.removeResourceAt idx
+    let eqTerm : IndexTerm := AnnotTerm.mk (.binop .eq requested.pointer p'.pointer) .bool requested.pointer.loc
+    TypingM.requireConstraint (.t eqTerm) requested.pointer.loc "resource pointer equality"
+    return .found p' output
+  | _ =>
+    -- No match or ambiguous (multiple candidates) - fail
+    return .notFound
 
 /-! ## Predicate Request
 
@@ -214,7 +202,8 @@ def consumeResourceClause (name : Sym) (resource : Resource) (loc : Loc) : Typin
     TypingM.addL name bt loc s!"resource output {name.name.getD ""}"
     -- Add equality constraint: name == output.value
     let nameAsTerm : IndexTerm := AnnotTerm.mk (.sym name) bt loc
-    TypingM.addC (mkEqConstraint nameAsTerm output.value)
+    let eqTerm : IndexTerm := AnnotTerm.mk (.binop .eq nameAsTerm output.value) .bool loc
+    TypingM.addC (.t eqTerm)
   | none =>
     let ctx ← TypingM.getContext
     TypingM.fail (.missingResource resource.request ctx)

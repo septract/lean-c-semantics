@@ -135,8 +135,14 @@ Processes a full argument type (AT):
     - Ghost args: check type, substitute
     - L (logical part): delegate to spine_l
 
-    For label calls with LAreturn, records a Return action. -/
+    The `innerSubst` parameter controls how substitution propagates to the
+    inner type α. For label types (α = False_), it's identity. For function
+    types (α = ReturnType), it's ReturnType.subst.
+
+    Corresponds to:
+      let spine rt_subst rt_pp loc situation args gargs_opt ftyp k = ... -/
 partial def spine {α : Type} (loc : Loc) (situation : CallSituation)
+    (innerSubst : Subst → α → α)
     (args : List APexpr) (at_ : AT α) (k : α → TypingM Unit) : TypingM Unit := do
   aux [] args at_ k
 where
@@ -150,14 +156,13 @@ where
       checkPexprK arg (fun argVal => do
         -- Substitute arg value for parameter in rest of type
         let σ := Subst.single s argVal
-        let rest' := AT.subst (fun _ x => x) σ rest  -- No inner subst needed for False
+        let rest' := AT.subst innerSubst σ rest
         aux (argsAcc ++ [argVal]) restArgs rest' k) (some bt)
 
-    | _, .ghost _s _bt _info rest =>
-      -- Ghost argument: we don't have ghost args in our simplified model
-      -- For now, skip ghost processing
-      -- TODO: Add ghost argument handling if needed
-      aux argsAcc args rest k
+    | _, .ghost _s _bt _info _rest =>
+      -- Ghost arguments require matching against ghost arg expressions.
+      -- CN processes these by position; silently skipping would cause misalignment.
+      TypingM.fail (.other s!"Ghost arguments not yet implemented (at {repr loc})")
 
     | [], .L lat =>
       -- All args processed, now process logical part
@@ -208,7 +213,7 @@ Calls spine with a label type and label kind.
     - k: Continuation (receives False - never actually called for terminal labels) -/
 def calltypeLt (loc : Loc) (args : List APexpr) (entry : LabelEntry)
     (k : False_ → TypingM Unit) : TypingM Unit := do
-  spine loc (.labelCall entry.kind) args entry.lt k
+  spine loc (.labelCall entry.kind) (fun _ x => x) args entry.lt k
 
 /-! ## Subtype: Postcondition Checking
 
@@ -230,5 +235,106 @@ satisfies the postcondition.
 def subtype (loc : Loc) (post : Postcondition) (k : Unit → TypingM Unit) : TypingM Unit := do
   let lat : LAT Unit := LAT.ofPostcondition post (.I ())
   spineL loc .subtyping lat k
+
+/-! ## Calltype_ft: Function Type Calling
+
+Corresponds to: calltype_ft in check.ml lines 1203-1204
+
+  let calltype_ft loc ~fsym args gargs_opt (ftyp : AT.ft) k =
+    spine RT.subst RT.pp loc (FunctionCall fsym) args gargs_opt ftyp k
+
+Calls spine with a function type and function call situation.
+The inner substitution is ReturnType.subst (substitutes in the LRT).
+-/
+
+/-- Call a function type (for Eccall handling).
+    Corresponds to: calltype_ft in check.ml lines 1203-1204
+
+    Processes the function's arguments via spine, consuming precondition
+    resources and returning the ReturnType (which contains the postcondition).
+
+    Parameters:
+    - loc: Source location for error messages
+    - fsym: The function being called
+    - args: Argument expressions
+    - ft: The function's pre-built argument type (AT ReturnType)
+    - k: Continuation receiving the ReturnType -/
+def calltypeFt (loc : Loc) (fsym : Sym) (args : List APexpr)
+    (ft : AT ReturnType) (k : ReturnType → TypingM Unit) : TypingM Unit :=
+  spine loc (.functionCall fsym) ReturnType.subst args ft k
+
+/-! ## Bind Logical Return: Postcondition Processing
+
+Corresponds to: bind_logical_return in check.ml
+
+  let bind_logical_return loc prefix lrt =
+    let rec aux = function
+    | LRT.Define ((s, it), info, lrt) -> ...
+    | LRT.Resource ((s, (re, bt)), info, lrt) -> ...
+    | LRT.Constraint (lc, info, lrt) -> ...
+    | LRT.I -> return ()
+
+Processes the postcondition of a function call:
+- Define: create fresh name, bind in logical context, add equality
+- Resource: create fresh name, PRODUCE resource into context
+- Constraint: add as ASSUMPTION (not obligation)
+- I: done
+
+This is the OPPOSITE direction from spine_l:
+- spine_l CONSUMES resources (precondition: caller must provide)
+- bindLogicalReturn PRODUCES resources (postcondition: callee guarantees)
+-/
+
+/-- Process the postcondition (LRT) of a function call.
+    Corresponds to: bind_logical_return in check.ml
+
+    Produces postcondition resources into the caller's context and
+    adds postcondition constraints as assumptions.
+
+    This is the opposite direction from spineL:
+    - spineL consumes resources and generates obligations
+    - bindLogicalReturn produces resources and assumes constraints -/
+partial def bindLogicalReturn (loc : Loc) (lrt : LRT) : TypingM Unit := do
+  match lrt with
+  | .define name value _info rest =>
+    -- Create fresh name for the defined variable
+    let s' ← TypingM.freshSym (name.name.getD "define")
+    -- Add to logical context
+    TypingM.addL s' value.bt loc s!"postcondition define {name.name.getD ""}"
+    -- Add equality constraint: s' == value
+    let eqTerm := AnnotTerm.mk
+      (.binop .eq (AnnotTerm.mk (.sym s') value.bt loc) value)
+      .bool loc
+    TypingM.addC (.t eqTerm)
+    -- Continue with renamed LRT
+    let σ := Subst.single name (AnnotTerm.mk (.sym s') value.bt loc)
+    bindLogicalReturn loc (rest.subst σ)
+
+  | .resource name request outputBt _info rest =>
+    -- Create fresh name for the resource output
+    let s' ← TypingM.freshSym (name.name.getD "resource")
+    -- Add to logical context
+    TypingM.addL s' outputBt loc s!"postcondition resource {name.name.getD ""}"
+    -- Substitute fresh name into request
+    let σ := Subst.single name (AnnotTerm.mk (.sym s') outputBt loc)
+    let request' := request.subst σ
+    -- PRODUCE the resource into context (opposite of spineL which consumes)
+    let resource : Resource := {
+      request := request'
+      output := { value := AnnotTerm.mk (.sym s') outputBt loc }
+    }
+    produceResource resource
+    -- Continue with renamed LRT
+    bindLogicalReturn loc (rest.subst σ)
+
+  | .constraint lc _info rest =>
+    -- Add constraint as ASSUMPTION (opposite of spineL which generates obligations)
+    -- The callee guarantees this constraint holds after the call
+    TypingM.addC lc
+    bindLogicalReturn loc rest
+
+  | .I =>
+    -- Postcondition fully processed
+    pure ()
 
 end CerbLean.CN.TypeChecking

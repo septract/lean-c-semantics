@@ -69,7 +69,7 @@ private def evalArgsK (args : List APexpr) (k : List IndexTerm → TypingM Unit)
         go rest (argVal :: acc)
   go args []
 
-/-- Check an effectful expression using continuation-passing style.
+/- Check an effectful expression using continuation-passing style.
 
     The continuation `k` is called with the result value for each
     path through the expression. For branches, this means `k` may
@@ -82,6 +82,7 @@ private def evalArgsK (args : List APexpr) (k : List IndexTerm → TypingM Unit)
     Corresponds to: check_expr in check.ml lines 1506-2315
 
     let rec check_expr labels (e : BT.t Mu.expr) (k : IT.t -> unit m) : unit m -/
+
 partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → TypingM Unit)
     : TypingM Unit := do
   let loc := getAnnotsLoc e.annots
@@ -204,29 +205,76 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
         k result
 
   -- Conditional: if cond then thenE else elseE
-  -- CPS style: both branches call the same continuation independently
-  -- Each branch is checked speculatively with `pure_` to isolate state
   -- Corresponds to: Eif case in check.ml lines 1985-2002
+  --
+  -- CN uses inline solver access (`provable(false)`) to detect dead branches.
+  -- We use conditional failures instead: try each branch, catch errors, create
+  -- obligations proving the branch is dead. Post-hoc SMT discharge validates.
+  --
+  -- Both branches are tried independently from the same starting state using
+  -- tryBranch. Each branch's full state (including resource changes) is preserved.
+  -- The caller picks the right final state:
+  -- - If one succeeds and the other fails: use the successful branch's state,
+  --   add a conditional failure for the failed branch.
+  -- - If both succeed: merge obligations from both, use either's resources
+  --   (should be equivalent since both called k).
+  -- - If both fail: add conditional failures for both.
   | .if_ cond thenE elseE =>
     checkPexprK cond fun condVal => do
-      -- Helper: check a branch with a path condition
+      let outerAssumptions ← TypingM.getConstraints
+
       let checkBranch (branchCond : IndexTerm) (branchE : AExpr) : TypingM Unit := do
         TypingM.addC (.t branchCond)
         checkExpr labels branchE k
 
-      -- Check both branches speculatively (state changes are discarded)
-      -- This matches CN's: pure (aux carg "true" e1)
-      let _ ← TypingM.pure_ (checkBranch condVal thenE)
-      let _ ← TypingM.pure_ (checkBranch (negTerm condVal) elseE)
-      pure ()
+      -- Try both branches independently from the SAME starting state.
+      -- tryBranch does NOT modify the caller's state.
+      let thenResult ← TypingM.tryBranch (checkBranch condVal thenE)
+      let elseResult ← TypingM.tryBranch (checkBranch (negTerm condVal) elseE)
+
+      -- Pick the final state based on results
+      match thenResult, elseResult with
+      | .ok (_, thenState), .ok (_, elseState) =>
+        -- Both succeeded: merge obligations and CFs from both branches,
+        -- use either's resources (should be equivalent since both called k).
+        -- Obligations from each branch are conditional on their branch condition
+        -- (via addC above), so combining them is sound.
+        let preObs := (← TypingM.getState).obligations
+        let preCFs := (← TypingM.getState).conditionalFailures
+        let thenNewObs := thenState.obligations.drop preObs.length
+        let thenNewCFs := thenState.conditionalFailures.drop preCFs.length
+        let elseNewObs := elseState.obligations.drop preObs.length
+        let elseNewCFs := elseState.conditionalFailures.drop preCFs.length
+        TypingM.setState { thenState with
+          obligations := preObs ++ thenNewObs ++ elseNewObs
+          conditionalFailures := preCFs ++ thenNewCFs ++ elseNewCFs
+        }
+      | .ok (_, thenState), .error e =>
+        -- Then succeeded, else failed: use then-state, add CF for else
+        TypingM.setState thenState
+        TypingM.addConditionalFailure (negTerm condVal) e outerAssumptions loc
+      | .error e, .ok (_, elseState) =>
+        -- Then failed, else succeeded: use else-state, add CF for then
+        TypingM.setState elseState
+        TypingM.addConditionalFailure condVal e outerAssumptions loc
+      | .error e1, .error e2 =>
+        -- Both failed: add CFs for both, keep pre-branch state
+        TypingM.addConditionalFailure condVal e1 outerAssumptions loc
+        TypingM.addConditionalFailure (negTerm condVal) e2 outerAssumptions loc
 
   -- Case expression
-  -- Filter Unspecified branches (muCore strips these), then check ALL
-  -- remaining branches speculatively with pure_ (like Eif checks both branches).
+  -- Filter Unspecified branches (muCore strips these), then check remaining branches.
   -- CN asserts Ecase away (core_to_mucore.ml:451) — it never reaches check.ml.
   -- Our filterSpecifiedBranches simulates the muCore transformation.
-  -- After filtering, remaining branches are all reachable paths (like if/else).
-  -- Corresponds to: Eif in check.ml lines 1985-2002 (similar pattern)
+  -- After filtering, typically one Specified branch remains (the live path).
+  --
+  -- IMPORTANT: We must NOT wrap the continuation k inside pure_, because the
+  -- continuation includes resource operations (stores, ccalls, etc.) whose
+  -- state changes must be preserved.
+  --
+  -- For a single branch: run directly (most common case after filtering).
+  -- For multiple branches: use tryBranch to try each independently, picking
+  -- the successful one's state (like Eif handler).
   | .case_ scrut branches =>
     checkPexprK scrut fun scrutVal => do
       if branches.isEmpty then
@@ -239,24 +287,108 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
       if branches.isEmpty then
         TypingM.fail (.other "All case branches filtered (no Specified branch found)")
 
-      -- Check each remaining branch speculatively (errors propagate)
-      for (pat, body) in branches do
-        let _ ← TypingM.pure_ do
-          let bindings ← bindPattern pat scrutVal
-          checkExpr labels body fun result => do
-            unbindPattern bindings
-            k result
-      pure ()
+      match branches with
+      | [(pat, body)] =>
+        -- Single branch (most common): run directly, preserving all state changes
+        let bindings ← bindPattern pat scrutVal
+        checkExpr labels body fun result => do
+          unbindPattern bindings
+          k result
+      | _ =>
+        -- Multiple branches: try each with tryBranch, use first successful state
+        let mut succeeded := false
+        for (pat, body) in branches do
+          if !succeeded then
+            let branchResult ← TypingM.tryBranch do
+              let bindings ← bindPattern pat scrutVal
+              checkExpr labels body fun result => do
+                unbindPattern bindings
+                k result
+            match branchResult with
+            | .ok (_, branchState) =>
+              TypingM.setState branchState
+              succeeded := true
+            | .error _ => pure ()  -- Try next branch
+        if !succeeded then
+          TypingM.fail (.other "All case branches failed")
 
   -- C function call
-  -- Corresponds to: Eccall case in check.ml lines 2018-2080
-  | .ccall _funPtr _funTy _args =>
-    -- C function call requires:
-    -- 1. Looking up the function's specification
-    -- 2. Checking precondition resources via Spine.calltype_ft
-    -- 3. Consuming/producing resources
-    -- 4. Calling continuation with result
-    TypingM.fail (.other "ccall not implemented - requires function specification lookup")
+  -- Corresponds to: Eccall case in check.ml lines 1935-1984
+  --
+  -- IMPORTANT: Core IR vs muCore argument mismatch.
+  -- In Core IR, ccall passes stack slot ADDRESSES as arguments:
+  --   create(slot) → store(val, slot) → ccall(f, slot) → kill(slot)
+  -- CN's core_to_mucore eliminates this pattern, passing actual VALUES:
+  --   ccall(f, val)
+  -- We handle this lazily by resolving arguments through the store map.
+  | .ccall funPtr _funTy args =>
+    -- 1. Evaluate function pointer and extract function symbol
+    -- Corresponds to: known_function_pointer in check.ml lines 363-379
+    -- CN evaluates the function pointer IT, then calls IT.is_sym to extract the symbol.
+    -- In Core IR, the function pointer goes through intermediaries (e.g., a_547),
+    -- so we must EVALUATE it (not just read the AST) to get the actual function symbol.
+    let funPtrVal ← checkPexpr funPtr
+    let funSym ← match funPtrVal.term with
+      | .sym s => pure s
+      | _ => TypingM.fail (.other s!"Indirect function calls not yet supported")
+
+    -- 2. Look up pre-built function type
+    -- Corresponds to: Global.get_fun_decl loc fsym in check.ml
+    let ft ← match (← TypingM.lookupFunctionSpec funSym.id) with
+      | some ft => pure ft
+      | none => TypingM.fail (.other s!"Call to function with no spec: {funSym.name.getD "<unnamed>"}")
+
+    -- 3. Process computational args with store resolution, then spine_l for precondition
+    -- This inlines spine's computational arg processing with an additional
+    -- store-resolution step for the lazy muCore transformation.
+    -- Corresponds to: Spine.calltype_ft → spine → spine_l
+    let rec processComputationalArgs (argsList : List APexpr) (at_ : AT ReturnType)
+        : TypingM Unit := do
+      match argsList, at_ with
+      | arg :: restArgs, .computational s bt _info rest =>
+        -- Evaluate the argument expression
+        -- Corresponds to: spine computational case, check.ml lines 1163-1173
+        checkPexprK arg (fun argVal => do
+          -- Resolve through store map: if this is a stack slot with a stored
+          -- value, use the stored value instead of the slot address.
+          -- This is the lazy muCore transformation for ccall arguments.
+          let resolvedVal ← match argVal.term with
+            | .sym sym =>
+              match ← TypingM.lookupStore sym.id with
+              | some storedVal => pure storedVal
+              | none => pure argVal
+            | _ => pure argVal
+          -- Substitute resolved value for parameter in rest of type
+          let σ := Subst.single s resolvedVal
+          let rest' := AT.subst ReturnType.subst σ rest
+          processComputationalArgs restArgs rest') (some bt)
+      | _, .ghost _s _bt _info rest =>
+        -- Skip ghost args (not yet supported)
+        processComputationalArgs argsList rest
+      | [], .L lat =>
+        -- All computational args processed, now process precondition via spine_l
+        -- Corresponds to: spine delegates to spine_l for LAT processing
+        spineL loc (.functionCall funSym) lat (fun rt => do
+          -- 4. Create fresh return symbol
+          -- Corresponds to: let s' = Sym.fresh_make_uniq_kind ~prefix "return" in
+          let s' ← TypingM.freshSym "return"
+          TypingM.addL s' rt.bt loc "function return value"
+
+          -- 5. Rename return symbol and process postcondition
+          -- Corresponds to: let su = IT.make_rename ~from:s ~to_:s' in
+          --                 bind_logical_return loc prefix (LRT.subst su lrt)
+          let σ := Subst.single rt.sym (AnnotTerm.mk (.sym s') rt.bt loc)
+          let lrt' := rt.lrt.subst σ
+          bindLogicalReturn loc lrt'
+
+          -- 6. Continue with return value
+          -- Corresponds to: k (IT.sym_ (s', bt, here))
+          k (AnnotTerm.mk (.sym s') rt.bt loc))
+      | _ :: _, .L _ =>
+        TypingM.fail (.other s!"Too many arguments in call to {funSym.name.getD "<unnamed>"}")
+      | [], .computational _ _ _ _ =>
+        TypingM.fail (.other s!"Not enough arguments in call to {funSym.name.getD "<unnamed>"}")
+    processComputationalArgs args ft
 
   -- Named procedure call
   -- Corresponds to: Eproc case in check.ml

@@ -144,8 +144,6 @@ def checkFunctionSpec
     --  since processPrecondition produces resources from the spec.)
     let initialState : TypingState := {
       context := Context.empty
-      oracle := .trivial  -- Not used when accumulating obligations
-      accumulateObligations := true
     }
 
     let computation : TypingM Unit := do

@@ -222,6 +222,8 @@ def checkFunctionWithParams
     (retTy : Core.BaseType)
     (cRetTy : Option Core.Ctype := none)
     (loc : Core.Loc)
+    (functionSpecs : FunctionSpecMap := {})
+    (funInfoMap : Core.FunInfoMap := {})
     : TypeCheckResult :=
   -- For trusted specs, skip verification
   if spec.trusted then
@@ -320,11 +322,11 @@ def checkFunctionWithParams
       -- Step 8: Create initial state with ParamValueMap, LabelDefs, and obligation accumulation
       let initialState : TypingState := {
         context := initialCtx
-        oracle := .trivial  -- Not used when accumulating obligations
         freshCounter := nextFreshId + 1000  -- Leave room for resolution IDs
         paramValues := paramValueMap
         labelDefs := muProc.labels  -- Label definitions from transformation
-        accumulateObligations := true
+        functionSpecs := functionSpecs  -- Pre-built function types for ccall
+        funInfoMap := funInfoMap  -- C-level function signatures for cfunction/params_length
       }
 
       -- Step 9: Run type checking on transformed body
@@ -340,7 +342,10 @@ def checkFunctionWithParams
 
       match TypingM.run computation initialState with
       | .ok (_, finalState) =>
-        TypeCheckResult.okWithObligations finalState.obligations
+        -- Convert conditional failures to (Obligation, errorString) pairs
+        let cfs := finalState.conditionalFailures.map fun cf =>
+          (cf.obligation, toString cf.originalError)
+        TypeCheckResult.okWithAll finalState.obligations cfs
       | .error err =>
         TypeCheckResult.fail (toString err)
 

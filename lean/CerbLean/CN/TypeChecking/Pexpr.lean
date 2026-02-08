@@ -73,6 +73,30 @@ def undefSym : Core.Sym := { id := 0, name := some "undef", description := .none
 /-- Check if a symbol is the canonical undef marker -/
 def isUndefSym (s : Core.Sym) : Bool := s.id == 0 && s.name == some "undef"
 
+/-! ## Helpers for Built-in Function Evaluation
+
+These support concrete evaluation of Cerberus built-in functions
+(cfunction, params_length, params_nth, are_compatible) that appear
+as guards around ccall. When evaluated concretely, the branch conditions
+become literal true/false and conditional failure obligations become trivial.
+-/
+
+/-- Build a concrete cons-list index term from a list of items. -/
+def buildConsList (elemBt : BaseType) (items : List IndexTerm) (loc : Core.Loc) : IndexTerm :=
+  items.foldr (init := AnnotTerm.mk (.nil elemBt) (.list elemBt) loc)
+    fun item acc => AnnotTerm.mk (.cons item acc) (.list elemBt) loc
+
+/-- Destructure a cons-list index term into its elements.
+    Returns none if the term is not a concrete list. -/
+def destList : IndexTerm → Option (List IndexTerm)
+  | ⟨.nil _, _, _⟩ => some []
+  | ⟨.cons hd tl, _, _⟩ => do let rest ← destList tl; return hd :: rest
+  | _ => none
+
+/-- Create a boolean literal index term. -/
+def boolLit (b : Bool) (loc : Core.Loc) : IndexTerm :=
+  AnnotTerm.mk (.const (.bool b)) .bool loc
+
 /-! ## Helper Functions -/
 
 /-- Convert a Core IntegerType to CN BaseType.
@@ -316,6 +340,20 @@ def ctypeToBaseTypeBits (ct : Core.Ctype) : BaseType :=
     If expectedBt is provided and is a Bits type, use it for integer literals
     (matches CN's type-aware literal creation via num_lit_). -/
 def valueToTerm (v : Value) (loc : Core.Loc) (expectedBt : Option BaseType := none) : Except TypeError IndexTerm := do
+  -- Handle function pointers specially: they are symbolic locations, not constants.
+  -- In Core IR, function pointers appear as Specified(Cfunction(sym)) in ccall setup.
+  -- CN treats function pointers as BT.Loc; the symbol is used for spec lookup.
+  -- Corresponds to: function pointer handling in CN's core_to_mucore.ml
+  match v with
+  | .object (.pointer pv) =>
+    match pv.base with
+    | .function sym => return AnnotTerm.mk (.sym sym) .loc loc
+    | _ => pure ()  -- Fall through to standard conversion below
+  | .loaded (.specified (.pointer pv)) =>
+    match pv.base with
+    | .function sym => return AnnotTerm.mk (.sym sym) .loc loc
+    | _ => pure ()
+  | _ => pure ()
   match valueToConst v loc with
   | .ok c =>
     -- For integer constants, use expected type if it's Bits
@@ -400,7 +438,8 @@ def coreBaseTypeToCN (bt : Core.BaseType) : Option BaseType :=
   | .unit => some .unit
   | .boolean => some .bool
   | .ctype => some .ctype
-  | .list _ => none  -- Lists not supported in CN base types
+  | .list .ctype => some (.list .ctype)  -- list ctype from cfunction() result
+  | .list _ => none  -- Other list types not supported in CN base types
   | .tuple _ => none  -- Tuples not supported (should use tuple element types)
   | .object ot => objectTypeToCN ot
   | .loaded ot => objectTypeToCN ot  -- loaded types use the inner object type
@@ -408,7 +447,11 @@ def coreBaseTypeToCN (bt : Core.BaseType) : Option BaseType :=
 where
   /-- Convert Core.ObjectType to CN.BaseType -/
   objectTypeToCN : Core.ObjectType → Option BaseType
-    | .integer => some (.bits .signed 32)  -- Default to signed 32-bit for unspecified integers
+    -- Core's ObjectType.integer carries no sign/width info.
+    -- CN uses Memory.bt_of_sct which takes the full Sctypes.t with exact integer type.
+    -- We return none here because we genuinely don't know the precise type.
+    -- Callers must get the actual type from the value or C-level type context.
+    | .integer => none
     | .floating => some .real
     | .pointer => some .loc
     | .array _ => some .loc  -- Arrays are accessed via pointers
@@ -432,9 +475,14 @@ partial def bindPattern (pat : APattern) (value : IndexTerm) : TypingM PatternBi
   | .base (some sym) bt =>
     -- Bind variable to value
     let loc := value.loc
-    let cnBt ← match coreBaseTypeToCN bt with
-      | some t => pure t
-      | none => TypingM.fail (.other s!"Unsupported Core base type in pattern: {repr bt}")
+    -- The actual CN type comes from the VALUE being bound, not the pattern annotation.
+    -- Core's pattern annotations (e.g., `loaded integer`) are coarser than CN's types.
+    -- CN's check_and_match_pattern uses the actual value's type for binding.
+    -- We use coreBaseTypeToCN for the PatternBindings record only, falling back to
+    -- the value's type when the pattern annotation is insufficient.
+    let cnBt := match coreBaseTypeToCN bt with
+      | some t => t
+      | none => value.bt  -- Pattern annotation insufficient; use actual value type
     TypingM.addAValue sym value loc s!"pattern binding {sym.name.getD ""}"
     return { boundVars := [(sym, cnBt)] }
   | .base none _ =>
@@ -493,7 +541,8 @@ partial def bindPattern (pat : APattern) (value : IndexTerm) : TypingM PatternBi
             | .base _ bt =>
               match coreBaseTypeToCN bt with
               | some t => pure t
-              | none => TypingM.fail (.other s!"Unsupported Core base type in tuple pattern element {idx}: {repr bt}")
+              | none =>
+                TypingM.fail (.other s!"Unsupported Core base type in tuple pattern: {repr bt}")
             | .ctor _ _ =>
               TypingM.fail (.other s!"Cannot determine type for constructor pattern at index {idx} - value is not a proper tuple")
 
@@ -868,6 +917,40 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
           TypingM.fail (.other "is_representable_integer: could not extract ctype")
       | _ =>
         TypingM.fail (.other "is_representable_integer requires exactly 2 arguments")
+    -- params_length: count elements in a concrete list
+    -- Corresponds to: check.ml lines 863-875 (PEcall "params_length")
+    -- CN evaluates the list argument and returns its length as an integer.
+    else if fnName == some "params_length" then
+      match args with
+      | [listArg] =>
+        let peList : APexpr := ⟨[], none, listArg⟩
+        let listVal ← checkPexpr peList
+        match destList listVal with
+        | some items =>
+          return AnnotTerm.mk (.const (.z (Int.ofNat items.length))) .integer loc
+        | none => TypingM.fail (.other "params_length: argument is not a concrete list")
+      | _ => TypingM.fail (.other "params_length: expected 1 argument")
+    -- params_nth: extract nth element from a concrete list
+    -- Corresponds to: check.ml lines 876-888 (PEcall "params_nth")
+    -- CN evaluates the list and index, then extracts the element.
+    else if fnName == some "params_nth" then
+      match args with
+      | [listArg, idxArg] =>
+        let peList : APexpr := ⟨[], none, listArg⟩
+        let listVal ← checkPexpr peList
+        let peIdx : APexpr := ⟨[], none, idxArg⟩
+        let idxVal ← checkPexpr peIdx
+        match destList listVal with
+        | some items =>
+          match idxVal.term with
+          | .const (.z n) =>
+            let idx := n.toNat
+            match items[idx]? with
+            | some item => return item
+            | none => TypingM.fail (.other s!"params_nth: index {n} out of bounds (list has {items.length} elements)")
+          | _ => TypingM.fail (.other "params_nth: index is not a concrete integer")
+        | none => TypingM.fail (.other "params_nth: first argument is not a concrete list")
+      | _ => TypingM.fail (.other "params_nth: expected 2 arguments")
     else
       -- General function call
       let argTerms ← args.mapM fun arg => do
@@ -1005,15 +1088,50 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
   | .isUnsigned _e =>
     TypingM.fail (.other "isUnsigned type predicate not implemented - requires type analysis")
 
-  | .areCompatible _e1 _e2 =>
-    TypingM.fail (.other "areCompatible type predicate not implemented - requires type analysis")
+  -- are_compatible: check if two ctypes are compatible
+  -- Corresponds to: check.ml lines 897-901 (PEare_compatible)
+  -- CN evaluates both arguments and compares them concretely.
+  | .areCompatible e1 e2 =>
+    let pe1 : APexpr := ⟨[], none, e1⟩
+    let pe2 : APexpr := ⟨[], none, e2⟩
+    let v1 ← checkPexpr pe1
+    let v2 ← checkPexpr pe2
+    match v1.term, v2.term with
+    | .const (.ctypeConst ct1), .const (.ctypeConst ct2) =>
+      -- Compare by inner type only, ignoring annotations.
+      -- Corresponds to: Sctypes.equal in CN which works on annotation-free Sctypes.
+      return boolLit (ct1.ty == ct2.ty) loc
+    | _, _ =>
+      let desc1 := match v1.term with
+        | .const c => s!"const({repr c})"
+        | .sym s => s!"sym({s.name.getD "?"})"
+        | _ => "other"
+      let desc2 := match v2.term with
+        | .const c => s!"const({repr c})"
+        | .sym s => s!"sym({s.name.getD "?"})"
+        | _ => "other"
+      TypingM.fail (.other s!"are_compatible: arguments are not concrete ctypes: {desc1} vs {desc2}")
 
-  -- C function pointer extraction
+  -- C function pointer extraction: returns (return_ctype, [param_ctypes], variadic, has_proto)
+  -- Corresponds to: PEcfunction in check.ml lines 922-943
+  -- CN looks up function info and returns a concrete 4-tuple.
   | .cfunction e =>
-    -- cfunction extracts function info from a pointer
-    -- For CN, we just evaluate the expression
-    let pe' : APexpr := ⟨[], pe.ty, e⟩
-    checkPexpr pe'
+    let pe' : APexpr := ⟨[], none, e⟩
+    let ptrVal ← checkPexpr pe'
+    let funSym ← match ptrVal.term with
+      | .sym s => pure s
+      | _ => TypingM.fail (.other "cfunction: argument is not a known function pointer symbol")
+    match ← TypingM.lookupFunInfo funSym with
+    | some fi =>
+      let retCt := AnnotTerm.mk (.const (.ctypeConst fi.returnType)) .ctype loc
+      let paramCtypes := fi.params.map fun fp =>
+        AnnotTerm.mk (.const (.ctypeConst fp.ty)) .ctype loc
+      let paramList := buildConsList .ctype paramCtypes loc
+      let variadic := boolLit fi.isVariadic loc
+      let hasProto := boolLit fi.hasProto loc
+      return AnnotTerm.mk (.tuple [retCt, paramList, variadic, hasProto])
+        (.tuple [.ctype, .list .ctype, .bool, .bool]) loc
+    | none => TypingM.fail (.other s!"cfunction: no function info for {funSym.name.getD "?"}")
 
   -- Union constructor
   | .union_ tag member value =>
