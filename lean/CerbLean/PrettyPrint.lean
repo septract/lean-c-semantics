@@ -95,7 +95,7 @@ def ppIntegerType : IntegerType → String
   | .bool => "_Bool"
   | .signed k => ppSignedIntKind k
   | .unsigned k => ppUnsignedIntKind k
-  | .enum s => s!"enum {ppSym s}"
+  | .enum tagId => s!"enum a_{tagId}"
   | .size_t => "size_t"
   | .wchar_t => "wchar_t"
   | .wint_t => "wint_t"

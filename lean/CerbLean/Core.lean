@@ -6,6 +6,7 @@
 -/
 
 import CerbLean.Core.Sym
+import CerbLean.Core.IntegerType
 import CerbLean.Core.Ctype
 import CerbLean.Core.Types
 import CerbLean.Core.Annot

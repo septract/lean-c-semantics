@@ -267,13 +267,58 @@ def parseLoc (j : Json) : Except String Loc := do
     .ok (.regions regions cursor)
   | other => .error s!"unknown location tag '{other}', expected Region, Point, Other, or Regions"
 
-/-- Parse annotations from JSON (old format: extracts "loc" field) -/
-def parseAnnots (j : Json) : Except String Annots := do
-  match getFieldOpt j "loc" with
-  | some locJson =>
-    let loc ← parseLoc locJson
-    .ok [.loc loc]
-  | none => .ok []
+/-- Parse IntBaseKind from JSON string -/
+def parseIntBaseKind (j : Json) : Except String IntBaseKind := do
+  match j with
+  | .str s =>
+    match s with
+    | "Ichar" => .ok .ichar
+    | "Short" => .ok .short
+    | "Int_" => .ok .int_
+    | "Long" => .ok .long
+    | "LongLong" => .ok .longLong
+    | "Intmax_t" => .ok .intmax
+    | "Intptr_t" => .ok .intptr
+    | _ => .error s!"unknown int base kind: {s}"
+  | .obj _ =>
+    let tag ← getTag j
+    match tag with
+    | "IntN_t" =>
+      let bits ← getNat j "bits"
+      .ok (.intN bits)
+    | "Int_leastN_t" =>
+      let bits ← getNat j "bits"
+      .ok (.intLeastN bits)
+    | "Int_fastN_t" =>
+      let bits ← getNat j "bits"
+      .ok (.intFastN bits)
+    | other => .error s!"unknown int base kind tag '{other}', expected one of {intBaseKindTags}"
+  | _ => .error "expected int base kind"
+
+/-- Parse IntegerType from structured JSON -/
+def parseIntegerTypeStruct (j : Json) : Except String IntegerType := do
+  let tag ← getTag j
+  match tag with
+  | "Char" => .ok .char
+  | "Bool" => .ok .bool
+  | "Signed" =>
+    let kind ← getField j "kind"
+    let k ← parseIntBaseKind kind
+    .ok (.signed k)
+  | "Unsigned" =>
+    let kind ← getField j "kind"
+    let k ← parseIntBaseKind kind
+    .ok (.unsigned k)
+  | "Enum" =>
+    let tagSym ← getField j "enum_tag"
+    let sym ← parseSym tagSym
+    .ok (.enum sym.id)
+  | "Size_t" => .ok .size_t
+  | "Wchar_t" => .ok .wchar_t
+  | "Wint_t" => .ok .wint_t
+  | "Ptrdiff_t" => .ok .ptrdiff_t
+  | "Ptraddr_t" => .ok .ptraddr_t
+  | other => .error s!"unknown integer type tag '{other}', expected one of {integerTypeTags}"
 
 /-- Parse a single annotation from JSON -/
 def parseAnnot (j : Json) : Except String Annot := do
@@ -299,32 +344,112 @@ def parseAnnot (j : Json) : Except String Annot := do
     let n ← getInt j "id"
     .ok (.bmc (.id n.toNat))
   | "Aattrs" =>
-    -- TODO: implement proper attribute parsing when needed
-    .error "parseAnnot: Aattrs parsing not yet implemented"
+    -- Parse C2X attributes
+    -- For now, store empty attributes since we don't use the content for CN checking
+    .ok (.attrs .empty)
   | "Atypedef" =>
     let symJ ← getField j "symbol"
     let id ← getInt symJ "id"
     .ok (.typedef id.toNat)
   | "Alabel" =>
-    -- TODO: implement proper label annotation parsing when needed
-    .error "parseAnnot: Alabel parsing not yet implemented"
+    -- Parse label annotation
+    let labelJ ← getField j "label"
+    let tag ← getTag labelJ
+    match tag with
+    | "LAloop" =>
+      let n ← getInt labelJ "id"
+      .ok (.label (.loop n.toNat))
+    | "LAloop_continue" =>
+      let n ← getInt labelJ "id"
+      .ok (.label (.loopContinue n.toNat))
+    | "LAloop_break" =>
+      let n ← getInt labelJ "id"
+      .ok (.label (.loopBreak n.toNat))
+    | "LAreturn" => .ok (.label .return_)
+    | "LAswitch" => .ok (.label .switch)
+    | "LAcase" => .ok (.label .case)
+    | "LAdefault" => .ok (.label .default)
+    | "LAactual_label" => .ok (.label .actualLabel)
+    | other => .error s!"unknown label annotation tag '{other}'"
   | "Acerb" =>
-    -- TODO: implement proper cerb attribute parsing when needed
-    .error "parseAnnot: Acerb parsing not yet implemented"
+    -- Parse Cerberus-specific attribute
+    let cerbJ ← getField j "cerb"
+    let tag ← getTag cerbJ
+    match tag with
+    | "ACerb_with_address" =>
+      let addrStr ← getStr cerbJ "address"
+      match addrStr.toInt? with
+      | some addr => .ok (.cerb (.withAddress addr))
+      | none => .error s!"ACerb_with_address: invalid integer string '{addrStr}'"
+    | "ACerb_hidden" => .ok (.cerb .hidden)
+    | other => .error s!"unknown cerb attribute tag '{other}'"
   | "Avalue" =>
-    -- TODO: implement proper value annotation parsing when needed
-    .error "parseAnnot: Avalue parsing not yet implemented"
+    -- Parse value annotation: Avalue(Ainteger integerType)
+    -- Corresponds to: value_annot = Ainteger of IntegerType.integerType in annot.lem
+    let valueJ ← getField j "value"
+    let tag ← getTag valueJ
+    match tag with
+    | "Ainteger" =>
+      let ityJ ← getField valueJ "integer_type"
+      let ity ← parseIntegerTypeStruct ityJ
+      .ok (.value (.integer ity))
+    | other => .error s!"unknown value annotation tag '{other}'"
   | "Ainlined_label" =>
-    -- TODO: implement proper inlined label parsing when needed
-    .error "parseAnnot: Ainlined_label parsing not yet implemented"
+    -- Parse inlined label annotation
+    let locJ ← getField j "loc"
+    let loc ← parseLoc locJ
+    let symJ ← getField j "symbol"
+    let symId ← getInt symJ "id"
+    let labelJ ← getField j "label"
+    let tag ← getTag labelJ
+    let label ← match tag with
+      | "LAloop" => do let n ← getInt labelJ "id"; pure (LabelAnnot.loop n.toNat)
+      | "LAloop_continue" => do let n ← getInt labelJ "id"; pure (LabelAnnot.loopContinue n.toNat)
+      | "LAloop_break" => do let n ← getInt labelJ "id"; pure (LabelAnnot.loopBreak n.toNat)
+      | "LAreturn" => pure LabelAnnot.return_
+      | "LAswitch" => pure LabelAnnot.switch
+      | "LAcase" => pure LabelAnnot.case
+      | "LAdefault" => pure LabelAnnot.default
+      | "LAactual_label" => pure LabelAnnot.actualLabel
+      | other => .error s!"unknown label annotation tag '{other}'"
+    .ok (.inlinedLabel loc symId.toNat label)
   | "Astmt" => .ok .stmt
   | "Aexpr" => .ok .expr
   | other => .error s!"unknown annotation tag '{other}'"
 
-/-- Parse annotations array from JSON (new format) -/
-def parseAnnots' (j : Json) : Except String Annots := do
-  let arr ← j.getArr?
-  arr.toList.mapM parseAnnot
+/-- Parse annotations from a pexpr/expr JSON wrapper.
+    First tries the `annots` array field (new format from our Cerberus JSON export).
+    Falls back to extracting just `loc` (old format compatibility).
+    Corresponds to: annotation list on Pexpr/Expr in Core AST -/
+def parseAnnots (j : Json) : Except String Annots := do
+  -- Try new format: full annotation array
+  match getFieldOpt j "annots" with
+  | some annotsJson =>
+    match annotsJson.getArr? with
+    | .ok arr =>
+      let annots ← arr.toList.mapM parseAnnot
+      -- If no Aloc in annotations, also check the top-level loc field
+      let hasLoc := annots.any fun | .loc _ => true | _ => false
+      if hasLoc then return annots
+      else match getFieldOpt j "loc" with
+        | some locJson =>
+          let loc ← parseLoc locJson
+          return .loc loc :: annots
+        | none => return annots
+    | .error _ =>
+      -- annots field exists but isn't an array; fall back to loc
+      match getFieldOpt j "loc" with
+      | some locJson =>
+        let loc ← parseLoc locJson
+        .ok [.loc loc]
+      | none => .ok []
+  | none =>
+    -- Old format: no annots array, just extract loc
+    match getFieldOpt j "loc" with
+    | some locJson =>
+      let loc ← parseLoc locJson
+      .ok [.loc loc]
+    | none => .ok []
 
 /-! ## Type Parsing -/
 
@@ -381,59 +506,6 @@ def parseQualifiers (j : Json) : Except String Qualifiers := do
   let restrict ← getBool j "restrict"
   let volatile ← getBool j "volatile"
   .ok { const := const_, restrict := restrict, volatile := volatile }
-
-/-- Parse IntBaseKind from JSON string -/
-def parseIntBaseKind (j : Json) : Except String IntBaseKind := do
-  match j with
-  | .str s =>
-    match s with
-    | "Ichar" => .ok .ichar
-    | "Short" => .ok .short
-    | "Int_" => .ok .int_
-    | "Long" => .ok .long
-    | "LongLong" => .ok .longLong
-    | "Intmax_t" => .ok .intmax
-    | "Intptr_t" => .ok .intptr
-    | _ => .error s!"unknown int base kind: {s}"
-  | .obj _ =>
-    let tag ← getTag j
-    match tag with
-    | "IntN_t" =>
-      let bits ← getNat j "bits"
-      .ok (.intN bits)
-    | "Int_leastN_t" =>
-      let bits ← getNat j "bits"
-      .ok (.intLeastN bits)
-    | "Int_fastN_t" =>
-      let bits ← getNat j "bits"
-      .ok (.intFastN bits)
-    | other => .error s!"unknown int base kind tag '{other}', expected one of {intBaseKindTags}"
-  | _ => .error "expected int base kind"
-
-/-- Parse IntegerType from structured JSON -/
-def parseIntegerTypeStruct (j : Json) : Except String IntegerType := do
-  let tag ← getTag j
-  match tag with
-  | "Char" => .ok .char
-  | "Bool" => .ok .bool
-  | "Signed" =>
-    let kind ← getField j "kind"
-    let k ← parseIntBaseKind kind
-    .ok (.signed k)
-  | "Unsigned" =>
-    let kind ← getField j "kind"
-    let k ← parseIntBaseKind kind
-    .ok (.unsigned k)
-  | "Enum" =>
-    let tagSym ← getField j "enum_tag"
-    let sym ← parseSym tagSym
-    .ok (.enum sym)
-  | "Size_t" => .ok .size_t
-  | "Wchar_t" => .ok .wchar_t
-  | "Wint_t" => .ok .wint_t
-  | "Ptrdiff_t" => .ok .ptrdiff_t
-  | "Ptraddr_t" => .ok .ptraddr_t
-  | other => .error s!"unknown integer type tag '{other}', expected one of {integerTypeTags}"
 
 /-- Parse RealFloatingType from JSON string -/
 def parseRealFloatingType (j : Json) : Except String RealFloatingType := do
@@ -531,7 +603,8 @@ partial def parseCtype (j : Json) : Except String Ctype := do
   let tyJ ← getField j "ty"
   let ty ← parseCtype_ tyJ
   let annotsJ ← getField j "annots"
-  let annots ← parseAnnots' annotsJ
+  let annotsArr ← annotsJ.getArr?
+  let annots ← annotsArr.toList.mapM parseAnnot
   .ok { annots := annots, ty := ty }
 end
 

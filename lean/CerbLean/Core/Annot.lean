@@ -5,6 +5,8 @@
   Deviations: None
 -/
 
+import CerbLean.Core.IntegerType
+
 namespace CerbLean.Core
 
 /-! ## Source Position
@@ -197,14 +199,12 @@ type value_annot =
 ```
 -/
 
--- Forward declaration: IntegerType is defined in Ctype.lean
--- We use a string representation here to avoid circular imports
 /-- Value annotation
     Corresponds to: value_annot in annot.lem:63-64
     Audited: 2025-12-31
-    Deviations: Uses String instead of IntegerType to avoid circular import -/
+    Deviations: None -/
 inductive ValueAnnot where
-  | integer (tyName : String)
+  | integer (ity : IntegerType)
   deriving Repr, BEq, Inhabited
 
 /-! ## Annotation
@@ -365,5 +365,20 @@ def Annots.isLoopBreak (annots : Annots) : Bool :=
   match annots.getLabelAnnot with
   | some (.loopBreak _) => true
   | _ => false
+
+/-- Get integer type annotation if present.
+    Corresponds to: integer_annot in cn/lib/wellTyped.ml lines 1592-1600
+
+    CN's implementation:
+      let integer_annot annots =
+        match List.filter_map is_integer_annot annots with
+        | [] -> None
+        | [ ity ] -> Some ity
+        | _ -> assert false
+    -/
+def Annots.getIntegerAnnot (annots : Annots) : Option IntegerType :=
+  annots.findSome? fun
+    | .value (.integer ity) => some ity
+    | _ => none
 
 end CerbLean.Core
