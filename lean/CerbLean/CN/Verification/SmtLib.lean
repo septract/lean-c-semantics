@@ -308,6 +308,36 @@ def binOpToTerm (op : BinOp) (lBt rBt : BaseType) (l r : Smt.Term) : TranslateRe
   | .setMember => .unsupported "setMember"
   | .subset => .unsupported "subset"
 
+/-- When one operand is Bits and the other is Integer, coerce the integer
+    operand to bitvector using int2bv. Returns (lBt', rBt', lTm', rTm')
+    with the types and terms unified to bitvector.
+    This handles the case where Core IR case expressions contain integer
+    literals that don't receive type hints from the expected type context.
+    Corresponds to: CN's solver.ml transparent coercion between Int and BitVec -/
+def coerceBitsInteger (lBt rBt : BaseType) (lTm rTm : Smt.Term)
+    : BaseType × BaseType × Smt.Term × Smt.Term :=
+  match lBt, rBt with
+  | .bits _ w, .integer =>
+    -- Left is bits, right is integer: coerce right to bitvector
+    -- Use literalT to pre-render indexed identifier; the Smt library's appToList
+    -- doesn't special-case int2bv, so structured terms render incorrectly
+    let int2bv := Term.literalT s!"(_ int2bv {w})"
+    (lBt, lBt, lTm, Term.appT int2bv rTm)
+  | .integer, .bits _ w =>
+    -- Left is integer, right is bits: coerce left to bitvector
+    let int2bv := Term.literalT s!"(_ int2bv {w})"
+    (rBt, rBt, Term.appT int2bv lTm, rTm)
+  | .loc, .bits _ _ =>
+    -- Pointer + bitvector offset: coerce bits to integer (pointers are Int in SMT)
+    -- Used for array/pointer arithmetic: arr + idx
+    let bv2int := Term.symbolT "bv2int"
+    (.loc, .loc, lTm, Term.appT bv2int rTm)
+  | .bits _ _, .loc =>
+    -- Bitvector offset + pointer: coerce bits to integer
+    let bv2int := Term.symbolT "bv2int"
+    (.loc, .loc, Term.appT bv2int lTm, rTm)
+  | _, _ => (lBt, rBt, lTm, rTm)
+
 mutual
 
 /-- Convert a CN Term to Smt.Term.
@@ -321,9 +351,15 @@ partial def termToSmtTerm : Types.Term → TranslateResult
     | .ok argTm => unOpToTerm op arg.bt argTm
     | .unsupported r => .unsupported r
   | .binop op l r =>
-    -- Pass both operand types to binOpToTerm for type-aware dispatch
+    -- Pass both operand types to binOpToTerm for type-aware dispatch.
+    -- When one operand is Bits and the other is Integer (from Core IR case
+    -- expressions where literal constants don't receive type hints), coerce
+    -- the integer operand to bitvector using int2bv. This matches CN's
+    -- solver.ml which handles such coercions transparently.
     match annotTermToSmtTerm l, annotTermToSmtTerm r with
-    | .ok lTm, .ok rTm => binOpToTerm op l.bt r.bt lTm rTm
+    | .ok lTm, .ok rTm =>
+      let (lBt, rBt, lTm', rTm') := coerceBitsInteger l.bt r.bt lTm rTm
+      binOpToTerm op lBt rBt lTm' rTm'
     | .unsupported r, _ => .unsupported r
     | _, .unsupported r => .unsupported r
   | .ite cond thenB elseB =>
@@ -354,7 +390,10 @@ partial def termToSmtTerm : Types.Term → TranslateResult
     | _, .unsupported r => .unsupported r
   | .arrayShift base _ct index =>
     match annotTermToSmtTerm base, annotTermToSmtTerm index with
-    | .ok b, .ok i => .ok (Term.mkApp2 (Term.symbolT "+") b i)
+    | .ok b, .ok i =>
+      -- Pointer (loc=Int) + index (bits=BitVec): coerce index to Int
+      let (_, _, b', i') := coerceBitsInteger base.bt index.bt b i
+      .ok (Term.mkApp2 (Term.symbolT "+") b' i')
     | .unsupported r, _ => .unsupported r
     | _, .unsupported r => .unsupported r
   | .aligned ptr align =>
@@ -423,11 +462,12 @@ partial def termToSmtTerm : Types.Term → TranslateResult
           .ok (Term.appT extract valTm)
       | .integer, .bits _ tw =>
         -- Int → BitVec: use int2bv (indexed identifier)
-        let int2bv := Term.mkApp2 (Term.symbolT "_") (Term.symbolT "int2bv") (Term.literalT (toString tw))
+        -- Use literalT because Smt library's appToList doesn't special-case int2bv
+        let int2bv := Term.literalT s!"(_ int2bv {tw})"
         .ok (Term.appT int2bv valTm)
       | .loc, .bits _ tw =>
         -- Loc (represented as Int) → BitVec (indexed identifier)
-        let int2bv := Term.mkApp2 (Term.symbolT "_") (Term.symbolT "int2bv") (Term.literalT (toString tw))
+        let int2bv := Term.literalT s!"(_ int2bv {tw})"
         .ok (Term.appT int2bv valTm)
       | _, _ =>
         .unsupported s!"cast from {repr sourceBt} to {repr targetType}"

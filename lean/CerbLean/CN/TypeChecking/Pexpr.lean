@@ -649,7 +649,11 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
     return AnnotTerm.mk (.unop .not t) .bool loc
 
   -- Conditional
-  -- Propagate expected type to both branches
+  -- Propagate expected type to both branches.
+  -- Process both branches, then cross-propagate types: if one branch produced
+  -- a more specific type (e.g., bits signed 32 vs integer from undef), re-check
+  -- the weaker branch with the stronger type as expectedBt. This ensures dead
+  -- branches (undef) get the correct type annotation for SMT translation.
   | .if_ cond thenE elseE =>
     let peCond : APexpr := ⟨[], some .boolean, cond⟩
     let peThen : APexpr := ⟨[], pe.ty, thenE⟩
@@ -657,6 +661,17 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
     let tCond ← checkPexpr peCond (some .bool)
     let tThen ← checkPexpr peThen expectedBt
     let tElse ← checkPexpr peElse expectedBt
+    -- Cross-propagate: if types differ and one is more specific, re-check
+    let (tThen, tElse) ← match tThen.bt, tElse.bt with
+      | .bits _ _, .integer =>
+        -- Then has precise bits type, re-check else with that type
+        let tElse' ← checkPexpr peElse (some tThen.bt)
+        pure (tThen, tElse')
+      | .integer, .bits _ _ =>
+        -- Else has precise bits type, re-check then with that type
+        let tThen' ← checkPexpr peThen (some tElse.bt)
+        pure (tThen', tElse)
+      | _, _ => pure (tThen, tElse)
     return AnnotTerm.mk (.ite tCond tThen tElse) tThen.bt loc
 
   -- Let binding
@@ -738,7 +753,8 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
           match ct.ty with
           | .basic (.integer ity) =>
             let maxVal := intTypeMax ity
-            let resBt ← requireCoreBaseTypeToCN pe.ty "ivmax result"
+            -- CN uses Memory.bt_of_sct on the ctype argument to determine result type
+            let resBt := integerTypeToBaseType ity
             return numLit maxVal resBt loc
           | _ => TypingM.fail (.other "ivmax requires integer ctype")
         | _ => TypingM.fail (.other "ivmax requires ctype constant argument")
@@ -755,7 +771,8 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
           match ct.ty with
           | .basic (.integer ity) =>
             let minVal := intTypeMin ity
-            let resBt ← requireCoreBaseTypeToCN pe.ty "ivmin result"
+            -- CN uses Memory.bt_of_sct on the ctype argument to determine result type
+            let resBt := integerTypeToBaseType ity
             return numLit minVal resBt loc
           | _ => TypingM.fail (.other "ivmin requires integer ctype")
         | _ => TypingM.fail (.other "ivmin requires ctype constant argument")
@@ -769,7 +786,8 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
         let tArg ← checkPexpr peArg
         match tArg.term with
         | .const (.ctypeConst ct) =>
-          let resBt ← requireCoreBaseTypeToCN pe.ty "ivsizeof result"
+          -- CN uses Memory.size_bt = Bits(Unsigned, 64) for sizeof result
+          let resBt : BaseType := .bits .unsigned 64
           return AnnotTerm.mk (.sizeOf ct) resBt loc
         | _ => TypingM.fail (.other "ivsizeof requires ctype constant argument")
       | _ => TypingM.fail (.other "ivsizeof requires exactly 1 argument")
@@ -784,7 +802,8 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
         | .const (.ctypeConst ct) =>
           match alignOfCtype ct with
           | some align =>
-            let resBt ← requireCoreBaseTypeToCN pe.ty "ivalignof result"
+            -- CN uses Memory.size_bt = Bits(Unsigned, 64) for alignof result
+            let resBt : BaseType := .bits .unsigned 64
             return numLit (Int.ofNat align) resBt loc
           | none =>
             TypingM.fail (.other s!"ivalignof: cannot compute alignment for {repr ct.ty} (requires type environment)")
@@ -984,7 +1003,11 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
       -- Convert APattern to CN Pattern
       let cnPat := convertPattern pat tScrut.bt loc
       return (cnPat, tBody)
-    let resBt ← requireCoreBaseTypeToCN pe.ty "case/match expression"
+    -- Result type comes from the first branch body (CN strips case in muCore,
+    -- so there's no PEcase type inference - the branches determine the type)
+    let resBt ← match cnBranches.head? with
+      | some (_, body) => pure body.bt
+      | none => TypingM.fail (.other "case/match expression: no branches after filtering")
     return AnnotTerm.mk (.match_ tScrut cnBranches) resBt loc
 
   -- Struct literal
@@ -1006,7 +1029,18 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
     -- should not be taken. We return a symbolic term representing undefined.
     -- The CN verifier will ensure this value is never actually used
     -- (i.e., the path condition leading here is unsatisfiable).
-    let resBt ← requireCoreBaseTypeToCN pe.ty "undef expression"
+    -- Prefer expectedBt (from surrounding context) over pe.ty, since Core's
+    -- type for undef is often `loaded integer` which lacks sign/width info.
+    -- For `loaded integer`, use `.integer` since the value is never used and
+    -- the Core IR only tells us it's some integer type (no sign/width).
+    let resBt ← match expectedBt with
+      | some bt => pure bt
+      | none => match pe.ty with
+        | some (.loaded .integer) | some (.object .integer) =>
+          -- Core says integer but no sign/width — use unbounded integer
+          -- This is safe because undef values are never actually used
+          pure .integer
+        | _ => requireCoreBaseTypeToCN pe.ty "undef expression"
     return AnnotTerm.mk (.sym undefSym) resBt loc
 
   -- Error expression
