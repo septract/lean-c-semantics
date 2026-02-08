@@ -4,14 +4,13 @@
 
   The typing monad is a state monad that tracks:
   - The typing context (variables, resources, constraints)
-  - A proof oracle for checking constraints
+  - Accumulated proof obligations for post-hoc SMT discharge
 
-  Key design decision: We abstract constraint proving via ProofOracle.
-  This allows:
-  - Testing with a trivial oracle that accepts everything
-  - Using SMT solvers (e.g., LeanSMT)
-  - Manual Lean proofs
-  - Mixing strategies
+  Key design decision: All proof queries go through obligation accumulation.
+  Type checking produces a list of obligations (implications: assumptions → constraint)
+  that are discharged by an external SMT solver after type checking completes.
+  This clean separation supports a soundness theorem:
+    if type checking succeeds AND all obligations are valid, then the program is safe.
 
   Audited: 2026-01-20 against cn/lib/typing.ml
 -/
@@ -20,6 +19,7 @@ import CerbLean.CN.TypeChecking.Context
 import CerbLean.CN.Types
 import CerbLean.CN.Verification.Obligation
 import CerbLean.Core.MuCore
+import CerbLean.Core.File
 import Std.Data.HashMap
 
 namespace CerbLean.CN.TypeChecking
@@ -28,64 +28,6 @@ open CerbLean.Core (Sym Loc)
 open CerbLean.Core.MuCore (LabelDefs LabelDef LabelInfo)
 open CerbLean.CN.Types
 open CerbLean.CN.Verification
-
-/-! ## Proof Oracle
-
-The proof oracle abstracts constraint solving. Different implementations:
-- Trivial: accepts all constraints (for testing)
-- Decide: uses decidable instances
-- SMT: external solver
-- Manual: requires Lean proofs
--/
-
-/-- Result of a provability check -/
-inductive ProvableResult where
-  /-- Constraint is provable -/
-  | true_
-  /-- Constraint is not provable (with optional counterexample info) -/
-  | false_ (info : Option String := none)
-  deriving Repr, Inhabited
-
-/-- A proof oracle can attempt to prove constraints.
-    Corresponds to: Solver.provable in cn/lib/solver.ml
-
-    The oracle is called with:
-    - Current constraints (assumptions)
-    - Constraint to prove
-    Returns whether the constraint is provable. -/
-structure ProofOracle where
-  /-- Try to prove a constraint given current assumptions -/
-  tryProve : LCSet → LogicalConstraint → ProvableResult
-  /-- Name for debugging -/
-  name : String := "unnamed"
-
-namespace ProofOracle
-
-/-- Trivial oracle that accepts all constraints.
-    Use for testing and development. -/
-def trivial : ProofOracle where
-  tryProve _ _ := .true_
-  name := "trivial"
-
-/-- Oracle that rejects all constraints.
-    Useful for testing that we generate the right constraints. -/
-def reject : ProofOracle where
-  tryProve _ _ := .false_
-  name := "reject"
-
-/-- Combine oracles: try first, fall back to second -/
-def orElse (o1 : ProofOracle) (o2 : Unit → ProofOracle) : ProofOracle where
-  tryProve assumptions lc :=
-    match o1.tryProve assumptions lc with
-    | .true_ => .true_
-    | .false_ _ => (o2 ()).tryProve assumptions lc
-  name := s!"{o1.name} || {(o2 ()).name}"
-
-instance : OrElse ProofOracle := ⟨orElse⟩
-
-instance : Inhabited ProofOracle := ⟨trivial⟩
-
-end ProofOracle
 
 /-! ## Type Errors
 
@@ -122,6 +64,33 @@ instance : ToString TypeError where
     | .unboundVariable sym => s!"unbound variable: {sym.name.getD "?"}"
     | .other msg => msg
 
+/-! ## Conditional Failures
+
+A conditional failure represents a type error from a branch that may be dead.
+Instead of propagating the error immediately (which would block checking of
+live branches), we catch it and create an obligation proving the branch is dead.
+
+Post-hoc, the SMT solver checks: assumptions → ¬branchCondition.
+If valid (branch IS dead): error is vacuous, discard.
+If invalid (branch is live): error is genuine, report.
+
+This is our equivalent of CN's inline `provable(false)` dead-branch detection
+(check.ml:1985-2002), deferred to post-hoc SMT discharge.
+
+Nesting works because each conditional failure captures the FULL assumption set
+(all enclosing branch conditions via addC). If an outer path is contradictory,
+all inner CFs under that path are vacuously true.
+-/
+
+/-- A type error conditional on a branch being taken.
+    If the obligation is valid (branch is dead), the error is vacuous.
+    If invalid (branch is live), the error is genuine. -/
+structure ConditionalFailure where
+  /-- Obligation: assumptions → ¬branchCondition (prove branch is dead) -/
+  obligation : Obligation
+  /-- The original type error from checking the branch -/
+  originalError : TypeError
+
 /-! ## Typing Monad State
 
 Corresponds to: cn/lib/typing.ml lines 11-17
@@ -136,7 +105,21 @@ type s =
 ```
 -/
 
-/-! ## Parameter Value Mapping
+/-! ## Function Specification Map
+
+Corresponds to: fun_decls in cn/lib/global.ml lines 11
+  fun_decls : (Locations.t * AT.ft option * Sctypes.c_concrete_sig) Sym.Map.t
+
+Pre-built function types for resolving C function calls (Eccall).
+Each function with a CN spec gets its type pre-built during initialization.
+-/
+
+/-- Pre-built function type map for callee spec lookup.
+    Keyed by function symbol ID.
+    Corresponds to: AT.ft option in Global.fun_decls -/
+abbrev FunctionSpecMap := Std.HashMap Nat (Types.AT Types.ReturnType)
+
+/-! ## Parameter Value Map
 
 Corresponds to: C_vars.Value in cn/lib/compile.ml lines 332-333.
 
@@ -160,13 +143,11 @@ abbrev ParamValueMap := Std.HashMap Nat IndexTerm
     Corresponds to: s in typing.ml lines 11-17
     Simplified: we omit sym_eqs, movable_indices, log for now
 
-    Extended for proof obligations: accumulates obligations during type checking
-    instead of (or in addition to) checking constraints immediately. -/
+    All proof queries go through obligation accumulation. Type checking
+    produces obligations that are discharged by an external SMT solver. -/
 structure TypingState where
   /-- Current typing context -/
   context : Context
-  /-- Proof oracle for constraint checking (for backward compatibility) -/
-  oracle : ProofOracle
   /-- Counter for generating fresh symbols -/
   freshCounter : Nat := 0
   /-- Parameter value mapping: stack slot ID → value term
@@ -176,10 +157,24 @@ structure TypingState where
       Maps label symbols to their definitions (return vs regular).
       Corresponds to: mi_label_defs in milicore.ml -/
   labelDefs : LabelDefs := []
-  /-- Accumulated proof obligations (new: for post-hoc discharge) -/
+  /-- Function specification map for resolving ccall.
+      Pre-built function types keyed by symbol ID.
+      Corresponds to: fun_decls in cn/lib/global.ml -/
+  functionSpecs : FunctionSpecMap := {}
+  /-- Function info map for looking up C-level function signatures.
+      Used by cfunction(), params_length, etc. for concrete evaluation.
+      Corresponds to: funinfo in Core file -/
+  funInfoMap : Core.FunInfoMap := {}
+  /-- Store value tracking: slot symbol ID → most recently stored value.
+      Used for lazy muCore transformation of ccall argument slots.
+      Corresponds to: core_to_mucore function call argument transformation -/
+  storeValues : Std.HashMap Nat IndexTerm := {}
+  /-- Accumulated proof obligations for post-hoc SMT discharge -/
   obligations : ObligationSet := []
-  /-- Whether to accumulate obligations instead of checking immediately -/
-  accumulateObligations : Bool := false
+  /-- Conditional failures: type errors from branches that may be dead.
+      Each pairs an obligation (prove branch is dead) with the original error.
+      Discharged post-hoc by SMT. -/
+  conditionalFailures : List ConditionalFailure := []
   /-- Whether this execution path has returned.
       When true, subsequent code should be skipped (return is terminal). -/
   hasReturned : Bool := false
@@ -187,25 +182,11 @@ structure TypingState where
 
 namespace TypingState
 
-def empty (oracle : ProofOracle := .trivial) : TypingState :=
-  { context := Context.empty, oracle := oracle, freshCounter := 0 }
+def empty : TypingState :=
+  { context := Context.empty, freshCounter := 0 }
 
-def withContext (ctx : Context) (oracle : ProofOracle := .trivial) : TypingState :=
-  { context := ctx, oracle := oracle, freshCounter := 0 }
-
-/-- Create state for obligation accumulation (no oracle checking) -/
-def forObligations : TypingState :=
-  { context := Context.empty
-  , oracle := .trivial  -- Not used when accumulating
-  , freshCounter := 0
-  , accumulateObligations := true }
-
-/-- Create state for obligation accumulation with initial context -/
-def forObligationsWithContext (ctx : Context) : TypingState :=
-  { context := ctx
-  , oracle := .trivial
-  , freshCounter := 0
-  , accumulateObligations := true }
+def withContext (ctx : Context) : TypingState :=
+  { context := ctx, freshCounter := 0 }
 
 end TypingState
 
@@ -248,6 +229,20 @@ def getContext : TypingM Context := do
 def getLabelDefs : TypingM LabelDefs := do
   let s ← getState
   return s.labelDefs
+
+/-- Look up a function spec by symbol ID.
+    Corresponds to: Global.get_fun_decl in cn/lib/global.ml -/
+def lookupFunctionSpec (symId : Nat) : TypingM (Option (Types.AT Types.ReturnType)) := do
+  let s ← getState
+  return s.functionSpecs.get? symId
+
+/-- Generate a fresh symbol with a descriptive name.
+    Corresponds to: Sym.fresh_make_uniq_kind in CN -/
+def freshSym (name : String) : TypingM Core.Sym := do
+  let s ← getState
+  let id := s.freshCounter
+  modifyState fun s => { s with freshCounter := s.freshCounter + 1 }
+  return { id := id, name := some name, digest := "", description := .none_ }
 
 /-- Check if the current path has returned -/
 def hasReturned : TypingM Bool := do
@@ -324,31 +319,11 @@ def getConstraints : TypingM LCSet := do
   let ctx ← getContext
   return ctx.constraints
 
-/-! ### Provability
-
-Corresponds to: make_provable in typing.ml lines 122-133
--/
-
-/-- Check if a constraint is provable given current assumptions
-    Corresponds to: provable in typing.ml -/
-def provable (lc : LogicalConstraint) : TypingM ProvableResult := do
-  let s ← getState
-  let ctx ← getContext
-  return s.oracle.tryProve ctx.constraints lc
-
-/-- Check if a constraint is provable, failing if not
-    Corresponds to: pattern matching on provable result in resourceInference.ml -/
-def ensureProvable (lc : LogicalConstraint) : TypingM Unit := do
-  match ← provable lc with
-  | .true_ => pure ()
-  | .false_ _ =>
-    let ctx ← getContext
-    fail (.unprovableConstraint lc ctx)
-
 /-! ### Proof Obligation Operations
 
-These functions support the new proof obligation architecture where
-constraints are accumulated during type checking and discharged afterward.
+All proof queries go through obligation accumulation. Type checking produces
+a list of obligations (implications: assumptions → constraint) that are
+discharged by an external SMT solver after type checking completes.
 -/
 
 /-- Get accumulated obligations -/
@@ -360,43 +335,21 @@ def getObligations : TypingM ObligationSet := do
 def addObligation (ob : Obligation) : TypingM Unit := do
   modifyState fun s => { s with obligations := ObligationSet.add ob s.obligations }
 
-/-- Add a constraint as a proof obligation.
-    If accumulateObligations is true, adds to the obligation set.
-    Otherwise, checks immediately with the oracle (legacy behavior).
+/-- Add a constraint as a proof obligation for post-hoc SMT discharge.
+    Captures the current constraints as assumptions: the obligation semantically
+    means "under the current assumptions, the constraint holds".
 
-    When accumulating, the obligation captures the current constraints as
-    assumptions. This is crucial: the obligation semantically means
-    "under the current assumptions, the constraint holds". -/
+    Corresponds to: requireConstraint pattern in CN type checking -/
 def requireConstraint (lc : LogicalConstraint) (loc : Loc) (desc : String := "constraint") : TypingM Unit := do
-  let s ← getState
-  if s.accumulateObligations then
-    -- New behavior: accumulate obligation for post-hoc discharge
-    -- Capture current constraints as assumptions
-    let assumptions ← getConstraints
-    let ob := Obligation.arithmetic desc lc assumptions loc
-    addObligation ob
-  else
-    -- Legacy behavior: check immediately
-    ensureProvable lc
+  let assumptions ← getConstraints
+  let ob := Obligation.arithmetic desc lc assumptions loc
+  addObligation ob
 
 /-- Add multiple constraints as obligations.
     All obligations capture the same assumptions (current constraints). -/
 def requireConstraints (lcs : LCSet) (loc : Loc) : TypingM Unit := do
   for lc in lcs do
     requireConstraint lc loc
-
-/-- Check if we're in obligation accumulation mode -/
-def isAccumulatingObligations : TypingM Bool := do
-  let s ← getState
-  return s.accumulateObligations
-
-/-- Enable obligation accumulation mode -/
-def enableObligationAccumulation : TypingM Unit := do
-  modifyState fun s => { s with accumulateObligations := true }
-
-/-- Disable obligation accumulation mode (use oracle instead) -/
-def disableObligationAccumulation : TypingM Unit := do
-  modifyState fun s => { s with accumulateObligations := false }
 
 /-! ### Resource Manipulation -/
 
@@ -450,6 +403,26 @@ def getParamValues : TypingM ParamValueMap := do
   let s ← getState
   return s.paramValues
 
+/-! ### Store Value Tracking
+
+These functions track what values are stored in stack slots.
+Used for lazy muCore transformation of ccall argument slots.
+In Core IR, ccall passes stack slot addresses; CN expects actual values.
+-/
+
+/-- Record a store: slot_sym_id → stored value.
+    Called from handleStore when a value is written to a stack slot.
+    Corresponds to: core_to_mucore tracking of ccall argument values -/
+def recordStore (slotSymId : Nat) (value : IndexTerm) : TypingM Unit := do
+  modifyState fun s => { s with storeValues := s.storeValues.insert slotSymId value }
+
+/-- Look up the most recently stored value for a stack slot.
+    Used by ccall argument resolution to map slot addresses to actual values.
+    Corresponds to: core_to_mucore ccall argument transformation -/
+def lookupStore (slotSymId : Nat) : TypingM (Option IndexTerm) := do
+  let s ← getState
+  return s.storeValues.get? slotSymId
+
 /-! ### Scoped Operations
 
 Corresponds to: pure in typing.ml lines 67-72
@@ -459,10 +432,9 @@ Corresponds to: pure in typing.ml lines 67-72
     The computation is executed and its result returned, but most state changes
     are discarded. Errors still propagate.
 
-    IMPORTANT: Obligations are PRESERVED even when state is restored.
-    This is crucial for CPS-style checking where branches call the same
-    continuation independently. Each branch may generate obligations that
-    must all be checked.
+    IMPORTANT: Obligations AND conditional failures are PRESERVED even when
+    state is restored. This is crucial for CPS-style checking where branches
+    call the same continuation independently.
 
     Used for branch checking in CPS: each branch is checked speculatively
     with state restored afterward, but obligations from all branches accumulate.
@@ -471,11 +443,64 @@ Corresponds to: pure in typing.ml lines 67-72
 def pure_ (m : TypingM α) : TypingM α := do
   let s ← getState
   let result ← m
-  -- Preserve obligations from the branch, restore everything else
-  let newObligations ← getObligations
-  setState { s with obligations := newObligations }
+  -- Preserve obligations and conditional failures, restore everything else
+  let newState ← getState
+  setState { s with
+    obligations := newState.obligations
+    conditionalFailures := newState.conditionalFailures
+  }
   return result
 
+/-- Run a computation in an isolated copy of the current state.
+    Returns either the successful result with its FULL final state,
+    or the error. The CALLER'S state is NOT modified — the caller must
+    explicitly decide what to do with the returned state.
+
+    This is critical for Eif handling: both branches are tried independently
+    from the same starting state, and the caller merges/picks the right state.
+
+    TypingM = StateT TypingState (Except TypeError), so m s gives us
+    Except TypeError (α × TypingState) which we match on directly.
+
+    Corresponds to: CN's pure + provable(false) pattern in check.ml:1985-2002 -/
+def tryBranch (m : TypingM α) : TypingM (Except TypeError (α × TypingState)) := fun s =>
+  match m s with
+  | .ok (val, newState) =>
+    .ok (.ok (val, newState), s)  -- Return result+state, caller's state unchanged
+  | .error e =>
+    .ok (.error e, s)  -- Return error, caller's state unchanged
+
+/-- Add a conditional failure: a type error from a branch that may be dead.
+    Creates an obligation to prove ¬branchCondition under the given assumptions.
+
+    Post-hoc, the SMT solver checks: assumptions → ¬branchCondition.
+    If valid (branch IS dead), the error is vacuous.
+    If invalid (branch is live), the error is genuine and will be reported. -/
+def addConditionalFailure (branchCond : IndexTerm) (err : TypeError)
+    (assumptions : LCSet) (loc : Loc) : TypingM Unit :=
+  modifyState fun s => { s with
+    conditionalFailures := s.conditionalFailures ++ [{
+      obligation := {
+        description := s!"Branch must be dead (error: {err})"
+        constraint := .t (AnnotTerm.mk (.unop .not branchCond) .bool branchCond.loc)
+        assumptions := assumptions
+        loc := loc
+        category := .branchDead
+      }
+      originalError := err
+    }]
+  }
+
+/-! ### Function Info Lookup -/
+
+/-- Look up function info by symbol.
+    Uses full Sym (digest + id) for HashMap lookup, avoiding collisions
+    from different compilation units sharing the same numeric id.
+    Used by cfunction(), params_length, etc. for concrete evaluation.
+    Corresponds to: looking up function info in Core file -/
+def lookupFunInfo (sym : Core.Sym) : TypingM (Option Core.FunInfo) := do
+  let s ← getState
+  return s.funInfoMap.get? sym
 
 end TypingM
 

@@ -295,6 +295,14 @@ def handleStore (_locking : Bool) (tyPe : APexpr) (ptrPe : APexpr) (valPe : APex
   let ptr := simplifyPointerForResource ptrRaw
   let val ← checkPexpr valPe
 
+  -- Track the store for ccall argument resolution (lazy muCore transformation).
+  -- When Core IR passes a stack slot to ccall, we need to resolve it to the
+  -- stored value. Record the mapping: slot_sym_id → stored_value.
+  -- Corresponds to: core_to_mucore elimination of create+store+ccall+kill pattern.
+  match ptr.term with
+  | .sym s => TypingM.recordStore s.id val
+  | _ => pure ()  -- Non-symbol pointers can't be tracked
+
   -- Check if we're storing an unspecified value (uninitialized memory)
   -- If so, we should keep the resource as Uninit, not Init
   let storeIsUnspecified := isUnspecifiedValue valPe

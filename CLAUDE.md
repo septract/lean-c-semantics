@@ -714,6 +714,24 @@ The ONLY acceptable reasons to modify a test are:
 
 If you're tempted to weaken a test, STOP and fix the actual problem instead.
 
+### ABSOLUTE RULE: Backwards Compatibility is an Anti-Goal
+
+**Backwards compatibility with previous versions of our own code is an ANTI-GOAL. We NEVER want to preserve previous behavior if it does not match Cerberus or CN. It does not matter if this breaks tests.**
+
+The ONLY source of truth is Cerberus and CN. If our implementation diverges from Cerberus/CN, the implementation is WRONG and must be fixed, even if:
+- It breaks existing tests (fix the tests to match Cerberus/CN)
+- It changes observable behavior (the old behavior was wrong)
+- It invalidates previous proofs (they were proving the wrong thing)
+- It requires large-scale refactoring (correctness is non-negotiable)
+
+**Do NOT**:
+- Preserve a bug because "it's what we've always done"
+- Keep incorrect behavior because fixing it would break things
+- Add compatibility shims between old and new behavior
+- Hesitate to change tests when Cerberus/CN says they were wrong
+
+**When you discover our implementation doesn't match Cerberus/CN**: Fix it immediately. Update tests to reflect the correct behavior. There is no "deprecation period" for incorrect semantics.
+
 ### Always Use Build Targets for Testing
 **Always use Makefile targets** (e.g., `make test`, `make test-cn`) rather than invoking test binaries directly. Build targets ensure proper dependencies are built first and use the correct invocation.
 

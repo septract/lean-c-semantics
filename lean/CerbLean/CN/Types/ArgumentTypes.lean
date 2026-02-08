@@ -101,7 +101,7 @@ partial def subst {α : Type} (innerSubst : Subst → α → α) (σ : Subst) : 
     -- Note: should alpha-rename if name is in σ.relevant, but we simplify
     .define_ name (value.subst σ) info (subst innerSubst σ rest)
   | .resource name req bt info rest =>
-    .resource name req bt info (subst innerSubst σ rest)  -- TODO: subst in request
+    .resource name (req.subst σ) bt info (subst innerSubst σ rest)
   | .constraint lc info rest =>
     .constraint (lc.subst σ) info (subst innerSubst σ rest)
   | .I inner => .I (innerSubst σ inner)
@@ -193,6 +193,109 @@ def ofFunctionSpec {α : Type} (spec : FunctionSpec) (returnBt : BaseType) (rest
                   (.L (LAT.ofPostcondition spec.ensures rest))
 
 end AT
+
+/-! ## Logical Return Types (LRT)
+
+Corresponds to: cn/lib/logicalReturnTypes.ml
+
+The logical return type represents the postcondition of a function call.
+It has the same structure as LAT but different semantics:
+- LAT resources are CONSUMED (precondition: caller must provide)
+- LRT resources are PRODUCED (postcondition: callee guarantees)
+- LAT constraints become OBLIGATIONS (to verify)
+- LRT constraints become ASSUMPTIONS (guaranteed by callee)
+
+  type t =
+    | Define of (Sym.t * IT.t) * BaseTypes.info * t
+    | Resource of (Sym.t * (RE.t * BT.t)) * BaseTypes.info * t
+    | Constraint of LC.t * BaseTypes.info * t
+    | I
+-/
+
+/-- Logical Return Type (postcondition structure for function types).
+    Corresponds to: LRT.t in cn/lib/logicalReturnTypes.ml -/
+inductive LRT where
+  /-- Define a logical variable with a value. -/
+  | define (name : Sym) (value : IndexTerm) (info : Info) (rest : LRT)
+  /-- Resource clause: a resource to produce (callee guarantees it). -/
+  | resource (name : Sym) (request : Request) (outputBt : BaseType) (info : Info) (rest : LRT)
+  /-- Constraint: a postcondition constraint (assumed by caller). -/
+  | constraint (lc : LogicalConstraint) (info : Info) (rest : LRT)
+  /-- Terminal: postcondition fully processed. -/
+  | I
+
+namespace LRT
+
+/-- Substitute in an LRT.
+    Corresponds to: LRT.subst in logicalReturnTypes.ml -/
+partial def subst (σ : Subst) : LRT → LRT
+  | .define name value info rest =>
+    .define name (value.subst σ) info (subst σ rest)
+  | .resource name req bt info rest =>
+    .resource name (req.subst σ) bt info (subst σ rest)
+  | .constraint lc info rest =>
+    .constraint (lc.subst σ) info (subst σ rest)
+  | .I => .I
+
+/-- Convert a Postcondition (list of clauses) to LRT.
+    Corresponds to: building LRT.t from postcondition clauses -/
+def ofPostcondition (post : Postcondition) : LRT :=
+  post.clauses.foldr (init := .I) fun clause acc =>
+    match clause with
+    | .resource name res =>
+      .resource name res.request res.output.value.bt { loc := res.output.value.loc } acc
+    | .constraint assertion =>
+      .constraint (.t assertion) { loc := assertion.loc } acc
+    | .letBinding name value =>
+      .define name value { loc := value.loc } acc
+
+end LRT
+
+/-! ## Return Types
+
+Corresponds to: cn/lib/returnTypes.ml
+
+  type t = Computational of (Sym.t * BT.t) * BaseTypes.info * LRT.t
+
+The return type of a function, containing:
+- The return symbol and its base type
+- The postcondition as an LRT
+-/
+
+/-- Return type for function types.
+    Corresponds to: ReturnTypes.t in cn/lib/returnTypes.ml
+
+    type t = Computational of (Sym.t * BT.t) * BaseTypes.info * LRT.t -/
+structure ReturnType where
+  /-- Symbol for the return value -/
+  sym : Sym
+  /-- Base type of the return value -/
+  bt : BaseType
+  /-- Postcondition (logical return type) -/
+  lrt : LRT
+
+namespace ReturnType
+
+/-- Substitute in a ReturnType.
+    Corresponds to: ReturnTypes.subst in returnTypes.ml
+
+    Only substitutes in the LRT (postcondition), not the sym/bt.
+    The sym is a binder (will be renamed in bind_logical_return). -/
+def subst (σ : Subst) (rt : ReturnType) : ReturnType :=
+  { rt with lrt := rt.lrt.subst σ }
+
+end ReturnType
+
+/-! ## Function Types
+
+  type ft = ReturnTypes.t t   (argumentTypes.ml line 135)
+
+A function type is an AT parameterized by ReturnType.
+-/
+
+/-- Function type: argument type that returns a ReturnType.
+    Corresponds to: type ft = ReturnTypes.t t in argumentTypes.ml line 135 -/
+abbrev FT := AT ReturnType
 
 /-! ## Type Aliases
 

@@ -309,6 +309,85 @@ def runAllObligationTests : IO UInt32 := do
 
   return exitCode
 
+/-! ## Build Function Spec Map
+
+Pre-builds AT ReturnType for each function with CN annotations.
+This is analogous to CN's Global.fun_decls, which provides pre-built
+function types for callee spec lookup during type checking.
+
+Corresponds to: Global.get_fun_decl in cn/lib/global.ml
+-/
+
+open CerbLean.CN.Types (ReturnType LRT AT LAT Info FunctionSpec Precondition
+  Postcondition Request Resource Output Predicate IndexTerm)
+open CerbLean.CN.TypeChecking.Resolve (resolveFunctionSpec ctypeToOutputBaseType)
+
+/-- Build an AT ReturnType from a resolved function spec and C-level parameter types.
+
+    The structure is:
+    - Computational args for each C parameter
+    - L (LAT from precondition, ending with I(ReturnType from postcondition))
+
+    This matches how CN's Global.fun_decls stores pre-built function types.
+
+    Corresponds to: Building AT.ft from function declaration in CN -/
+def buildFunctionType (spec : FunctionSpec)
+    (cParams : List (Core.Sym × CerbLean.CN.Types.BaseType))
+    (returnBt : CerbLean.CN.Types.BaseType) : AT ReturnType :=
+  -- Build the inner part: ReturnType from postcondition
+  let returnType : ReturnType := {
+    sym := spec.returnSym
+    bt := returnBt
+    lrt := LRT.ofPostcondition spec.ensures
+  }
+  -- Build LAT from precondition clauses, ending with I(ReturnType)
+  -- Note: LAT.ofPostcondition takes Postcondition, but precondition has the same
+  -- clause structure, so we wrap it as a Postcondition for the conversion.
+  let preAsPost : Postcondition := { clauses := spec.requires.clauses }
+  let lat := LAT.ofPostcondition preAsPost (.I returnType)
+  -- Wrap computational args from right to left (last param is innermost)
+  cParams.foldr (init := AT.L lat) fun (sym, bt) rest =>
+    AT.computational sym bt { loc := .unknown, desc := s!"parameter {sym.name.getD ""}" } rest
+
+/-- Build the function spec map from a parsed Core file.
+
+    Iterates over all functions with CN annotations, parses and resolves their
+    specs, and builds AT ReturnType entries for the function spec map.
+
+    This is a pre-pass that runs before the main verification loop, matching
+    CN's approach of having pre-built function types in Global.fun_decls.
+
+    Functions that fail to parse or resolve are silently skipped (they will
+    fail with proper error messages during their own verification).
+
+    Corresponds to: CN's initialization of Global.fun_decls -/
+def buildFunctionSpecMap (file : Core.File) : FunctionSpecMap :=
+  let entries := file.funinfo.toList.filterMap fun (sym, funInfo) =>
+    if funInfo.cnMagic.isEmpty then none
+    else
+      -- Take the first CN annotation
+      match funInfo.cnMagic.head? with
+      | none => none
+      | some ann =>
+        match parseFunctionSpec ann.text with
+        | .error _ => none  -- Skip unparseable specs (will fail during own verification)
+        | .ok spec =>
+          -- Both trusted and non-trusted specs need to be resolved and built.
+          -- The `trusted` flag only affects body verification, not the spec itself.
+          -- Callers need the full pre/postcondition from the spec.
+          let cParams : List (Core.Sym × CerbLean.CN.Types.BaseType) :=
+            funInfo.params.filterMap fun fp =>
+              fp.sym.map fun s => (s, ctypeToOutputBaseType fp.ty)
+          let returnBt := ctypeToOutputBaseType funInfo.returnType
+          let maxParamId := cParams.foldl (init := 0) fun acc (s, _) => max acc s.id
+          let resolveResult := (resolveFunctionSpec spec cParams returnBt (maxParamId + 1)).toOption
+          match resolveResult with
+          | none => none  -- Skip unresolvable specs
+          | some resolvedSpec =>
+            let ft := buildFunctionType resolvedSpec cParams returnBt
+            some (sym.id, ft)
+  Std.HashMap.ofList entries
+
 /-! ## Helper: Find Function Body and Parameters -/
 
 /-- Function info including body and parameters -/
@@ -357,6 +436,9 @@ def runJsonTest (jsonPath : String) (expectFail : Bool := false) : IO UInt32 := 
       IO.println "(expecting failure)"
     IO.println ""
 
+    -- Pre-pass: build function spec map for ccall resolution
+    let functionSpecs := buildFunctionSpecMap file
+
     let mut count := 0
     let mut parseSuccess := 0
     let mut parseFail := 0
@@ -381,10 +463,26 @@ def runJsonTest (jsonPath : String) (expectFail : Bool := false) : IO UInt32 := 
             match findFunctionInfo file sym.name with
             | some info =>
               -- Full verification: check body against spec with parameters bound
-              let result := checkFunctionWithParams spec info.body info.params info.cParams info.retTy info.cRetTy Core.Loc.t.unknown
+              let result := checkFunctionWithParams spec info.body info.params info.cParams info.retTy info.cRetTy Core.Loc.t.unknown functionSpecs file.funinfo
               if result.success then
-                verifySuccess := verifySuccess + 1
-                IO.println "  PASS (body verified with trivial oracle)"
+                -- Discharge conditional failures via SMT
+                let mut cfFailed := false
+                for (cfOb, cfErr) in result.conditionalFailures do
+                  let cfResult ← checkObligation .z3 cfOb
+                  match cfResult.result with
+                  | .valid =>
+                    -- Branch is dead (obligation proved), error is vacuous
+                    IO.println s!"  (dead branch confirmed: {cfOb.description})"
+                  | _ =>
+                    -- Branch is live, error is genuine
+                    cfFailed := true
+                    IO.println s!"  FAIL (live branch error: {cfErr})"
+
+                if cfFailed then
+                  verifyFail := verifyFail + 1
+                else
+                  verifySuccess := verifySuccess + 1
+                  IO.println "  PASS (body verified)"
               else
                 verifyFail := verifyFail + 1
                 IO.println "  FAIL"
@@ -398,7 +496,7 @@ def runJsonTest (jsonPath : String) (expectFail : Bool := false) : IO UInt32 := 
               let result := checkSpecStandalone spec
               if result.success then
                 verifySuccess := verifySuccess + 1
-                IO.println "  PASS (spec-only with trivial oracle)"
+                IO.println "  PASS (spec-only)"
               else
                 verifyFail := verifyFail + 1
                 IO.println "  FAIL"
@@ -535,6 +633,9 @@ def runJsonTestWithVerify (jsonPath : String) (expectFail : Bool := false) : IO 
       IO.println "(expecting failure)"
     IO.println ""
 
+    -- Pre-pass: build function spec map for ccall resolution
+    let functionSpecs := buildFunctionSpecMap file
+
     let mut count := 0
     let mut parseSuccess := 0
     let mut parseFail := 0
@@ -558,31 +659,54 @@ def runJsonTestWithVerify (jsonPath : String) (expectFail : Bool := false) : IO 
             match findFunctionInfo file sym.name with
             | some info =>
               -- Type check first
-              let tcResult := checkFunctionWithParams spec info.body info.params info.cParams info.retTy info.cRetTy Core.Loc.t.unknown
+              let tcResult := checkFunctionWithParams spec info.body info.params info.cParams info.retTy info.cRetTy Core.Loc.t.unknown functionSpecs file.funinfo
               if !tcResult.success then
                 verifyFail := verifyFail + 1
                 IO.println "  TYPECHECK FAIL"
                 match tcResult.error with
                 | some msg => IO.println s!"    error: {msg}"
                 | none => IO.println "    error: unknown"
-              else if tcResult.obligations.isEmpty then
-                verifySuccess := verifySuccess + 1
-                IO.println "  PASS (no obligations)"
               else
-                -- Verify obligations with SMT
-                let obResults ← checkObligations .z3 tcResult.obligations (some 10)
-                let allValid := obResults.all fun r => r.result matches .valid
-                if allValid then
-                  verifySuccess := verifySuccess + 1
-                  IO.println s!"  PASS ({obResults.length} obligations verified)"
-                else
-                  verifyFail := verifyFail + 1
-                  IO.println s!"  FAIL (some obligations not verified)"
-                  for r in obResults do
-                    IO.println s!"    - {r.obligation.description}: {r.result}"
-                    if let some q := r.query then
+                -- Verify regular obligations with SMT
+                let mut allPassed := true
+                let mut numVerified := 0
+                if !tcResult.obligations.isEmpty then
+                  let obResults ← checkObligations .z3 tcResult.obligations (some 10)
+                  let allValid := obResults.all fun r => r.result matches .valid
+                  if !allValid then
+                    allPassed := false
+                    IO.println s!"  FAIL (some obligations not verified)"
+                    for r in obResults do
+                      IO.println s!"    - {r.obligation.description}: {r.result}"
+                      if let some q := r.query then
+                        IO.println "    SMT query:"
+                        IO.println q
+                  numVerified := obResults.length
+
+                -- Discharge conditional failures via SMT
+                for (cfOb, cfErr) in tcResult.conditionalFailures do
+                  let cfResult ← checkObligation .z3 cfOb
+                  match cfResult.result with
+                  | .valid =>
+                    IO.println s!"  (dead branch confirmed: {cfOb.description})"
+                  | other =>
+                    allPassed := false
+                    IO.println s!"  FAIL (live branch error: {cfErr})"
+                    IO.println s!"    CF obligation: {cfOb.description}"
+                    IO.println s!"    CF result: {other}"
+                    if let some q := cfResult.query then
                       IO.println "    SMT query:"
                       IO.println q
+
+                if allPassed then
+                  verifySuccess := verifySuccess + 1
+                  let totalChecked := numVerified + tcResult.conditionalFailures.length
+                  if totalChecked == 0 then
+                    IO.println "  PASS (no obligations)"
+                  else
+                    IO.println s!"  PASS ({totalChecked} obligations verified)"
+                else
+                  verifyFail := verifyFail + 1
 
             | none =>
               -- No body found - spec-only check
