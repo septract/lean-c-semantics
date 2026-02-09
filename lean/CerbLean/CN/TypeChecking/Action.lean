@@ -107,30 +107,12 @@ def simplifyPointerForResource (ptr : IndexTerm) : IndexTerm :=
   | _ => ptr
 
 /-- Convert Ctype to CN BaseType.
-    Fails on unsupported types rather than silently returning a default.
+    Delegates to ctypeInnerToBaseType which correctly maps integer types to Bits
+    (matching CN's Memory.bt_of_sct which returns Bits(sign, width) for integers).
 
-    Corresponds to: Memory.bt_of_sct in CN OCaml -/
-def ctypeToBaseType (ct : Ctype) (loc : Core.Loc) : TypingM BaseType := do
-  match ct.ty with
-  | .void => return .unit
-  | .basic (.integer _) => return .integer
-  | .basic (.floating _) => return .real
-  | .pointer _ _ => return .loc
-  | .struct_ tag => return .struct_ tag
-  | .array _ _ =>
-    -- Arrays require proper handling - fail explicitly
-    TypingM.fail (.other s!"Array types not yet supported in ctypeToBaseType at {repr loc}")
-  | .union_ tag =>
-    TypingM.fail (.other s!"Union type {repr tag} not yet supported at {repr loc}")
-  | .function _ _ _ _ =>
-    TypingM.fail (.other s!"Function types not supported in ctypeToBaseType at {repr loc}")
-  | .functionNoParams _ _ =>
-    TypingM.fail (.other s!"Function types not supported in ctypeToBaseType at {repr loc}")
-  | .atomic _ =>
-    TypingM.fail (.other s!"Atomic types not yet supported in ctypeToBaseType at {repr loc}")
-  | .byte =>
-    -- Byte is an internal type, maps to memory byte
-    return .memByte
+    Corresponds to: Memory.bt_of_sct in CN OCaml (cn/lib/memory.ml) -/
+def ctypeToBaseType (ct : Ctype) (_loc : Core.Loc) : TypingM BaseType := do
+  return ctypeInnerToBaseType ct.ty
 
 /-! ## Unspecified Value Detection
 
