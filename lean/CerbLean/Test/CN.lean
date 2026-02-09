@@ -16,6 +16,7 @@ import CerbLean.CN.PrettyPrint
 import CerbLean.CN.TypeChecking
 import CerbLean.CN.Verification.Obligation
 import CerbLean.CN.Verification.Verify
+import CerbLean.Memory.Layout
 
 namespace CerbLean.Test.CN
 
@@ -26,6 +27,7 @@ open CerbLean.CN.PrettyPrint
 open CerbLean.CN.TypeChecking
 open CerbLean.CN.Verification
 open CerbLean.CN.Verification.SmtSolver (checkObligation checkObligations SolverKind)
+open CerbLean.Memory (TypeEnv)
 
 /-! ## Unit Test Cases
 
@@ -438,6 +440,8 @@ def runJsonTest (jsonPath : String) (expectFail : Bool := false) : IO UInt32 := 
 
     -- Pre-pass: build function spec map for ccall resolution
     let functionSpecs := buildFunctionSpecMap file
+    -- Construct type environment for struct layouts (pointer model needs this)
+    let typeEnv := TypeEnv.fromFile file
 
     let mut count := 0
     let mut parseSuccess := 0
@@ -468,7 +472,7 @@ def runJsonTest (jsonPath : String) (expectFail : Bool := false) : IO UInt32 := 
                 -- Discharge conditional failures via SMT
                 let mut cfFailed := false
                 for (cfOb, cfErr) in result.conditionalFailures do
-                  let cfResult ← checkObligation .z3 cfOb
+                  let cfResult ← checkObligation .z3 cfOb (env := some typeEnv)
                   match cfResult.result with
                   | .valid =>
                     -- Branch is dead (obligation proved), error is vacuous
@@ -635,6 +639,8 @@ def runJsonTestWithVerify (jsonPath : String) (expectFail : Bool := false) : IO 
 
     -- Pre-pass: build function spec map for ccall resolution
     let functionSpecs := buildFunctionSpecMap file
+    -- Construct type environment for struct layouts (pointer model needs this)
+    let typeEnv := TypeEnv.fromFile file
 
     let mut count := 0
     let mut parseSuccess := 0
@@ -671,7 +677,7 @@ def runJsonTestWithVerify (jsonPath : String) (expectFail : Bool := false) : IO 
                 let mut allPassed := true
                 let mut numVerified := 0
                 if !tcResult.obligations.isEmpty then
-                  let obResults ← checkObligations .z3 tcResult.obligations (some 10)
+                  let obResults ← checkObligations .z3 tcResult.obligations (some 10) (env := some typeEnv)
                   let allValid := obResults.all fun r => r.result matches .valid
                   if !allValid then
                     allPassed := false
@@ -685,7 +691,7 @@ def runJsonTestWithVerify (jsonPath : String) (expectFail : Bool := false) : IO 
 
                 -- Discharge conditional failures via SMT
                 for (cfOb, cfErr) in tcResult.conditionalFailures do
-                  let cfResult ← checkObligation .z3 cfOb
+                  let cfResult ← checkObligation .z3 cfOb (env := some typeEnv)
                   match cfResult.result with
                   | .valid =>
                     IO.println s!"  (dead branch confirmed: {cfOb.description})"
@@ -719,7 +725,7 @@ def runJsonTestWithVerify (jsonPath : String) (expectFail : Bool := false) : IO 
                 verifySuccess := verifySuccess + 1
                 IO.println "  PASS (no obligations)"
               else
-                let obResults ← checkObligations .z3 tcResult.obligations (some 10)
+                let obResults ← checkObligations .z3 tcResult.obligations (some 10) (env := some typeEnv)
                 let allValid := obResults.all fun r => r.result matches .valid
                 if allValid then
                   verifySuccess := verifySuccess + 1

@@ -3,7 +3,7 @@
 **Date**: 2026-02-08
 **Scope**: Full audit of CN implementation against reference CN (tmp/cn/)
 **Current status**: 42/46 tests passing (42 genuine passes confirmed by audit)
-**Updated**: 2026-02-08 — C1, C5, C7 fixed; H6 partially fixed (path conditions + guard stripping)
+**Updated**: 2026-02-08 — C1, C2, C5, C7 fixed; H6 partially fixed (path conditions + guard stripping)
 **Method**: 5 parallel auditor agents + manual analysis
 
 ---
@@ -509,7 +509,7 @@ Additional fixes completed (not originally in quick wins):
 | ID | Severity | Summary | File | Status |
 |----|----------|---------|------|--------|
 | C1 | CRITICAL | Integer types `.integer` vs `.bits` | Action.lean:116 | **FIXED 2026-02-08** — `ctypeToBaseType` now delegates to `ctypeInnerToBaseType` (Bits mapping) |
-| C2 | CRITICAL | Pointer SMT encoding Int vs algebraic datatype | SmtLib.lean:69 | Open |
+| C2 | CRITICAL | Pointer SMT encoding Int vs algebraic datatype | SmtLib.lean:69 | **FIXED 2026-02-08** — `declare-datatype pointer` preamble, ptr_shift/copy_alloc_id/addr_of/bits_to_ptr/alloc_id_of helpers, TypeEnv threading for memberShift/offsetOf |
 | C3 | HIGH | Unit SMT encoding Bool vs empty tuple | SmtLib.lean:71 | Open |
 | C4 | HIGH | Struct types unsupported in SMT | SmtLib.lean:73 | Open |
 | C5 | CRITICAL | PEwrapI always returns add | Pexpr.lean:1130 | **FIXED 2026-02-08** — now maps each Iop to correct BinOp |

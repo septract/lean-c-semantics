@@ -26,6 +26,7 @@ namespace CerbLean.CN.Verification.SmtSolver
 
 open CerbLean.CN.Verification (Obligation ObligationSet)
 open CerbLean.CN.Verification.SmtLib
+open CerbLean.Memory (TypeEnv)
 
 -- Aliases for lean-smt types
 abbrev SolverKind := Smt.Translate.Kind
@@ -72,16 +73,17 @@ def checkObligation
     (kind : SolverKind)
     (ob : Obligation)
     (timeout : Option Nat := some 10)
-    (path : Option String := none) : IO ObligationResult := do
+    (path : Option String := none)
+    (env : Option TypeEnv := none) : IO ObligationResult := do
   -- Translate to SMT terms
-  let (queryStr, errors) := obligationToSmtLib2 ob
+  let (queryStr, errors) := obligationToSmtLib2 ob env
 
   -- If there are unsupported constructs, report them
   if !errors.isEmpty then
     return { obligation := ob, result := .unsupported errors, query := some queryStr }
 
   -- Get the commands
-  let (cmds, _) := obligationToCommands ob
+  let (cmds, _) := obligationToCommands ob env
 
   -- Create solver with error handling
   try
@@ -89,6 +91,10 @@ def checkObligation
 
     -- Run the query
     let result ← StateT.run (s := state) do
+      -- Emit pointer preamble (declare-datatype + helpers) as raw SMT-LIB2
+      let st ← get
+      st.proc.stdin.putStr pointerPreamble
+      st.proc.stdin.flush
       -- Emit all commands except checkSat (we'll call it separately)
       for cmd in cmds.dropLast do
         Smt.Translate.Solver.emitCommand cmd
@@ -116,18 +122,19 @@ def checkObligations
     (kind : SolverKind)
     (obs : ObligationSet)
     (timeout : Option Nat := some 10)
-    (path : Option String := none) : IO (List ObligationResult) := do
-  obs.mapM (checkObligation kind · timeout path)
+    (path : Option String := none)
+    (env : Option TypeEnv := none) : IO (List ObligationResult) := do
+  obs.mapM (checkObligation kind · timeout path env)
 
 /-! ## Convenience Functions -/
 
 /-- Check obligations with Z3 (default) -/
-def checkWithZ3 (obs : ObligationSet) : IO (List ObligationResult) :=
-  checkObligations .z3 obs
+def checkWithZ3 (obs : ObligationSet) (env : Option TypeEnv := none) : IO (List ObligationResult) :=
+  checkObligations .z3 obs (env := env)
 
 /-- Check obligations with cvc5 -/
-def checkWithCvc5 (obs : ObligationSet) : IO (List ObligationResult) :=
-  checkObligations .cvc5 obs
+def checkWithCvc5 (obs : ObligationSet) (env : Option TypeEnv := none) : IO (List ObligationResult) :=
+  checkObligations .cvc5 obs (env := env)
 
 /-- Check if all obligations are valid -/
 def allValid (results : List ObligationResult) : Bool :=
