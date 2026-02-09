@@ -118,11 +118,13 @@ test-genproof:
 test-interp:
 	./scripts/test_interp.sh --nolibc tests/minimal
 	./scripts/test_interp.sh --nolibc tests/debug
+	./scripts/test_interp.sh --nolibc tests/float
 
 # Full interpreter tests (with libc, slower but complete)
 test-interp-full:
 	./scripts/test_interp.sh tests/minimal
 	./scripts/test_interp.sh tests/debug
+	./scripts/test_interp.sh tests/float
 
 # CI suite (with libc)
 test-interp-ci:
