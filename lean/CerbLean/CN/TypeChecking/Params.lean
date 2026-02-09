@@ -245,10 +245,10 @@ def checkFunctionWithParams
     let maxParamId := params.foldl (init := 0) fun acc (sym, _) => max acc sym.id
     let initialFreshId := maxParamId + 1
 
-    let setupResult : Except String (Context × ParamValueMap × Nat × List (Sym × BaseType)) :=
+    let setupResult : Except String (Context × ParamValueMap × Nat × List (Sym × BaseType) × List (String × Core.Ctype)) :=
       params.zip cParams |>.foldlM
-        (init := (Context.empty, ({} : ParamValueMap), initialFreshId, []))
-        fun (ctx, pvm, nextId, cnParamAcc) ((coreSym, _coreBt), (_, ctype)) =>
+        (init := (Context.empty, ({} : ParamValueMap), initialFreshId, [], []))
+        fun (ctx, pvm, nextId, cnParamAcc, cTypeAcc) ((coreSym, _coreBt), (_, ctype)) =>
           -- Use C type to get the actual value type
           match tryCtypeToCN ctype with
           | some cnBt =>
@@ -273,14 +273,19 @@ def checkFunctionWithParams
             -- Accumulate CN-level params for resolution (using coreSym for ID, cnBt for type)
             let cnParamAcc' := (coreSym, cnBt) :: cnParamAcc
 
-            Except.ok (ctx', pvm'', nextId, cnParamAcc')
+            -- Accumulate C types for pointer arithmetic elaboration
+            let cTypeAcc' := match coreSym.name with
+              | some name => (name, ctype) :: cTypeAcc
+              | none => cTypeAcc
+
+            Except.ok (ctx', pvm'', nextId, cnParamAcc', cTypeAcc')
           | none =>
             Except.error s!"Unsupported parameter type for {coreSym.name.getD "<unknown>"}: {repr ctype}"
 
     match setupResult with
     | .error msg =>
       TypeCheckResult.fail msg
-    | .ok (paramCtx, paramValueMap, nextFreshId, cnParams) =>
+    | .ok (paramCtx, paramValueMap, nextFreshId, cnParams, paramCTypes) =>
       -- Step 3: Convert return type to CN BaseType
       -- Corresponds to: WProc extracting return_bt from function type
       -- Prefer C return type (gives Bits types) over Core return type (gives unbounded Integer)
@@ -304,10 +309,11 @@ def checkFunctionWithParams
       -- This is the CN-matching approach: resolve names to symbols before type checking.
       -- Corresponds to: CN's Cabs_to_ail.desugar_cn_* functions
       -- Pass return type so 'return' symbol gets the correct type
-      let resolveResult := (Resolve.resolveFunctionSpec spec cnParams.reverse returnBt nextFreshId).mapError fun e =>
+      let resolveResult := (Resolve.resolveFunctionSpec spec cnParams.reverse returnBt nextFreshId paramCTypes).mapError fun e =>
         match e with
         | .symbolNotFound name => s!"Symbol not found: {name}"
         | .integerTooLarge n => s!"Integer too large for any CN type: {n}"
+        | .unknownPointeeType msg => s!"Pointer arithmetic error: {msg}"
       match resolveResult with
       | .error msg => TypeCheckResult.fail msg
       | .ok resolvedSpec =>
