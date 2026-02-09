@@ -741,12 +741,18 @@ def storeImpl (ty : Ctype) (isLocking : Bool) (ptr : PointerValue) (val : MemVal
     | none => pure ()
 
     -- Lock if requested
+    -- Corresponds to: impl_mem.ml:1749-1784 (is_locking branch)
+    -- Derives readonly kind from allocation prefix (impl_mem.ml:1704-1710 select_ro_kind)
     if isLocking then
       let st ← get
       let allocId := toAllocId ptr.prov
       match st.allocations[allocId]? with
       | some allocRec =>
-        set { st with allocations := st.allocations.insert allocId { allocRec with isReadonly := .readonly .constQualified } }
+        let roKind := match allocRec.name with
+          | "PrefStringLiteral" => ReadonlyKind.stringLiteral
+          | "PrefTemporaryLifetime" => ReadonlyKind.temporaryLifetime
+          | _ => ReadonlyKind.constQualified
+        set { st with allocations := st.allocations.insert allocId { allocRec with isReadonly := .readonly roKind } }
       | none => panic! s!"storeImpl: allocation {allocId} not found when trying to lock"
 
     pure { kind := .write, base := addr, size := size }

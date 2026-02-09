@@ -34,9 +34,9 @@ def targetPtrSize : Nat := 8
 
 /-- Target maximum alignment.
     Corresponds to: max_alignment in ocaml_implementation.ml:151-152
-    Audited: 2026-01-01
-    Deviations: Cerberus uses 8, we use 16 for x86_64 compatibility -/
-def targetMaxAlign : Nat := 16
+    Audited: 2026-02-09
+    Deviations: None -/
+def targetMaxAlign : Nat := 8
 
 /-! ## Integer Type Sizes
 

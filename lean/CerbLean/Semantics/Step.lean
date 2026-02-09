@@ -519,10 +519,17 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
     pure (.continue_ { st' with arena := body })
 
   -- Erun: jump to labeled continuation
-  -- Corresponds to: core_run.lem:1509-1530
+  -- Corresponds to: core_reduction.lem:1393-1417
+  -- In core_reduction.lem, Erun replaces arena and env in th_st:
+  --   E.return <| th_st with arena= cont_expr; env= env' |>
+  -- Our stack model uses pushEmptyCont to reset the current frame's continuation.
+  -- This is safe because Erun appears in tail position in well-formed Core programs,
+  -- so _cont is [] when Erun fires (all intermediate continuations have been popped).
+  -- pushEmptyCont (some proc) parent = .cons proc [] parent, which equals the unchanged
+  -- stack when _cont is already []. The pushEmptyCont serves as a defensive reset.
   | .run sym pes, .cons (some currentProc) _cont parent =>
     -- Two-level lookup: first by procedure, then by label
-    -- Corresponds to: Maybe.bind (Map.lookup proc_sym st.labeled) (Map.lookup sym)
+    -- Corresponds to: Maybe.bind (Map.lookup proc_sym run_st.labeled) (Map.lookup sym)
     let procConts : Option LabeledConts := Std.HashMap.get? allLabeledConts currentProc
     match procConts.bind (fun conts => Std.HashMap.get? conts sym) with
     | none =>
@@ -535,7 +542,7 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
         throw (.typeError s!"Erun '{sym.name}': wrong number of arguments")
       let bindings := labeledCont.params.zip cvals
       let env' := bindAllInEnv bindings st.env
-      -- Push empty continuation for new "procedure" context
+      -- Reset continuation for fresh body evaluation (see comment above)
       let newStack := Stack.pushEmptyCont (some currentProc) parent
       pure (.continue_ { st with
         arena := labeledCont.body
@@ -782,18 +789,8 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
             pure (.continue_ { st with arena := mkAnnotatedValueExpr arenaAnnots dynAnnots resultVal })
           | none =>
             throw (.typeError s!"store: value doesn't match type")
-        | .ctype ty, .loaded (.specified (.pointer ptr)) =>
-          match memValueFromValue ty cval with
-          | some mval =>
-            let fp ← InterpM.liftMem (storeImpl ty isLocking ptr mval)
-            let resultVal := Value.unit
-            -- Create DA_pos annotation (this is a pos polarity action)
-            let dynAnnots : DynAnnotations := [.pos exclusionSet fp]
-            pure (.continue_ { st with arena := mkAnnotatedValueExpr arenaAnnots dynAnnots resultVal })
-          | none =>
-            throw (.typeError s!"store: value doesn't match type")
         | _, _ =>
-          throw (.typeError "store: expected ctype and pointer")
+          throw (.typeError "store: expected ctype and object pointer")
 
       -- Load: load value from memory (POSITIVE POLARITY ONLY)
       -- Corresponds to: core_reduction.lem:724-734 (Load case)
@@ -816,14 +813,8 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
           -- Create DA_pos annotation (this is a pos polarity action)
           let dynAnnots : DynAnnotations := [.pos exclusionSet fp]
           pure (.continue_ { st with arena := mkAnnotatedValueExpr arenaAnnots dynAnnots resultVal })
-        | .ctype ty, .loaded (.specified (.pointer ptr)) =>
-          let (fp, mval) ← InterpM.liftMem (loadImpl ty ptr)
-          let resultVal := valueFromMemValue mval
-          -- Create DA_pos annotation (this is a pos polarity action)
-          let dynAnnots : DynAnnotations := [.pos exclusionSet fp]
-          pure (.continue_ { st with arena := mkAnnotatedValueExpr arenaAnnots dynAnnots resultVal })
         | _, _ =>
-          throw (.typeError "load: expected ctype and pointer")
+          throw (.typeError "load: expected ctype and object pointer")
 
       -- SeqRMW: sequential read-modify-write (increment/decrement)
       -- Corresponds to: core_reduction.lem:1214-1276 and driver.lem:704-714

@@ -349,7 +349,8 @@ are in the MemoryOps typeclass and perform bounds checking.
     Deviations: None -/
 def arrayShiftPtrval (env : TypeEnv) (ptr : PointerValue) (elemTy : Ctype) (n : IntegerValue) : PointerValue :=
   match ptr.base with
-  | .null ty => { ptr with base := .null ty }  -- NULL + n = NULL
+  -- Cerberus: impl_mem.ml:2214-2217 — shifting NULL is undefined behaviour
+  | .null _ => panic! "arrayShiftPtrval: shifting a NULL pointer is undefined behaviour"
   | .function sym => { ptr with base := .function sym }  -- Keep function ptr
   | .concrete unionMem addr =>
     let elemSize := sizeof env elemTy
