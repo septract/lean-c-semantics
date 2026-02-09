@@ -229,10 +229,12 @@ class MemoryOps (m : Type → Type) where
   getTypeEnv : m TypeEnv
 
   /-- Allocate memory for a typed object.
-      Corresponds to: allocate_object in memory_model.ml:47-55
+      Corresponds to: allocate_object in impl_mem.ml:1288
+      Cerberus signature: allocate_object tid pref align ty req_addr_opt init_opt
+      Size is computed internally via sizeof(ty), not passed as a parameter.
       - name: debug name for allocation (Symbol.prefix in Cerberus)
       - align: alignment constraint as integer value
-      - ty: C type of allocation
+      - ty: C type of allocation (size computed via sizeof)
       - requestedAddr: optional address (cerb::with_address attribute)
       - init: optional initial value (makes allocation read-only) -/
   allocateObject : String → IntegerValue → Ctype → Option Nat → Option MemValue → m PointerValue

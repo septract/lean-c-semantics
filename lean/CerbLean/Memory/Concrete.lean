@@ -1088,10 +1088,12 @@ Audited: 2026-01-01
 instance : MemoryOps ConcreteMemM where
   getTypeEnv := read
 
-  allocateObject name size ty align init := do
+  -- Corresponds to: allocate_object in impl_mem.ml:1288
+  -- Cerberus computes size from sizeof(ty), not from parameter
+  allocateObject name align ty requestedAddr init := do
     let env ← read
-    let sz := size.val.toNat
-    let al := align.getD (alignof env ty)
+    let sz := sizeof env ty
+    let al := align.val.toNat
     allocateImpl name sz (some ty) al .writable init
 
   allocateRegion name size align := do
