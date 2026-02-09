@@ -540,32 +540,37 @@ partial def termToSmtTerm (env : Option TypeEnv) : Types.Term → TranslateResul
     | .unsupported r, _ => .unsupported r
     | _, .unsupported r => .unsupported r
   | .representable ct val =>
-    -- representable(ct, val) checks if val fits in the integer type ct
-    -- For BitVec types, representability is trivially true (bounded by type)
-    -- For unbounded Integer types, we need explicit range checks
-    let valBt := val.bt
-    if isBitsType valBt then
-      -- BitVec values are already bounded by their type width
-      -- Representability is trivially true
-      .ok (Term.symbolT "true")
-    else
-      -- For unbounded integers, generate range constraint
-      match annotTermToSmtTerm env val with
-      | .unsupported r => .unsupported r
-      | .ok valTm =>
-        match ct.ty with
-        | .basic (.integer ity) =>
+    -- representable(ct, val): CN's value_check `Representable mode (indexTerms.ml:959-1010)
+    -- Dispatch on C type, matching CN's aux function:
+    --   Void/Byte → true
+    --   Integer → range check (in_z_range)
+    --   Pointer → true (value_check_pointer `Representable, indexTerms.ml:936)
+    --   Struct → recursive per-field (not yet implemented)
+    --   Array → recursive per-element (not yet implemented)
+    match ct.ty with
+    | .void | .byte => .ok (Term.symbolT "true")
+    | .basic (.integer ity) =>
+      -- For BitVec values, representability is trivially true (bounded by type width)
+      if isBitsType val.bt then
+        .ok (Term.symbolT "true")
+      else
+        -- For unbounded integers, generate range constraint
+        match annotTermToSmtTerm env val with
+        | .unsupported r => .unsupported r
+        | .ok valTm =>
           let bounds := integerTypeBounds ity
           match bounds with
           | some (lo, hi) =>
-            -- Generate: lo <= val && val < hi
             let loTm := Term.literalT (toString lo)
             let hiTm := Term.literalT (toString hi)
             let loCond := Term.mkApp2 (Term.symbolT "<=") loTm valTm
             let hiCond := Term.mkApp2 (Term.symbolT "<") valTm hiTm
             .ok (Term.mkApp2 (Term.symbolT "and") loCond hiCond)
-          | none => .unsupported s!"representable for {repr ity}"
-        | _ => .unsupported s!"representable for non-integer type"
+          | none => .unsupported s!"representable: no bounds for {repr ity}"
+    | .pointer _ _ =>
+      -- CN: value_check_pointer `Representable returns bool_ true (indexTerms.ml:936)
+      .ok (Term.symbolT "true")
+    | _ => .unsupported s!"representable for {repr ct.ty}"
   | .good ct _val =>
     -- good(ct, val) checks val is representable in ct - needs proper handling
     .unsupported s!"good (type check for {repr ct.ty})"

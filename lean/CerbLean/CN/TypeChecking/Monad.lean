@@ -141,7 +141,7 @@ abbrev ParamValueMap := Std.HashMap Nat IndexTerm
 
 /-- Typing monad state
     Corresponds to: s in typing.ml lines 11-17
-    Simplified: we omit sym_eqs, movable_indices, log for now
+    Simplified: we omit movable_indices, log for now
 
     All proof queries go through obligation accumulation. Type checking
     produces obligations that are discharged by an external SMT solver. -/
@@ -173,6 +173,12 @@ structure TypingState where
       Used by struct resource unpacking (do_unfold_resources in CN).
       Corresponds to: Global.struct_decls in cn/lib/global.ml -/
   tagDefs : TagDefs := []
+  /-- Symbol equality map: tracks sym = value bindings extracted from constraints.
+      Corresponds to: sym_eqs in typing.ml:14.
+      CN uses this for term simplification (make_simp_ctxt, typing.ml:112-114).
+      We populate it to match CN's architecture; currently used for constraint
+      propagation, future use for simplification (H5). -/
+  symEqs : Std.HashMap Nat IndexTerm := {}
   /-- Accumulated proof obligations for post-hoc SMT discharge -/
   obligations : ObligationSet := []
   /-- Conditional failures: type errors from branches that may be dead.
@@ -297,15 +303,48 @@ def addAValue (s : Sym) (v : IndexTerm) (loc : Loc) (desc : String) : TypingM Un
 def addL (s : Sym) (bt : BaseType) (loc : Loc) (desc : String) : TypingM Unit := do
   modifyContext (Context.addL s bt ⟨loc, desc⟩)
 
-/-- Add a logical variable with a value
-    Corresponds to: add_l_value in typing.ml -/
+/-- Add a logical variable with a value.
+    Corresponds to: add_l_value in typing.ml:349-354.
+    Records sym = value in symEqs (CN's add_sym_eqs, typing.ml:352-354),
+    and adds equality constraint so it's available as an SMT assumption. -/
 def addLValue (s : Sym) (v : IndexTerm) (loc : Loc) (desc : String) : TypingM Unit := do
   modifyContext (Context.addLValue s v ⟨loc, desc⟩)
+  -- CN typing.ml:352-354: add_sym_eqs [(sym, value)]
+  modifyState fun st => { st with symEqs := st.symEqs.insert s.id v }
+  -- Add equality constraint so SMT solver knows sym = value.
+  -- CN achieves this via term substitution in make_simp_ctxt (typing.ml:112-114);
+  -- we use explicit context constraints instead since we lack that infrastructure (H5).
+  -- Uses modifyContext directly (not TypingM.addC) to avoid redundant symEqs insertion.
+  let symTerm := AnnotTerm.mk (.sym s) v.bt loc
+  let eqTerm := AnnotTerm.mk (.binop .eq symTerm v) .bool loc
+  modifyContext (Context.addC (.t eqTerm))
 
-/-- Add a constraint
-    Corresponds to: add_c in typing.ml -/
+/-- Extract symbol equality from constraint if it's of form `sym == expr`.
+    Corresponds to: LC.is_sym_lhs_equality in logicalConstraints.ml:61-67 -/
+def isSymLhsEquality (lc : LogicalConstraint) : Option (Sym × IndexTerm) :=
+  match lc with
+  | .t t =>
+    match t.term with
+    | .binop .eq lhs rhs =>
+      match lhs.term with
+      | .sym s => some (s, rhs)
+      | _ => none
+    | _ => none
+  | _ => none
+
+/-- Add a constraint.
+    Corresponds to: add_c in typing.ml:403-412.
+    Adds the constraint to context and extracts symbol equalities
+    (CN's add_sym_eqs, typing.ml:410). -/
 def addC (lc : LogicalConstraint) : TypingM Unit := do
   modifyContext (Context.addC lc)
+  -- CN typing.ml:410: add_sym_eqs (List.filter_map LC.is_sym_lhs_equality [lc])
+  -- If the constraint is of form `sym == expr`, record sym = expr in symEqs map.
+  -- CN uses sym_eqs for term simplification (make_simp_ctxt, typing.ml:112-114).
+  match isSymLhsEquality lc with
+  | some (s, v) =>
+    modifyState fun st => { st with symEqs := st.symEqs.insert s.id v }
+  | none => pure ()
 
 /-- Look up a tag definition from the state.
     Corresponds to: Sym.Map.find tag global.struct_decls -/
