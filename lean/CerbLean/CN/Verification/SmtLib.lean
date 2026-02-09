@@ -21,6 +21,7 @@
 -/
 
 import CerbLean.CN.Types
+import CerbLean.CN.TypeChecking.Resolve
 import CerbLean.CN.Verification.Obligation
 import CerbLean.Memory.Layout
 import Smt.Translate.Term
@@ -29,8 +30,9 @@ import Smt.Data.Sexp
 
 namespace CerbLean.CN.Verification.SmtLib
 
-open CerbLean.Core (Sym Identifier Loc Ctype Ctype_ IntegerType TagDef)
+open CerbLean.Core (Sym Identifier Loc Ctype Ctype_ IntegerType TagDef FieldDef)
 open CerbLean.CN.Types
+open CerbLean.CN.TypeChecking.Resolve (ctypeToOutputBaseType)
 open CerbLean.Memory (TypeEnv structOffsets sizeof)
 open Smt (Term)
 open Smt.Translate (Command)
@@ -78,6 +80,80 @@ def pointerPreamble : String :=
   "(define-fun addr_of ((p pointer)) (_ BitVec 64)\n" ++
   "  (ite ((_ is NULL) p) (_ bv0 64) (addr p)))\n"
 
+/-! ## Struct SMT Support
+
+CN declares each struct as an SMT datatype with a single constructor and
+selector functions for each field (solver.ml:1035-1067, CN_Structs).
+
+Naming conventions (solver.ml:15-24, CN_Names):
+- Struct sort name: `tag_name ++ "_" ++ tag_id`
+- Constructor name: same as sort name
+- Field selector: `member_name ++ "_struct_fld"`
+-/
+
+/-- Generate SMT struct type/constructor name from tag symbol.
+    Corresponds to: CN_Names.struct_name / struct_con_name in solver.ml:20-22 -/
+def structSmtName (tag : Sym) : String :=
+  match tag.name with
+  | some name => s!"{name}_{tag.id}"
+  | none => panic! s!"structSmtName: tag symbol has no name (id={tag.id})"
+
+/-- Generate SMT field selector name from member identifier.
+    Corresponds to: CN_Names.struct_field_name in solver.ml:24 -/
+def structFieldName (member : Identifier) : String :=
+  s!"{member.name}_struct_fld"
+
+/-- Convert a CN BaseType to an SMT sort string for struct field declarations.
+    Used when generating struct datatype declarations. -/
+private def baseTypeToSortString : BaseType → Option String
+  | .bits _ width => some s!"(_ BitVec {width})"
+  | .integer => some "Int"
+  | .bool => some "Bool"
+  | .real => some "Real"
+  | .loc => some "pointer"
+  | .allocId => some "Int"
+  | .unit => some "cn_tuple_0"
+  | .memByte => some "Int"
+  | .struct_ tag => some (structSmtName tag)
+  -- Types that don't have a straightforward SMT sort mapping.
+  -- Returning none causes generateStructDeclaration to skip the struct.
+  | .ctype => none
+  | .datatype _ => none
+  | .record _ => none
+  | .map _ _ => none
+  | .list _ => none
+  | .tuple _ => none
+  | .set _ => none
+  | .option _ => none
+
+/-- Generate SMT-LIB2 declare-datatype for a struct.
+    Produces: (declare-datatype name ((name (f1 sort1) (f2 sort2) ...)))
+    Corresponds to: CN_Structs.declare_struct in solver.ml:1036-1061
+    Returns none if any field type is unsupported. -/
+def generateStructDeclaration (tag : Sym) (members : List FieldDef) : Option String :=
+  let name := structSmtName tag
+  let fieldStrs := members.filterMap fun m =>
+    let bt := ctypeToOutputBaseType m.ty
+    (baseTypeToSortString bt).map fun sortStr =>
+      s!" ({structFieldName m.name} {sortStr})"
+  -- If any member type was unsupported (filterMap dropped it), check count
+  if fieldStrs.length != members.length then none
+  else
+    let fields := String.join fieldStrs
+    some s!"(declare-datatype {name} (({name}{fields})))\n"
+
+/-- Generate SMT preamble for all struct definitions in a TypeEnv.
+    Iterates tagDefs and generates declare-datatype for each struct.
+    Corresponds to: CN_Structs.declare in solver.ml:1064-1066 -/
+def generateStructPreamble (env : TypeEnv) : String :=
+  env.tagDefs.foldl (init := "") fun acc (tag, _, td) =>
+    match td with
+    | .struct_ members _ =>
+      match generateStructDeclaration tag members with
+      | some decl => acc ++ decl
+      | none => acc  -- Skip structs with unsupported field types
+    | .union_ _ => acc  -- CN does not support unions (check.ml:200)
+
 /-! ## Type-to-Sort Translation
 
 CN uses actual SMT-LIB BitVec types (`(_ BitVec n)`) with bitvector operations.
@@ -108,8 +184,7 @@ def baseTypeToSort : BaseType → SortResult
   | .unit => .ok (Term.symbolT "cn_tuple_0")  -- Unit as empty tuple (solver.ml:405)
   | .memByte => .ok (Term.symbolT "Int")  -- Memory bytes as integers
   | .struct_ tag =>
-    let tagStr := tag.name.getD "?"
-    .unsupported s!"struct type {tagStr}"
+    .ok (Term.symbolT (structSmtName tag))
   | .list elemBt =>
     let elemStr := toString (repr elemBt)
     .unsupported s!"list type (element: {elemStr})"
@@ -653,9 +728,63 @@ partial def termToSmtTerm (env : Option TypeEnv) : Types.Term → TranslateResul
         .unsupported s!"nthTuple index {n} out of bounds for tuple of size {elems.length}"
     | _ =>
       .unsupported s!"nthTuple on non-tuple term (index {n}, term type {repr tup.bt})"
-  | .struct_ _ _ => .unsupported "struct"
-  | .structMember _ _ => .unsupported "structMember"
-  | .structUpdate _ _ _ => .unsupported "structUpdate"
+  -- Struct construction: apply constructor to member values
+  -- Corresponds to: solver.ml:805-808 (IT.Struct)
+  | .struct_ tag members =>
+    let conName := structSmtName tag
+    -- Translate each member value
+    -- Translate all member values, collecting results
+    let (memberStrs, unsupErr) := members.foldl (init := ([], Option.none))
+      fun (acc, err) (_, t) =>
+        match err with
+        | some _ => (acc, err)  -- Already hit an error, skip rest
+        | none =>
+          match annotTermToSmtTerm env t with
+          | .ok term => (acc ++ [toString (Term.toSexp term)], none)
+          | .unsupported r => (acc, some r)
+    match unsupErr with
+    | some r => .unsupported s!"struct member: {r}"
+    | none =>
+      let argsStr := String.intercalate " " memberStrs
+      .ok (Term.literalT s!"({conName} {argsStr})")
+  -- Struct member access: apply selector function
+  -- Corresponds to: solver.ml:809-810 (IT.StructMember)
+  | .structMember obj member =>
+    match annotTermToSmtTerm env obj with
+    | .ok objTerm =>
+      let selName := structFieldName member
+      let objStr := toString (Term.toSexp objTerm)
+      .ok (Term.literalT s!"({selName} {objStr})")
+    | .unsupported r => .unsupported s!"structMember object: {r}"
+  -- Struct update: reconstruct with one field changed
+  -- Corresponds to: solver.ml:811-827 (IT.StructUpdate)
+  -- CN reconstructs the entire struct, copying all fields except the updated one.
+  -- We need TypeEnv to enumerate all fields.
+  | .structUpdate obj member value =>
+    match env with
+    | none => .unsupported "structUpdate requires TypeEnv"
+    | some e =>
+      -- Get the struct tag from the object's type
+      match obj.bt with
+      | .struct_ tag =>
+        match e.lookupTag tag with
+        | none => .unsupported s!"structUpdate: unknown struct tag {tag.name.getD "?"}"
+        | some (.struct_ members _) =>
+          -- For each member: if it's the updated one, use value; otherwise project from obj
+          match annotTermToSmtTerm env obj, annotTermToSmtTerm env value with
+          | .ok objTerm, .ok valTerm =>
+            let objStr := toString (Term.toSexp objTerm)
+            let valStr := toString (Term.toSexp valTerm)
+            let conName := structSmtName tag
+            let fieldStrs := members.map fun m =>
+              if m.name == member then valStr
+              else s!"({structFieldName m.name} {objStr})"
+            let argsStr := String.intercalate " " fieldStrs
+            .ok (Term.literalT s!"({conName} {argsStr})")
+          | .unsupported r, _ => .unsupported s!"structUpdate object: {r}"
+          | _, .unsupported r => .unsupported s!"structUpdate value: {r}"
+        | some (.union_ _) => .unsupported "structUpdate on union"
+      | _ => .unsupported s!"structUpdate: object type is not struct ({repr obj.bt})"
   | .record _ => .unsupported "record"
   | .recordMember _ _ => .unsupported "recordMember"
   | .recordUpdate _ _ _ => .unsupported "recordUpdate"
@@ -921,7 +1050,10 @@ def obligationToSmtLib2 (ob : Obligation) (env : Option TypeEnv := none)
     : String × List String :=
   let (cmds, errors) := obligationToCommands ob env
   let queryStr := Command.cmdsAsQuery cmds
-  let withComment := s!"; Obligation: {ob.description}\n{pointerPreamble}{queryStr}"
+  let structDecls := match env with
+    | some e => generateStructPreamble e
+    | none => ""
+  let withComment := s!"; Obligation: {ob.description}\n{pointerPreamble}{structDecls}{queryStr}"
   (withComment, errors)
 
 /-- Serialize multiple obligations, each as a separate query -/

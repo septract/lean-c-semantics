@@ -94,6 +94,10 @@ def checkObligation
       -- Emit pointer preamble (declare-datatype + helpers) as raw SMT-LIB2
       let st ← get
       st.proc.stdin.putStr pointerPreamble
+      -- Emit struct datatype declarations if TypeEnv is available
+      match env with
+      | some e => st.proc.stdin.putStr (generateStructPreamble e)
+      | none => pure ()
       st.proc.stdin.flush
       -- Emit all commands except checkSat (we'll call it separately)
       for cmd in cmds.dropLast do

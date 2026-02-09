@@ -31,10 +31,11 @@
 
 import CerbLean.CN.Types
 import CerbLean.Core
+import CerbLean.Core.File
 
 namespace CerbLean.CN.TypeChecking.Resolve
 
-open CerbLean.Core (Sym Loc Ctype Ctype_)
+open CerbLean.Core (Sym Loc Ctype Ctype_ TagDefs)
 open CerbLean.CN.Types
 
 /-! ## Resolution Context
@@ -53,6 +54,10 @@ structure ResolveContext where
       Corresponds to: CN's Loc(Some ct) carrying pointee types in BaseTypes.ml.
       Our BaseType.loc doesn't carry the pointee type, so we store it separately. -/
   paramCTypes : List (String × Ctype) := []
+  /-- Tag definitions for resolving struct/union tags from parsed specs.
+      Corresponds to: CN's Cabs_to_ail resolving struct tag names to Sym.t.
+      The CN parser creates struct tags with id=0; we resolve them here. -/
+  tagDefs : TagDefs := []
   deriving Inhabited
 
 namespace ResolveContext
@@ -83,6 +88,58 @@ def fresh (ctx : ResolveContext) (name : String) (bt : BaseType) : ResolveContex
   (ctx', sym)
 
 end ResolveContext
+
+/-! ## Struct Tag Resolution
+
+The CN parser creates struct/union tags with placeholder id=0.
+CN resolves these during Cabs_to_ail by looking up tag names in the C translation environment.
+We do the same here using tagDefs from the Core file.
+-/
+
+/-- Resolve a struct tag by looking up its name in tagDefs.
+    If the tag has id=0 (unresolved from parser), find the real tag by name.
+    If the tag already has a real id, return it unchanged.
+    Corresponds to: CN's resolve_cn_ident for struct tags in Cabs_to_ail -/
+def resolveTag (tagDefs : TagDefs) (tag : Sym) : Sym :=
+  if tag.id != 0 then tag  -- Already resolved
+  else
+    match tag.name with
+    | some name =>
+      match tagDefs.find? (fun (s, _) => s.name == some name) with
+      | some (realTag, _) => realTag
+      | none => panic! s!"resolveTag: struct/union tag '{name}' not found in tagDefs"
+    | none => panic! s!"resolveTag: tag symbol has no name (id={tag.id})"
+
+/-- Resolve struct/union tags in a Ctype_ inner type.
+    Recursively fixes all struct/union tags with id=0. -/
+partial def resolveCtypeInnerTag (tagDefs : TagDefs) : Ctype_ → Ctype_
+  | .struct_ tag => .struct_ (resolveTag tagDefs tag)
+  | .union_ tag => .union_ (resolveTag tagDefs tag)
+  | .pointer q inner => .pointer q (resolveCtypeInnerTag tagDefs inner)
+  | .array inner sz => .array (resolveCtypeInnerTag tagDefs inner) sz
+  | .atomic inner => .atomic (resolveCtypeInnerTag tagDefs inner)
+  | .function rq rt ps v =>
+    .function rq (resolveCtypeInnerTag tagDefs rt)
+      (ps.map fun (q, t, b) => (q, resolveCtypeInnerTag tagDefs t, b)) v
+  | .functionNoParams rq rt => .functionNoParams rq (resolveCtypeInnerTag tagDefs rt)
+  | other => other
+
+/-- Resolve struct/union tags in a Ctype. -/
+def resolveCtypeTag (tagDefs : TagDefs) (ct : Ctype) : Ctype :=
+  { ct with ty := resolveCtypeInnerTag tagDefs ct.ty }
+
+/-- Resolve struct/union tags in a ResourceName.
+    Fixes the Ctype inside Owned<T> predicates. -/
+def resolveResourceNameTag (tagDefs : TagDefs) (rn : ResourceName) : ResourceName :=
+  match rn with
+  | .owned ct init => .owned (resolveCtypeTag tagDefs ct) init
+  | .pname _ => rn
+
+/-- Resolve struct/union tags in a BaseType. -/
+def resolveBaseTypeTag (tagDefs : TagDefs) (bt : BaseType) : BaseType :=
+  match bt with
+  | .struct_ tag => .struct_ (resolveTag tagDefs tag)
+  | other => other
 
 /-! ## Pointer Arithmetic Elaboration
 
@@ -369,7 +426,7 @@ partial def resolveTerm (ctx : ResolveContext) (t : Term)
   | .nthTuple n tup => return .nthTuple n (← resolveAnnotTerm ctx tup none)
   | .struct_ tag members =>
     let members' ← members.mapM fun (id, t) => do return (id, ← resolveAnnotTerm ctx t none)
-    return .struct_ tag members'
+    return .struct_ (resolveTag ctx.tagDefs tag) members'
   | .structMember obj member => return .structMember (← resolveAnnotTerm ctx obj none) member
   | .structUpdate obj member value => return .structUpdate (← resolveAnnotTerm ctx obj none) member (← resolveAnnotTerm ctx value none)
   | .record members =>
@@ -380,7 +437,7 @@ partial def resolveTerm (ctx : ResolveContext) (t : Term)
   | .constructor constr args =>
     let args' ← args.mapM fun (id, t) => do return (id, ← resolveAnnotTerm ctx t none)
     return .constructor constr args'
-  | .memberShift ptr tag member => return .memberShift (← resolveAnnotTerm ctx ptr none) tag member
+  | .memberShift ptr tag member => return .memberShift (← resolveAnnotTerm ctx ptr none) (resolveTag ctx.tagDefs tag) member
   | .arrayShift base ct idx => return .arrayShift (← resolveAnnotTerm ctx base none) ct (← resolveAnnotTerm ctx idx none)
   | .copyAllocId addr loc => return .copyAllocId (← resolveAnnotTerm ctx addr none) (← resolveAnnotTerm ctx loc none)
   | .hasAllocId ptr => return .hasAllocId (← resolveAnnotTerm ctx ptr none)
@@ -531,24 +588,29 @@ partial def resolveAnnotTerm (ctx : ResolveContext) (at_ : AnnotTerm)
   | .mk t bt loc =>
     -- For other terms, resolve recursively with expected type, preserve original type
     let t' ← resolveTerm ctx t expectedBt
-    return .mk t' bt loc
+    return .mk t' (resolveBaseTypeTag ctx.tagDefs bt) loc
 
 end
 
 /-! ## Resource Resolution -/
 
-/-- Resolve symbols in a Predicate -/
+/-- Resolve symbols in a Predicate.
+    Also resolves struct/union tags in the resource name (Owned<struct T> → proper tag ID).
+    Corresponds to: CN's Cabs_to_ail resolving struct names in resource types -/
 def resolvePredicate (ctx : ResolveContext) (p : Predicate) : ResolveResult Predicate := do
   let pointer' ← resolveAnnotTerm ctx p.pointer
   let iargs' ← p.iargs.mapM (resolveAnnotTerm ctx)
-  return { p with pointer := pointer', iargs := iargs' }
+  let name' := resolveResourceNameTag ctx.tagDefs p.name
+  return { p with name := name', pointer := pointer', iargs := iargs' }
 
-/-- Resolve symbols in a QPredicate -/
+/-- Resolve symbols in a QPredicate.
+    Also resolves struct/union tags in the resource name. -/
 def resolveQPredicate (ctx : ResolveContext) (qp : QPredicate) : ResolveResult QPredicate := do
   let pointer' ← resolveAnnotTerm ctx qp.pointer
   let permission' ← resolveAnnotTerm ctx qp.permission
   let iargs' ← qp.iargs.mapM (resolveAnnotTerm ctx)
-  return { qp with pointer := pointer', permission := permission', iargs := iargs' }
+  let name' := resolveResourceNameTag ctx.tagDefs qp.name
+  return { qp with name := name', pointer := pointer', permission := permission', iargs := iargs' }
 
 /-- Resolve symbols in a Request -/
 def resolveRequest (ctx : ResolveContext) (req : Request) : ResolveResult Request := do
@@ -646,6 +708,7 @@ def resolveFunctionSpec
     (returnType : BaseType := .unit)
     (nextFreshId : Nat := 1000)
     (paramCTypes : List (String × Ctype) := [])
+    (tagDefs : TagDefs := [])
     : ResolveResult FunctionSpec := do
   -- Build initial context with parameters INCLUDING TYPES
   let paramCtx : ResolveContext := {
@@ -653,6 +716,7 @@ def resolveFunctionSpec
       sym.name.map fun name => (name, sym, bt)
     nextFreshId := nextFreshId
     paramCTypes := paramCTypes
+    tagDefs := tagDefs
   }
 
   -- Create fresh return symbol with return type and add to context
