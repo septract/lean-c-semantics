@@ -273,12 +273,10 @@ def evalIntOp (op : Binop) (v1 v2 : IntegerValue) : InterpM Value := do
   | .le => pure (if n1 <= n2 then .true_ else .false_)
   | .gt => pure (if n1 > n2 then .true_ else .false_)
   | .ge => pure (if n1 >= n2 then .true_ else .false_)
-  | .and =>
-    let result := n1.toNat &&& n2.toNat
-    pure (.object (.integer { val := result, prov := .none }))
-  | .or =>
-    let result := n1.toNat ||| n2.toNat
-    pure (.object (.integer { val := result, prov := .none }))
+  -- OpAnd/OpOr are boolean-only operators in Cerberus (core_eval.lem:454-514).
+  -- Integer bitwise operations use CivAND/CivOR/CivXOR constructors instead.
+  | .and => InterpM.throwTypeError "OpAnd is boolean-only; use CivAND for bitwise AND"
+  | .or => InterpM.throwTypeError "OpOr is boolean-only; use CivOR for bitwise OR"
 
 /-- Extract integer from value -/
 def valueToInt (v : Value) : Option IntegerValue :=
@@ -361,7 +359,7 @@ def valueFromMemValue (mv : MemValue) : Value :=
     let lvs := mvs.map fun mv' =>
       match valueFromMemValue mv' with
       | .loaded lv => lv
-      | _ => .unspecified .void
+      | _ => panic! "valueFromMemValue: array element returned non-loaded value"
     .loaded (.specified (.array lvs))
   | .struct_ tag members =>
     let structMembers := members.map fun (name, ty, mval) =>
@@ -476,11 +474,12 @@ def evalCtor (c : Ctor) (args : List Value) : InterpM Value := do
 
   | .array =>
     -- Convert values to loaded values for array
-    let loadedVals := args.map fun v =>
+    -- Corresponds to: core_eval.lem:616-631
+    let loadedVals ← args.mapM fun v =>
       match v with
-      | .loaded lv => lv
-      | .object ov => .specified ov
-      | _ => .unspecified .void  -- Fallback
+      | .loaded lv => pure lv
+      | .object ov => pure (.specified ov)
+      | _ => InterpM.throwTypeError "Carray: expected loaded or object value"
     pure (.object (.array loadedVals))
 
   | .specified =>
@@ -635,6 +634,11 @@ Corresponds to: core_eval.lem:61-110 and core.lem:243-245
 def convertInt (ity : IntegerType) (v : Value) : InterpM Value := do
   match valueToInt v with
   | some iv =>
+    -- _Bool special case: any non-zero value becomes 1 (C11 6.3.1.2)
+    -- Corresponds to: core_eval.lem:66-67
+    if ity == .bool then
+      let boolVal := if iv.val == 0 then 0 else 1
+      return .object (.integer { val := boolVal, prov := iv.prov })
     let env ← InterpM.getTypeEnv
     let maxVal := (maxIval env ity).val
     let minVal := (minIval env ity).val
@@ -656,14 +660,16 @@ def convertInt (ity : IntegerType) (v : Value) : InterpM Value := do
 def wrapIntOp (ity : IntegerType) (iop : Iop) (v1 v2 : Value) : InterpM Value := do
   match valueToInt v1, valueToInt v2 with
   | some i1, some i2 =>
+    -- Division/modulo by zero is UB (C11 6.5.5)
+    if (iop == .div || iop == .rem_t) && i2.val == 0 then
+      if iop == .div then InterpM.throwUB .ub045a_divisionByZero
+      else InterpM.throwUB .ub045b_moduloByZero
     let result : Int := match iop with
       | .add => i1.val + i2.val
       | .sub => i1.val - i2.val
       | .mul => i1.val * i2.val
-      -- Use tdiv for C-style truncated division towards zero (not floor division)
-      | .div => if i2.val != 0 then i1.val.tdiv i2.val else 0
-      -- Use tmod for C-style truncated remainder (sign follows dividend)
-      | .rem_t => if i2.val != 0 then i1.val.tmod i2.val else 0
+      | .div => i1.val.tdiv i2.val  -- safe: zero checked above
+      | .rem_t => i1.val.tmod i2.val  -- safe: zero checked above
       | .shl => i1.val <<< i2.val.toNat
       | .shr => i1.val >>> i2.val.toNat
     let env ← InterpM.getTypeEnv
@@ -686,14 +692,16 @@ def wrapIntOp (ity : IntegerType) (iop : Iop) (v1 v2 : Value) : InterpM Value :=
 def catchExceptionalOp (ity : IntegerType) (iop : Iop) (v1 v2 : Value) : InterpM Value := do
   match valueToInt v1, valueToInt v2 with
   | some i1, some i2 =>
+    -- Division/modulo by zero is UB (C11 6.5.5)
+    if (iop == .div || iop == .rem_t) && i2.val == 0 then
+      if iop == .div then InterpM.throwUB .ub045a_divisionByZero
+      else InterpM.throwUB .ub045b_moduloByZero
     let result : Int := match iop with
       | .add => i1.val + i2.val
       | .sub => i1.val - i2.val
       | .mul => i1.val * i2.val
-      -- Use tdiv for C-style truncated division towards zero (not floor division)
-      | .div => if i2.val != 0 then i1.val.tdiv i2.val else 0
-      -- Use tmod for C-style truncated remainder (sign follows dividend)
-      | .rem_t => if i2.val != 0 then i1.val.tmod i2.val else 0
+      | .div => i1.val.tdiv i2.val  -- safe: zero checked above
+      | .rem_t => i1.val.tmod i2.val  -- safe: zero checked above
       | .shl => i1.val <<< i2.val.toNat
       | .shr => i1.val >>> i2.val.toNat
     let env ← InterpM.getTypeEnv
