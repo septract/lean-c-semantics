@@ -35,6 +35,7 @@ namespace CerbLean.CN.Verification
 open CerbLean.CN.Verification.SmtSolver
 open CerbLean.CN.TypeChecking (checkFunction checkSpecStandalone)
 open CerbLean.CN.Types (FunctionSpec)
+open CerbLean.Memory (TypeEnv)
 
 /-! ## Verification Result -/
 
@@ -71,10 +72,11 @@ instance : ToString VerificationResult where
 def verifyObligations
     (obs : ObligationSet)
     (solver : SolverKind := .z3)
-    (timeout : Option Nat := some 10) : IO (List ObligationResult) := do
+    (timeout : Option Nat := some 10)
+    (env : Option TypeEnv := none) : IO (List ObligationResult) := do
   if obs.isEmpty then
     return []
-  checkObligations solver obs timeout
+  checkObligations solver obs timeout (env := env)
 
 /-- Verify a function specification (spec-only, no body).
 
@@ -84,7 +86,8 @@ def verifyObligations
 def verifySpec
     (spec : FunctionSpec)
     (solver : SolverKind := .z3)
-    (timeout : Option Nat := some 10) : IO VerificationResult := do
+    (timeout : Option Nat := some 10)
+    (env : Option TypeEnv := none) : IO VerificationResult := do
   -- Run type checking
   let tcResult := checkSpecStandalone spec
 
@@ -97,7 +100,7 @@ def verifySpec
     }
 
   -- Check obligations with SMT
-  let obResults ← verifyObligations tcResult.obligations solver timeout
+  let obResults ← verifyObligations tcResult.obligations solver timeout env
 
   return {
     typeCheckSuccess := true
