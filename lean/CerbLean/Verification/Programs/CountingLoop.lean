@@ -45,7 +45,7 @@ def loopSym : Sym := { id := 2, name := some "loop" }
 def iSym : Sym := { id := 4, name := some "i" }
 
 /-- Helper: make an integer value -/
-def mkInt (n : Int) : Value := .loaded (.specified (.integer ⟨n, .none⟩))
+def mkInt (n : Int) : Value := .object (.integer ⟨n, .none⟩)
 
 /-- Helper: make a pure expression from a value -/
 def mkPure (v : Value) : APexpr := { annots := [], ty := none, expr := .val v }
