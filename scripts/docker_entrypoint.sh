@@ -1,19 +1,15 @@
 #!/bin/bash
 # Docker entrypoint for CerbLean
-# Executes a C program through Cerberus → Lean pipeline
+# Executes a C program through Cerberus -> Lean pipeline
+#
+# NOTE: This script runs inside Docker, NOT on the host.
+# It does NOT source common.sh (different environment).
 #
 # Usage:
 #   cerblean [options] <file.c>
 #   cerblean --help
-#
-# Options:
-#   --batch       Output machine-readable result format
-#   --nolibc      Skip libc linking (faster, but fewer programs work)
-#   --cerberus    Run Cerberus only (skip Lean interpreter)
-#   --json        Output Core IR as JSON (for debugging)
-#   --help        Show this help message
 
-set -e
+set -euo pipefail
 
 # Cerberus is installed via opam, available in PATH
 CERBERUS="cerberus"
@@ -107,40 +103,41 @@ if [[ ! -f "$INPUT_FILE" ]]; then
     exit 1
 fi
 
-# Build Cerberus flags
-CERBERUS_FLAGS=""
+# Build Cerberus flags as an array (proper quoting)
+CERBERUS_FLAGS=()
 if $NO_LIBC; then
-    CERBERUS_FLAGS="$CERBERUS_FLAGS --nolibc"
+    CERBERUS_FLAGS+=("--nolibc")
 fi
 
 # Mode: JSON output
 if $JSON_OUTPUT; then
-    exec $CERBERUS $CERBERUS_FLAGS --json_core_out=/dev/stdout "$INPUT_FILE"
+    exec "$CERBERUS" ${CERBERUS_FLAGS[@]+"${CERBERUS_FLAGS[@]}"} --json_core_out=/dev/stdout "$INPUT_FILE"
 fi
 
 # Mode: Cerberus only
 if $CERBERUS_ONLY; then
     if $BATCH_MODE; then
-        exec $CERBERUS $CERBERUS_FLAGS --exec --batch "$INPUT_FILE"
+        exec "$CERBERUS" ${CERBERUS_FLAGS[@]+"${CERBERUS_FLAGS[@]}"} --exec --batch "$INPUT_FILE"
     else
-        exec $CERBERUS $CERBERUS_FLAGS --exec "$INPUT_FILE"
+        exec "$CERBERUS" ${CERBERUS_FLAGS[@]+"${CERBERUS_FLAGS[@]}"} --exec "$INPUT_FILE"
     fi
 fi
 
-# Mode: Full pipeline (Cerberus → Lean)
+# Mode: Full pipeline (Cerberus -> Lean)
 # Create temporary file for JSON
-JSON_FILE=$(mktemp "${TMPDIR:-/tmp}/cerblean.XXXXXX.json")
-trap "rm -f $JSON_FILE" EXIT
+JSON_FILE=$(mktemp "${TMPDIR:-/tmp}/cerblean.XXXXXXXXXX")
+cleanup() { rm -f "$JSON_FILE"; }
+trap cleanup EXIT
 
 # Generate Core IR JSON
-if ! $CERBERUS $CERBERUS_FLAGS --json_core_out="$JSON_FILE" "$INPUT_FILE" 2>&1; then
+if ! "$CERBERUS" ${CERBERUS_FLAGS[@]+"${CERBERUS_FLAGS[@]}"} --json_core_out="$JSON_FILE" "$INPUT_FILE" 2>&1; then
     echo "Error: Cerberus failed to process $INPUT_FILE" >&2
     exit 1
 fi
 
 # Run Lean interpreter
 if $BATCH_MODE; then
-    exec $LEAN_INTERP --batch "$JSON_FILE"
+    exec "$LEAN_INTERP" --batch "$JSON_FILE"
 else
-    exec $LEAN_INTERP "$JSON_FILE"
+    exec "$LEAN_INTERP" "$JSON_FILE"
 fi

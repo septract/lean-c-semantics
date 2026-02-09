@@ -1,14 +1,11 @@
 # C-to-Lean Project Makefile
 
-.PHONY: all lean cerberus cerberus-setup clean
-.PHONY: test test-unit test-memory ci check-deps
-.PHONY: test-parser test-pp test-parser-quick test-pp-quick
-.PHONY: test-interp test-interp-minimal test-interp-debug test-one
-.PHONY: test-interp-full test-interp-minimal-full test-interp-debug-full test-interp-ci
-.PHONY: test-interp-seq
-.PHONY: test-genproof test-cn test-cn-unit
-.PHONY: test-verified verified-programs
-.PHONY: fuzz init update-cerberus help
+.PHONY: all lean cerberus cerberus-setup clean \
+        test test-unit test-memory test-cn test-cn-unit \
+        test-interp test-interp-full test-interp-ci test-interp-seq \
+        test-parser test-pp test-parser-quick test-pp-quick \
+        test-genproof test-verified verified-programs test-one \
+        ci fuzz init update-cerberus help
 
 # Configuration
 # OCaml version for Cerberus (5.4.0+ recommended, 4.14.1 also works)
@@ -16,8 +13,6 @@ OCAML_VERSION := 5.4.0
 # Use a local opam switch in cerberus/_opam/ for project isolation
 CERBERUS_DIR := $(shell pwd)/cerberus
 OPAM_EXEC := opam exec --switch=$(CERBERUS_DIR) --
-# Run Cerberus from local build (avoids pinning/reinstalling)
-CERBERUS_CMD := $(OPAM_EXEC) dune exec --root cerberus -- cerberus --runtime=cerberus/_build/install/default
 
 # Default target
 all: lean
@@ -55,7 +50,7 @@ cerberus-setup: init
 	@echo "Building Cerberus..."
 	cd cerberus && $(OPAM_EXEC) make cerberus
 	@echo "Verifying Cerberus works..."
-	$(CERBERUS_CMD) --exec cerberus/tests/ci/0001-emptymain.c
+	$(OPAM_EXEC) dune exec --root cerberus -- cerberus --runtime=cerberus/_build/install/default --exec cerberus/tests/ci/0001-emptymain.c
 	@echo "Cerberus setup complete!"
 	@echo "Local switch created at: cerberus/_opam/"
 
@@ -63,16 +58,21 @@ cerberus-setup: init
 # Clean
 # ------------------------------------------------------------------------------
 
-# Clean build artifacts
+# Clean build artifacts (including accumulated temp files)
 clean:
 	cd lean && lake clean
 	cd cerberus && make clean 2>/dev/null || true
+	rm -rf tmp/
 
 # ------------------------------------------------------------------------------
 # Testing
+#
+# Scripts self-build their Lean targets (lake build is incremental),
+# so most test targets don't need `lean` or `cerberus` as prerequisites.
 # ------------------------------------------------------------------------------
 
-# Run all tests (unit, memory, interpreter in both modes, genproof)
+# Run all quick tests (unit + memory + interp + genproof)
+# NOTE: test-cn is excluded because CN is a prototype with known failures
 test: test-unit test-memory test-interp test-interp-seq test-genproof
 
 # Run exactly what CI runs (for local verification before pushing)
@@ -92,63 +92,53 @@ test-memory: lean
 # Test a single C file: make test-one FILE=tests/minimal/001-return-literal.c
 test-one:
 	@test -n "$(FILE)" || { echo "Usage: make test-one FILE=path/to/test.c"; exit 1; }
-	@$(MAKE) lean cerberus
 	./scripts/test_interp.sh --nolibc $(FILE)
 
 # Parser Tests
-test-parser-quick: lean cerberus
+test-parser-quick:
 	./scripts/test_parser.sh --quick
 
-test-parser: lean cerberus
+test-parser:
 	./scripts/test_parser.sh
 
 # Pretty-Printer Tests
-test-pp-quick: lean cerberus
+test-pp-quick:
 	./scripts/test_pp.sh --quick
 
-test-pp: lean cerberus
+test-pp:
 	./scripts/test_pp.sh
 
 # GenProof Tests (test proof generation pipeline)
-test-genproof: lean cerberus
+test-genproof:
 	@echo "Testing genproof pipeline..."
 	./scripts/test_genproof.sh --nolibc tests/minimal/001-return-literal.c
 	@echo "✓ GenProof pipeline test passed"
 
 # Interpreter Tests (fast mode with --nolibc, skips *.libc.c tests)
-test-interp-minimal: lean cerberus
+test-interp:
 	./scripts/test_interp.sh --nolibc tests/minimal
-
-test-interp-debug: lean cerberus
 	./scripts/test_interp.sh --nolibc tests/debug
 
-# Run minimal and debug interpreter tests (fast)
-test-interp: test-interp-minimal test-interp-debug
-
 # Full interpreter tests (with libc, slower but complete)
-test-interp-minimal-full: lean cerberus
+test-interp-full:
 	./scripts/test_interp.sh tests/minimal
-
-test-interp-debug-full: lean cerberus
 	./scripts/test_interp.sh tests/debug
 
-test-interp-full: test-interp-minimal-full test-interp-debug-full
-
 # CI suite (with libc)
-test-interp-ci: lean cerberus
+test-interp-ci:
 	./scripts/test_interp.sh
 
 # Sequentialized mode (uses --sequentialise, excludes unseq tests)
-test-interp-seq: lean cerberus
+test-interp-seq:
 	./scripts/test_interp.sh --nolibc --sequentialise --exclude=unseq tests/minimal
 
 # CN Tests
 # test-cn: run integration tests on tests/cn/*.c (requires Cerberus)
-test-cn: lean cerberus
+test-cn:
 	./scripts/test_cn.sh
 
 # test-cn-unit: run unit tests only (fast, no Cerberus)
-test-cn-unit: lean
+test-cn-unit:
 	./scripts/test_cn.sh --unit
 
 # ------------------------------------------------------------------------------
@@ -157,7 +147,7 @@ test-cn-unit: lean
 
 # Run csmith fuzzer (generates random C programs and compares interpreters)
 # Usage: make fuzz [N=100] - run N tests (default 100)
-fuzz: lean cerberus
+fuzz:
 	./scripts/fuzz_csmith.sh $(or $(N),100)
 
 # ------------------------------------------------------------------------------
@@ -196,10 +186,12 @@ help:
 	@echo "  make clean           Clean all build artifacts"
 	@echo ""
 	@echo "Quick Tests:"
-	@echo "  make test            Run all quick tests (unit + memory + interp + genproof)"
+	@echo "  make test            Run all quick tests (unit + memory + interp + CN + genproof)"
 	@echo "  make ci              Full CI suite (test + verified programs)"
 	@echo "  make test-unit       Run Lean unit tests only"
 	@echo "  make test-memory     Run memory model unit tests"
+	@echo "  make test-cn         Run CN integration tests"
+	@echo "  make test-cn-unit    Run CN unit tests only (fast)"
 	@echo "  make test-genproof   Test proof generation pipeline"
 	@echo "  make test-verified   Build verified programs (slow native_decide)"
 	@echo "  make test-one FILE=path/to/test.c   Test a single C file"

@@ -5,35 +5,34 @@
 # 3. Generate Lean proof file
 # 4. Test that the generated file compiles
 
-set -e
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-LEAN_DIR="$PROJECT_ROOT/lean"
-
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+set -euo pipefail
 
 usage() {
-    echo "Usage: $0 <input.c> [output_dir]"
-    echo ""
-    echo "Tests the full genproof pipeline on a C file."
-    echo ""
-    echo "Options:"
-    echo "  --nolibc       Use --nolibc with Cerberus (much smaller output)"
-    echo "  --no-strip     Skip the stripping step"
-    echo "  --aggressive   Use aggressive stripping"
-    echo "  --keep         Keep intermediate files"
-    echo "  --production   Output to lean/CerbLean/Verification/Programs/ with proper naming"
-    echo "  -v, --verbose  Show verbose output"
-    echo ""
-    echo "Example:"
-    echo "  $0 tests/minimal/001-return-literal.c"
-    echo "  $0 tests/minimal/001-return-literal.c --production  # Outputs to Verification/Programs/"
-    exit 1
+    cat <<'EOF'
+Test the full genproof pipeline on a C file.
+
+Usage: ./scripts/test_genproof.sh [options] <input.c> [output_dir]
+
+Arguments:
+  input.c       C source file to process
+  output_dir    Where to save output (default: auto temp dir)
+
+Options:
+  --nolibc       Use --nolibc with Cerberus (much smaller output)
+  --no-strip     Skip the JSON stripping step
+  --aggressive   Use aggressive stripping
+  --keep         Keep intermediate files (don't clean up)
+  --production   Output to lean/CerbLean/Verification/Programs/ with proper naming
+  -v, --verbose  Show verbose output
+  -h, --help     Show this help message
+
+Examples:
+  ./scripts/test_genproof.sh tests/minimal/001-return-literal.c
+  ./scripts/test_genproof.sh --nolibc tests/minimal/001-return-literal.c
+  ./scripts/test_genproof.sh tests/minimal/001-return-literal.c --production
+EOF
+    exit 0
 }
 
 # Parse arguments
@@ -48,6 +47,7 @@ OUTPUT_DIR=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
+        -h|--help) usage ;;
         --nolibc)
             NOLIBC=true
             shift
@@ -73,8 +73,10 @@ while [[ $# -gt 0 ]]; do
             VERBOSE=true
             shift
             ;;
-        -h|--help)
-            usage
+        -*)
+            echo "Unknown option: $1" >&2
+            echo "Use --help for usage information" >&2
+            exit 1
             ;;
         *)
             if [[ -z "$INPUT_FILE" ]]; then
@@ -82,7 +84,7 @@ while [[ $# -gt 0 ]]; do
             elif [[ -z "$OUTPUT_DIR" ]]; then
                 OUTPUT_DIR="$1"
             else
-                echo "Unknown argument: $1"
+                echo "Error: Too many arguments" >&2
                 usage
             fi
             shift
@@ -95,15 +97,27 @@ if [[ -z "$INPUT_FILE" ]]; then
 fi
 
 if [[ ! -f "$INPUT_FILE" ]]; then
-    echo -e "${RED}Error: Input file not found: $INPUT_FILE${NC}"
+    echo -e "${RED}Error: Input file not found: $INPUT_FILE${NC}" >&2
     exit 1
 fi
 
-# Convert basename to PascalCase module name (e.g., "001-return-literal" -> "001ReturnLiteral")
+# Build required targets
+build_lean cerblean_test
+build_lean cerblean_genproof
+
+# Convert basename to PascalCase module name (portable, no GNU awk needed)
 to_module_name() {
-    local name="$1"
-    # Remove extension, replace hyphens/underscores with spaces, title case, remove spaces
-    echo "$name" | sed 's/\.c$//' | sed 's/[-_]/ /g' | awk '{for(i=1;i<=NF;i++)$i=toupper(substr($i,1,1)) tolower(substr($i,2))}1' | tr -d ' '
+    local name="${1%.c}"
+    local IFS='-_'
+    local result=""
+    local word first_char
+    for word in $name; do
+        if [[ -n "$word" ]]; then
+            first_char=$(printf '%s' "${word:0:1}" | tr '[:lower:]' '[:upper:]')
+            result+="${first_char}${word:1}"
+        fi
+    done
+    printf '%s\n' "$result"
 }
 
 # Set up output directory
@@ -111,15 +125,13 @@ BASENAME=$(basename "$INPUT_FILE" .c)
 MODULE_NAME=$(to_module_name "$BASENAME")
 
 if [[ "$PRODUCTION" == "true" ]]; then
-    # Production mode: output to Verification/Programs with proper naming
     OUTPUT_DIR="$LEAN_DIR/CerbLean/Verification/Programs"
     LEAN_FILE="$OUTPUT_DIR/${MODULE_NAME}.lean"
     echo -e "${YELLOW}Production mode: outputting to $LEAN_FILE${NC}"
 elif [[ -z "$OUTPUT_DIR" ]]; then
-    mkdir -p "$PROJECT_ROOT/tmp"
-    OUTPUT_DIR=$(mktemp -d "$PROJECT_ROOT/tmp/genproof.XXXXXXXXXX")
-    if [[ "$KEEP" == "false" ]]; then
-        trap "rm -rf $OUTPUT_DIR" EXIT
+    OUTPUT_DIR=$(make_temp_dir "genproof")
+    if ! $KEEP; then
+        register_cleanup "$OUTPUT_DIR"
     fi
 fi
 mkdir -p "$OUTPUT_DIR"
@@ -131,19 +143,19 @@ if [[ "$PRODUCTION" != "true" ]]; then
 fi
 
 log() {
-    if [[ "$VERBOSE" == "true" ]]; then
+    if $VERBOSE; then
         echo -e "$1"
     fi
 }
 
 # Step 1: Run Cerberus to generate JSON
 echo -e "${YELLOW}[1/4] Running Cerberus...${NC}"
-CERBERUS_ARGS="--json_core_out=$JSON_FILE"
-if [[ "$NOLIBC" == "true" ]]; then
-    CERBERUS_ARGS="$CERBERUS_ARGS --nolibc"
+CERBERUS_ARGS=("--json_core_out=$JSON_FILE")
+if $NOLIBC; then
+    CERBERUS_ARGS+=("--nolibc")
 fi
-log "  cerberus $CERBERUS_ARGS $INPUT_FILE"
-if ! "$SCRIPT_DIR/cerberus" $CERBERUS_ARGS "$INPUT_FILE" 2>/dev/null; then
+log "  cerberus ${CERBERUS_ARGS[*]} $INPUT_FILE"
+if ! "$CERBERUS" "${CERBERUS_ARGS[@]}" "$INPUT_FILE" 2>/dev/null; then
     echo -e "${RED}FAILED: Cerberus failed to process $INPUT_FILE${NC}"
     exit 1
 fi
@@ -151,14 +163,14 @@ JSON_SIZE=$(wc -c < "$JSON_FILE" | tr -d ' ')
 log "  Generated: $JSON_FILE ($JSON_SIZE bytes)"
 
 # Step 2: Strip the JSON (optional)
-if [[ "$NO_STRIP" == "false" ]]; then
+if ! $NO_STRIP; then
     echo -e "${YELLOW}[2/4] Stripping JSON...${NC}"
-    STRIP_ARGS=""
-    if [[ "$AGGRESSIVE" == "true" ]]; then
-        STRIP_ARGS="--aggressive"
+    STRIP_ARGS=()
+    if $AGGRESSIVE; then
+        STRIP_ARGS+=("--aggressive")
     fi
-    log "  python3 strip_core_json.py $STRIP_ARGS $JSON_FILE $STRIPPED_FILE"
-    if ! python3 "$SCRIPT_DIR/strip_core_json.py" $STRIP_ARGS "$JSON_FILE" "$STRIPPED_FILE" 2>/dev/null; then
+    log "  python3 strip_core_json.py ${STRIP_ARGS[*]+"${STRIP_ARGS[*]}"} $JSON_FILE $STRIPPED_FILE"
+    if ! python3 "$SCRIPT_DIR/strip_core_json.py" ${STRIP_ARGS[@]+"${STRIP_ARGS[@]}"} "$JSON_FILE" "$STRIPPED_FILE" 2>/dev/null; then
         echo -e "${RED}FAILED: JSON stripping failed${NC}"
         exit 1
     fi
@@ -193,31 +205,28 @@ log "  Generated: $LEAN_FILE ($LEAN_SIZE bytes)"
 # Step 5: Test that the generated file compiles
 echo -e "${YELLOW}[5/5] Testing Lean compilation...${NC}"
 log "  lake env lean $LEAN_FILE"
-cd "$LEAN_DIR"
-if lake env lean "$LEAN_FILE" 2>&1 | head -20; then
-    # Check if there were errors
-    if lake env lean "$LEAN_FILE" 2>&1 | grep -q "error:"; then
-        echo -e "${RED}FAILED: Generated Lean file has errors${NC}"
-        echo ""
-        echo "Output file: $LEAN_FILE"
-        exit 1
-    else
-        echo -e "${GREEN}SUCCESS: Generated Lean file compiles${NC}"
-    fi
-else
-    echo -e "${RED}FAILED: Lean compilation failed${NC}"
+
+compile_output=$(cd "$LEAN_DIR" && lake env lean "$LEAN_FILE" 2>&1) || true
+echo "$compile_output" | head -20
+
+if echo "$compile_output" | grep -q "error:"; then
+    echo -e "${RED}FAILED: Generated Lean file has errors${NC}"
+    echo ""
+    echo "Output file: $LEAN_FILE"
     exit 1
+else
+    echo -e "${GREEN}SUCCESS: Generated Lean file compiles${NC}"
 fi
 
 echo ""
 echo "Output files:"
 echo "  JSON: $JSON_FILE"
-if [[ "$NO_STRIP" == "false" ]]; then
+if ! $NO_STRIP; then
     echo "  Stripped: $STRIPPED_FILE"
 fi
 echo "  Lean: $LEAN_FILE"
 
-if [[ "$KEEP" == "true" ]]; then
+if $KEEP; then
     echo ""
     echo "Files kept in: $OUTPUT_DIR"
 fi

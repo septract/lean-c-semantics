@@ -372,7 +372,7 @@ Output categories in `fuzz_log.txt`:
 
 Generate a single csmith test for debugging:
 ```bash
-./scripts/gen_csmith_test.sh 12345 tests/csmith/debug.c
+./scripts/gen_csmith.sh 12345 tests/csmith/debug.c
 ./scripts/test_interp.sh tests/csmith/debug.c
 ```
 
