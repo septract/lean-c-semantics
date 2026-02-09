@@ -24,7 +24,7 @@ import Std.Data.HashMap
 
 namespace CerbLean.CN.TypeChecking
 
-open CerbLean.Core (Sym Loc)
+open CerbLean.Core (Sym Loc Identifier FieldDef TagDef TagDefs)
 open CerbLean.Core.MuCore (LabelDefs LabelDef LabelInfo)
 open CerbLean.CN.Types
 open CerbLean.CN.Verification
@@ -169,6 +169,10 @@ structure TypingState where
       Used for lazy muCore transformation of ccall argument slots.
       Corresponds to: core_to_mucore function call argument transformation -/
   storeValues : Std.HashMap Nat IndexTerm := {}
+  /-- Tag definitions for struct/union layout lookup.
+      Used by struct resource unpacking (do_unfold_resources in CN).
+      Corresponds to: Global.struct_decls in cn/lib/global.ml -/
+  tagDefs : TagDefs := []
   /-- Accumulated proof obligations for post-hoc SMT discharge -/
   obligations : ObligationSet := []
   /-- Conditional failures: type errors from branches that may be dead.
@@ -302,6 +306,12 @@ def addLValue (s : Sym) (v : IndexTerm) (loc : Loc) (desc : String) : TypingM Un
     Corresponds to: add_c in typing.ml -/
 def addC (lc : LogicalConstraint) : TypingM Unit := do
   modifyContext (Context.addC lc)
+
+/-- Look up a tag definition from the state.
+    Corresponds to: Sym.Map.find tag global.struct_decls -/
+def lookupTag (tag : Sym) : TypingM (Option TagDef) := do
+  let s ← getState
+  return s.tagDefs.find? (·.1 == tag) |>.map (·.2.2)
 
 /-- Add a resource
     Corresponds to: add_r in typing.ml -/
