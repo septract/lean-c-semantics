@@ -219,6 +219,8 @@ Cerberus (with `SW_strict_pointer_relationals`) checks same allocation and fails
 
 C11 6.2.7 compatibility rules are more nuanced than structural equality (e.g., compatible enum types, compatible function types).
 
+**Investigated 2026-02-09**: Unable to construct a C program where structural equality diverges from Cerberus's `are_compatible`. The Cerberus C-to-Core elaboration normalizes types (size_t→unsigned long, int32_t→signed int, enum values at call sites) before emitting Core, so by the time `PEare_compatible` executes at runtime, both sides are structurally identical. The only plausible divergence (enum vs int in function pointer casts) triggers UB041 in both interpreters at the Function type level before parameter-level normalization matters. **Status: deferred indefinitely — no observable impact.** See tests `compat-01` through `compat-04` in `tests/debug/`.
+
 ### M8. Store/Load accept `loaded(.specified(.pointer))` values
 
 **Files**: `Step.lean:765-773,799-804` vs `core_reduction.lem`
@@ -272,6 +274,8 @@ Lean's `valueToInt` matches both `Vobject (OVinteger)` and `Vloaded (LVspecified
 
 ### L7. NaN/Inf floating-point arithmetic not implemented
 (`Eval.lean:407-408` — throws error instead)
+
+**Investigated 2026-02-09**: Actually works correctly. NaN/Inf are represented as `FloatingValue.finite` wrapping Lean's native IEEE 754 `Float`, so arithmetic goes through the `.finite` branch and produces correct results (NaN != NaN, Inf > finite, overflow → Inf, etc.). The error path at line 405-406 is dead code — the `.nan`/`.posInf`/`.negInf` constructors are never created at runtime. The parser maps JSON `"NaN"`/`"Infinity"` to `.finite` with native Float values. **Status: not an issue.** See test `tests/float/080-nan-inf.c`.
 
 ### L8. Missing `CivNULLcap` constructor (CHERI-specific)
 
