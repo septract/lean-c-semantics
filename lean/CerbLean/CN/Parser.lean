@@ -687,8 +687,8 @@ def ensuresClause : P (List Clause) := do
 def functionSpec : P FunctionSpec := do
   ws
   let trusted ← optional (keyword "trusted" *> symbol ";")
-  let reqs ← optional requiresClause
-  let enss ← optional ensuresClause
+  let reqBlocks ← many requiresClause
+  let ensBlocks ← many ensuresClause
   ws
   -- Create the return symbol. This is the symbol that `return` references
   -- in the postcondition resolve to. Using ID 0 matches mkSym "return".
@@ -696,8 +696,8 @@ def functionSpec : P FunctionSpec := do
   let returnSym : Sym := { id := 0, name := some "return" }
   pure {
     returnSym := returnSym
-    requires := { clauses := reqs.getD [] }
-    ensures := { clauses := enss.getD [] }
+    requires := { clauses := reqBlocks.toList.flatten }
+    ensures := { clauses := ensBlocks.toList.flatten }
     trusted := trusted.isSome
   }
 

@@ -315,6 +315,7 @@ def checkFunctionWithParams
         | .symbolNotFound name => s!"Symbol not found: {name}"
         | .integerTooLarge n => s!"Integer too large for any CN type: {n}"
         | .unknownPointeeType msg => s!"Pointer arithmetic error: {msg}"
+        | .other msg => s!"Resolution error: {msg}"
       match resolveResult with
       | .error msg => TypeCheckResult.fail msg
       | .ok resolvedSpec =>
