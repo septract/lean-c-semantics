@@ -419,8 +419,9 @@ def evalBinop (op : Binop) (v1 v2 : Value) : InterpM Value := do
     | _, _ =>
       -- Try other type-specific operations
       match op, v1, v2 with
-      -- Ctype equality
-      | .eq, .ctype ct1, .ctype ct2 => pure (if ct1 == ct2 then .true_ else .false_)
+      -- Ctype equality (compare types, ignoring annotations)
+      -- Annotations carry source locations that differ between stdlib and caller
+      | .eq, .ctype ct1, .ctype ct2 => pure (if ct1.ty == ct2.ty then .true_ else .false_)
       -- Boolean AND (logical)
       | .and, .true_, .true_ => pure .true_
       | .and, .true_, .false_ => pure .false_
