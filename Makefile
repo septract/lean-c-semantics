@@ -72,8 +72,8 @@ clean:
 # Testing
 # ------------------------------------------------------------------------------
 
-# Run all tests (unit, memory, interpreter in both modes, genproof)
-test: test-unit test-memory test-interp test-interp-seq test-genproof
+# Run all tests (unit, memory, interpreter in both modes, genproof, CN)
+test: test-unit test-memory test-cn-unit test-interp test-interp-seq test-genproof test-cn
 
 # Run exactly what CI runs (for local verification before pushing)
 ci: test test-verified
