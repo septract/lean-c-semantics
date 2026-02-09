@@ -278,11 +278,11 @@ def evalIntOp (op : Binop) (v1 v2 : IntegerValue) : InterpM Value := do
   | .and => InterpM.throwTypeError "OpAnd is boolean-only; use CivAND for bitwise AND"
   | .or => InterpM.throwTypeError "OpOr is boolean-only; use CivOR for bitwise OR"
 
-/-- Extract integer from value -/
+/-- Extract integer from value.
+    Corresponds to: core_eval.lem — only matches Vobject (OVinteger iv) -/
 def valueToInt (v : Value) : Option IntegerValue :=
   match v with
   | .object (.integer iv) => some iv
-  | .loaded (.specified (.integer iv)) => some iv
   | _ => none
 
 /-! ## Value Conversion Helpers
@@ -502,7 +502,9 @@ def evalCtor (c : Ctor) (args : List Value) : InterpM Value := do
   | .ivmax =>
     match args with
     | [.ctype ct] =>
-      match ct.ty with
+      -- Strip atomic qualifier before extracting integer type
+      -- Corresponds to: core_eval.lem:632-639 (calls Ctype.unatomic_)
+      match unatomic_ ct.ty with
       | .basic (.integer ity) =>
         let env ← InterpM.getTypeEnv
         let iv := maxIval env ity
@@ -513,7 +515,9 @@ def evalCtor (c : Ctor) (args : List Value) : InterpM Value := do
   | .ivmin =>
     match args with
     | [.ctype ct] =>
-      match ct.ty with
+      -- Strip atomic qualifier before extracting integer type
+      -- Corresponds to: core_eval.lem:632-639 (calls Ctype.unatomic_)
+      match unatomic_ ct.ty with
       | .basic (.integer ity) =>
         let env ← InterpM.getTypeEnv
         let iv := minIval env ity
@@ -544,7 +548,12 @@ def evalCtor (c : Ctor) (args : List Value) : InterpM Value := do
 
   | .ivCOMPL =>
     match args with
-    | [_ty, v] =>
+    | [.ctype ct, v] =>
+      -- Validate ctype is integer after stripping atomic
+      -- Corresponds to: core_eval.lem:652-659 (calls Ctype.unatomic_)
+      match unatomic_ ct.ty with
+      | .basic (.integer _) => pure ()
+      | _ => InterpM.throwTypeError s!"IVCOMPL requires integer ctype, got {repr ct.ty}"
       match valueToInt v with
       | some iv =>
         -- Bitwise complement: ~n = -n - 1 (matches Cerberus impl_mem.ml:2497-2501)
@@ -556,7 +565,12 @@ def evalCtor (c : Ctor) (args : List Value) : InterpM Value := do
 
   | .ivAND =>
     match args with
-    | [_ty, v1, v2] =>
+    | [.ctype ct, v1, v2] =>
+      -- Validate ctype is integer after stripping atomic
+      -- Corresponds to: core_eval.lem:660-667 (calls Ctype.unatomic_)
+      match unatomic_ ct.ty with
+      | .basic (.integer _) => pure ()
+      | _ => InterpM.throwTypeError s!"IVAND requires integer ctype, got {repr ct.ty}"
       match valueToInt v1, valueToInt v2 with
       | some i1, some i2 =>
         -- Bitwise AND using Zarith semantics (infinite two's complement)
@@ -569,7 +583,12 @@ def evalCtor (c : Ctor) (args : List Value) : InterpM Value := do
 
   | .ivOR =>
     match args with
-    | [_ty, v1, v2] =>
+    | [.ctype ct, v1, v2] =>
+      -- Validate ctype is integer after stripping atomic
+      -- Corresponds to: core_eval.lem:668-675 (calls Ctype.unatomic_)
+      match unatomic_ ct.ty with
+      | .basic (.integer _) => pure ()
+      | _ => InterpM.throwTypeError s!"IVOR requires integer ctype, got {repr ct.ty}"
       match valueToInt v1, valueToInt v2 with
       | some i1, some i2 =>
         -- Bitwise OR using Zarith semantics (infinite two's complement)
@@ -582,7 +601,12 @@ def evalCtor (c : Ctor) (args : List Value) : InterpM Value := do
 
   | .ivXOR =>
     match args with
-    | [_ty, v1, v2] =>
+    | [.ctype ct, v1, v2] =>
+      -- Validate ctype is integer after stripping atomic
+      -- Corresponds to: core_eval.lem:676-679 (calls Ctype.unatomic_)
+      match unatomic_ ct.ty with
+      | .basic (.integer _) => pure ()
+      | _ => InterpM.throwTypeError s!"IVXOR requires integer ctype, got {repr ct.ty}"
       match valueToInt v1, valueToInt v2 with
       | some i1, some i2 =>
         -- Bitwise XOR using Zarith semantics (infinite two's complement)
@@ -631,7 +655,11 @@ Corresponds to: core_eval.lem:61-110 and core.lem:243-245
 -/
 
 /-- Convert integer to target type (with wraparound).
-    Corresponds to: mk_conv_int in core_eval.lem:61-91 -/
+    Corresponds to: mk_conv_int in core_eval.lem:61-91
+    Cerberus uses: min + ((n - min) IntRem_f range) where IntRem_f is floored remainder.
+    Our formula is equivalent: Lean's Int.emod is Euclidean (non-negative for positive divisor),
+    and the double-modulo `((x % n) + n) % n` in the underflow branch converts to floored semantics.
+    Verified: 2026-02-08 via differential testing on edge cases. -/
 def convertInt (ity : IntegerType) (v : Value) : InterpM Value := do
   match valueToInt v with
   | some iv =>
@@ -672,7 +700,9 @@ def wrapIntOp (ity : IntegerType) (iop : Iop) (v1 v2 : Value) : InterpM Value :=
       | .div => i1.val.tdiv i2.val  -- safe: zero checked above
       | .rem_t => i1.val.tmod i2.val  -- safe: zero checked above
       | .shl => i1.val <<< i2.val.toNat
-      | .shr => i1.val >>> i2.val.toNat
+      -- Cerberus: IntDiv x (2^y) — truncated division, not arithmetic shift
+      -- Corresponds to: core_eval.lem:89-90
+      | .shr => i1.val.tdiv (2 ^ i2.val.toNat)
     let env ← InterpM.getTypeEnv
     let maxVal := (maxIval env ity).val
     let minVal := (minIval env ity).val
@@ -704,7 +734,9 @@ def catchExceptionalOp (ity : IntegerType) (iop : Iop) (v1 v2 : Value) : InterpM
       | .div => i1.val.tdiv i2.val  -- safe: zero checked above
       | .rem_t => i1.val.tmod i2.val  -- safe: zero checked above
       | .shl => i1.val <<< i2.val.toNat
-      | .shr => i1.val >>> i2.val.toNat
+      -- Cerberus: IntDiv x (2^y) — truncated division, not arithmetic shift
+      -- Corresponds to: core_eval.lem:89-90
+      | .shr => i1.val.tdiv (2 ^ i2.val.toNat)
     let env ← InterpM.getTypeEnv
     let maxVal := (maxIval env ity).val
     let minVal := (minIval env ity).val

@@ -96,6 +96,7 @@ def memErrorToUBCode : MemError → String
   | .ptrdiff => "UB050_pointers_subtraction_not_representable"
   | .intFromPtr => "UB024_out_of_range_pointer_to_integer_conversion"
   | .arrayShift => "UB046_array_pointer_outside"
+  | .ptrComparison => "UB053_pointer_comparison"
   | .other msg => s!"UB_other({msg})"
 
 /-- Parse a space-separated args string into a list, prepending "cmdname".
