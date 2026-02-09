@@ -382,7 +382,11 @@ def buildFunctionSpecMap (file : Core.File) : FunctionSpecMap :=
               fp.sym.map fun s => (s, ctypeToOutputBaseType fp.ty)
           let returnBt := ctypeToOutputBaseType funInfo.returnType
           let maxParamId := cParams.foldl (init := 0) fun acc (s, _) => max acc s.id
-          let resolveResult := (resolveFunctionSpec spec cParams returnBt (maxParamId + 1)).toOption
+          -- Build C type map for pointer arithmetic elaboration
+          let paramCTypes : List (String × Core.Ctype) :=
+            funInfo.params.filterMap fun fp =>
+              fp.sym.bind fun s => s.name.map fun name => (name, fp.ty)
+          let resolveResult := (resolveFunctionSpec spec cParams returnBt (maxParamId + 1) paramCTypes).toOption
           match resolveResult with
           | none => none  -- Skip unresolvable specs
           | some resolvedSpec =>
