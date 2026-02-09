@@ -158,7 +158,19 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
     | .ptrdiff, _ => TypingM.fail (.other "memop ptrdiff not yet implemented")
     | .intFromPtr, _ => TypingM.fail (.other "memop intFromPtr not yet implemented")
     | .ptrFromInt, _ => TypingM.fail (.other "memop ptrFromInt not yet implemented")
-    | .ptrMemberShift _ _, _ => TypingM.fail (.other "memop ptrMemberShift not yet implemented")
+    -- PtrMemberShift: compute pointer to struct/union member
+    -- Corresponds to: PEmember_shift in check.ml lines 693-711
+    -- CN marks the memop version as CHERI-only (check.ml:1747-1748) and uses the pure
+    -- PEmember_shift instead. Our Cerberus generates the memop form; we handle it
+    -- equivalently by producing a memberShift index term.
+    -- Returns Loc (shifted pointer)
+    | .ptrMemberShift tag member, [ptrArg] =>
+      checkPexprK ptrArg fun ptrTerm => do
+        -- Create memberShift index term (same as Pexpr.lean:749-752 for pure PEmember_shift)
+        let result := AnnotTerm.mk (.memberShift ptrTerm tag member) .loc loc
+        k result
+    | .ptrMemberShift _ _, args =>
+      TypingM.fail (.other s!"memop ptrMemberShift expects exactly 1 argument, got {args.length}")
     | .memcpy, _ => TypingM.fail (.other "memop memcpy not yet implemented")
     | .memcmp, _ => TypingM.fail (.other "memop memcmp not yet implemented")
     | .realloc, _ => TypingM.fail (.other "memop realloc not yet implemented")

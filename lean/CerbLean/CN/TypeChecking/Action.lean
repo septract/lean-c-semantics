@@ -193,7 +193,7 @@ def handleCreate (align : APexpr) (size : APexpr) (ct : Ctype) (prefix_ : SymPre
   -- Produce Owned<T>(Uninit) resource
   -- Corresponds to: add_r loc (P { name = Owned (act.ct, Uninit); ... }, O ...) in check.ml 1802-1806
   let resource := mkOwnedResource ct .uninit ptrTerm defaultVal
-  TypingM.addR resource
+  addResourceWithUnfold resource
 
   -- TODO: Add alignment constraint (LC.T (alignedI_ ~align:align_v ~t:ret loc))
   -- TODO: Add Alloc predicate (add_r loc (P (Req.make_alloc ret), O lookup))
@@ -310,12 +310,12 @@ def handleStore (_locking : Bool) (tyPe : APexpr) (ptrPe : APexpr) (valPe : APex
     if storeIsUnspecified then
       -- Storing unspecified value: keep as Uninit (memory still logically uninitialized)
       let resource := mkOwnedResource ct .uninit ptr val
-      TypingM.addR resource
+      addResourceWithUnfold resource
     else
       -- Storing specified value: produce Init
       -- Corresponds to: add_r loc (P { name = Owned (act.ct, Init); ... }, O varg) in check.ml 1885-1888
       let resource := mkOwnedResource ct .init ptr val
-      TypingM.addR resource
+      addResourceWithUnfold resource
     return mkUnitTerm loc
   | none =>
     -- Try consuming Init instead (overwriting initialized memory)
@@ -332,11 +332,11 @@ def handleStore (_locking : Bool) (tyPe : APexpr) (ptrPe : APexpr) (valPe : APex
         -- Storing unspecified value to initialized memory: produces Uninit
         -- (This is unusual but handles re-declaring uninitialized variables)
         let resource := mkOwnedResource ct .uninit ptr val
-        TypingM.addR resource
+        addResourceWithUnfold resource
       else
         -- Consumed Init, produce Init with new value
         let resource := mkOwnedResource ct .init ptr val
-        TypingM.addR resource
+        addResourceWithUnfold resource
       return mkUnitTerm loc
     | none =>
       -- No matching resource found
@@ -396,7 +396,7 @@ def handleLoad (tyPe : APexpr) (ptrPe : APexpr) (_order : Core.MemoryOrder) (loc
   | some (_, output) =>
     -- Got the value, produce the resource back (non-destructive read)
     let resource := mkOwnedResource ct .init ptr output.value
-    TypingM.addR resource
+    addResourceWithUnfold resource
 
     -- Return the loaded value
     return output.value
@@ -452,7 +452,7 @@ def checkAction (pact : Paction) : TypingM IndexTerm := do
     let ptrTerm := AnnotTerm.mk (.sym ptrSym) .loc loc
     -- Produce Owned<T>(Init) with the init value
     let resource := mkOwnedResource ct .init ptrTerm initVal
-    TypingM.addR resource
+    addResourceWithUnfold resource
     return ptrTerm
 
   -- Corresponds to: Eaction Alloc case in check.ml lines 1825-1827
