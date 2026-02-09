@@ -338,6 +338,9 @@ inductive MemError where
   /-- Array shift error.
       Corresponds to: MerrArrayShift -/
   | arrayShift
+  /-- Pointer relational comparison error.
+      Corresponds to: MerrPtrComparison -/
+  | ptrComparison
   /-- Other error.
       Corresponds to: MerrOther of string -/
   | other (msg : String)
@@ -371,6 +374,7 @@ instance : ToString MemError where
     | .ptrdiff => "pointer difference error"
     | .intFromPtr => "pointer to integer conversion: value out of range"
     | .arrayShift => "array shift error"
+    | .ptrComparison => "pointer comparison error"
     | .other msg => s!"memory error: {msg}"
 
 /-! ## Memory Monad -/

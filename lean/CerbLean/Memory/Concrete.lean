@@ -173,7 +173,8 @@ def getAllocation (ptr : PointerValue) : ConcreteMemM Allocation := do
   let st ← get
   match ptr.prov with
   | .none =>
-    throw (.access .noProvPtr (some 0))
+    -- Corresponds to: impl_mem.ml:1609,1716-1717 — Prov_none throws OutOfBoundPtr
+    throw (.access .outOfBoundPtr none)
   | .some allocId =>
     if st.deadAllocations.contains allocId then
       throw (.access .deadPtr (some allocId))
@@ -810,8 +811,18 @@ def eqPtrvalImpl (p1 p2 : PointerValue) : ConcreteMemM Bool := do
   | _, .null _ => pure false
   -- Function pointers compare by symbol
   | .function s1, .function s2 => pure (s1 == s2)
-  | .function _, _ => pure false
-  | _, .function _ => pure false
+  -- Function pointer vs concrete: check funptrmap
+  -- Corresponds to: impl_mem.ml:1839-1847
+  | .function sym, .concrete _ addr =>
+    let st ← get
+    match st.funptrmap[addr]? with
+    | some mappedSym => pure (sym == mappedSym)
+    | none => pure false
+  | .concrete _ addr, .function sym =>
+    let st ← get
+    match st.funptrmap[addr]? with
+    | some mappedSym => pure (sym == mappedSym)
+    | none => pure false
   | .concrete _ a1, .concrete _ a2 =>
     -- For concrete pointers, check provenance
     -- Corresponds to: impl_mem.ml:1851-1880 (eq_ptrval)
@@ -847,8 +858,8 @@ def eqPtrvalImpl (p1 p2 : PointerValue) : ConcreteMemM Bool := do
 
 /-- Pointer difference.
     Corresponds to: diff_ptrval in impl_mem.ml
-    Audited: 2026-01-01
-    Deviations: Returns 0 for different allocations (UB in C) -/
+    Audited: 2026-02-08
+    Deviations: None -/
 def diffPtrvalImpl (elemTy : Ctype) (p1 p2 : PointerValue) : ConcreteMemM IntegerValue := do
   let env ← read
   match p1.base, p2.base with
@@ -857,14 +868,16 @@ def diffPtrvalImpl (elemTy : Ctype) (p1 p2 : PointerValue) : ConcreteMemM Intege
     match p1.prov, p2.prov with
     | .some id1, .some id2 =>
       if id1 != id2 then
-        -- Different allocations - implementation defined
-        pure (integerIval 0)
+        -- Different allocations — Cerberus fails with MerrPtrdiff
+        -- Corresponds to: impl_mem.ml:1954-2063
+        throw .ptrdiff
       else
         let elemSize := sizeof env elemTy
         if elemSize == 0 then
           throw (.typeError "pointer difference with zero-sized element")
         let diff := (a1 : Int) - (a2 : Int)
-        pure (integerIval (diff / elemSize))
+        -- Use truncated division to match Cerberus's integerDiv_t
+        pure (integerIval (diff.tdiv elemSize))
     | _, _ =>
       throw (.access .noProvPtr none)
   | _, _ =>
@@ -926,8 +939,13 @@ def ptrfromintImpl (_fromTy : IntegerType) (toTy : Ctype) (n : IntegerValue) : C
   if n.val == 0 then
     pure (nullPtrval toTy)
   else
-    -- Implementation-defined: create pointer with provenance from integer
-    pure { prov := n.prov, base := .concrete none n.val.toNat }
+    -- Wrap integer to pointer range [0, 2^(8*sizeof_pointer) - 1]
+    -- Corresponds to: impl_mem.ml:2126-2173
+    let env ← read
+    let ptrSize := sizeof env (Ctype.mk' (.pointer {} .void))
+    let ptrRange : Int := 2 ^ (8 * ptrSize)
+    let wrappedAddr := ((n.val % ptrRange) + ptrRange) % ptrRange
+    pure { prov := n.prov, base := .concrete none wrappedAddr.toNat }
 
 /-- Pointer to integer conversion.
     Corresponds to: intfromptr in impl_mem.ml:2439-2461
@@ -1097,6 +1115,29 @@ def reallocImpl (align : IntegerValue) (ptr : PointerValue) (newSize : IntegerVa
   | .function _ =>
     throw (.free .nonMatching)
 
+/-- Validate pointers for relational comparison (lt, gt, le, ge).
+    Corresponds to: impl_mem.ml:1886-1951 (strict pointer relationals)
+    Note: Always uses strict mode (SW_strict_pointer_relationals). Cerberus's --exec
+    default may be permissive, which would just compare addresses without checking
+    allocation provenance. If differential testing shows mismatches, a non-strict
+    fallback path may need to be added.
+    Returns the two concrete addresses if comparison is valid. -/
+private def validateRelationalPtrs (p1 p2 : PointerValue) : ConcreteMemM (Nat × Nat) := do
+  match p1.base, p2.base with
+  | .null _, _ | _, .null _ =>
+    -- Null pointer relational comparison is undefined
+    -- Corresponds to: impl_mem.ml:1891-1893
+    throw .ptrComparison
+  | .concrete _ a1, .concrete _ a2 =>
+    -- Check same allocation
+    -- Corresponds to: impl_mem.ml:1915-1935
+    match p1.prov, p2.prov with
+    | .some id1, .some id2 =>
+      if id1 != id2 then throw .ptrComparison
+      pure (a1, a2)
+    | _, _ => throw .ptrComparison
+  | _, _ => throw .ptrComparison
+
 /-! ## MemoryOps Instance
 
 This provides the concrete implementation of the MemoryOps typeclass.
@@ -1126,22 +1167,20 @@ instance : MemoryOps ConcreteMemM where
 
   eqPtrval := eqPtrvalImpl
   nePtrval p1 p2 := do let r ← eqPtrvalImpl p1 p2; pure (!r)
+  -- Pointer relational comparisons with strict validation
+  -- Corresponds to: impl_mem.ml:1886-1951
   ltPtrval p1 p2 := do
-    match p1.base, p2.base with
-    | .concrete _ a1, .concrete _ a2 => pure (a1 < a2)
-    | _, _ => pure false
+    let (a1, a2) ← validateRelationalPtrs p1 p2
+    pure (a1 < a2)
   gtPtrval p1 p2 := do
-    match p1.base, p2.base with
-    | .concrete _ a1, .concrete _ a2 => pure (a1 > a2)
-    | _, _ => pure false
+    let (a1, a2) ← validateRelationalPtrs p1 p2
+    pure (a1 > a2)
   lePtrval p1 p2 := do
-    match p1.base, p2.base with
-    | .concrete _ a1, .concrete _ a2 => pure (a1 <= a2)
-    | _, _ => pure false
+    let (a1, a2) ← validateRelationalPtrs p1 p2
+    pure (a1 <= a2)
   gePtrval p1 p2 := do
-    match p1.base, p2.base with
-    | .concrete _ a1, .concrete _ a2 => pure (a1 >= a2)
-    | _, _ => pure false
+    let (a1, a2) ← validateRelationalPtrs p1 p2
+    pure (a1 >= a2)
 
   diffPtrval := diffPtrvalImpl
   effArrayShiftPtrval := effArrayShiftPtrvalImpl
