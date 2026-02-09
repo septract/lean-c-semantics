@@ -586,12 +586,14 @@ partial def termToSmtTerm (env : Option TypeEnv) : Types.Term → TranslateResul
     | .ok valTm =>
       let sourceBt := val.bt
       match sourceBt, targetType with
-      | .bits _ sw, .bits _ tw =>
+      | .bits sign sw, .bits _ tw =>
         if sw == tw then .ok valTm  -- Same width: identity
         else if sw < tw then
-          -- Extend: use zero_extend (indexed identifier)
-          let zeroExt := Term.mkApp2 (Term.symbolT "_") (Term.symbolT "zero_extend") (Term.literalT (toString (tw - sw)))
-          .ok (Term.appT zeroExt valTm)
+          -- Extend: use sign_extend for signed, zero_extend for unsigned
+          -- CN solver.ml uses sign_extend for signed, zero_extend for unsigned
+          let extOp := if sign == .signed then "sign_extend" else "zero_extend"
+          let ext := Term.mkApp2 (Term.symbolT "_") (Term.symbolT extOp) (Term.literalT (toString (tw - sw)))
+          .ok (Term.appT ext valTm)
         else
           -- Truncate: use extract (indexed identifier with two args: high, low)
           let extract := Term.mkApp3 (Term.symbolT "_") (Term.symbolT "extract") (Term.literalT (toString (tw - 1))) (Term.literalT "0")

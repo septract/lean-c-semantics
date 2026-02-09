@@ -380,6 +380,8 @@ inductive ResolveError where
   /-- Pointer arithmetic on expression with unknown pointee type.
       Corresponds to: CN's Loc(None) case which would also fail. -/
   | unknownPointeeType (context : String)
+  /-- General error for type checking failures during resolution -/
+  | other (msg : String)
   deriving Repr, Inhabited
 
 abbrev ResolveResult α := Except ResolveError α
@@ -402,7 +404,8 @@ partial def resolveTerm (ctx : ResolveContext) (t : Term)
       match pickIntegerEncodingType n with
       | some (.bits sign width) => return .const (.bits sign width n)
       | _ => throw (.integerTooLarge n)  -- CN fails here
-    | _, _ => return .const c
+    | .z n, some bt => throw (.other s!"integer literal {n} with non-Bits expected type {repr bt}")
+    | _, _ => return .const c  -- Non-integer constants (bool, unit, ctype, null) pass through unchanged
   | .sym s =>
     match resolveSym ctx s with
     | some resolved => return .sym resolved
@@ -585,6 +588,21 @@ partial def resolveAnnotTerm (ctx : ResolveContext) (at_ : AnnotTerm)
         let args' ← args.mapM (resolveAnnotTerm ctx · none)
         return .mk (.apply resolved args') _bt loc
       | none => throw (.symbolNotFound (fn.name.getD "?"))
+  | .mk (.structMember obj member) _bt loc =>
+    -- CN wellTyped.ml:695-706: infer obj type, extract struct tag, look up field type
+    let obj' ← resolveAnnotTerm ctx obj none
+    let fieldBt ← match obj'.bt with
+      | .struct_ tag =>
+        match ctx.tagDefs.find? fun (t, _) => t.name == tag.name && t.id == tag.id with
+        | some (_, (_, .struct_ fields _)) =>
+          match fields.find? fun f => f.name == member with
+          | some field => pure (ctypeToOutputBaseType field.ty)
+          | none => throw (.other s!"struct {tag.name.getD "?"} has no field '{member.name}'")
+        | some (_, (_, .union_ _)) =>
+          throw (.other s!"structMember on union tag {tag.name.getD "?"}: unions not supported")
+        | none => throw (.other s!"struct tag {tag.name.getD "?"} not found in tagDefs")
+      | bt => throw (.other s!"structMember on non-struct type: {repr bt}")
+    return .mk (.structMember obj' member) fieldBt loc
   | .mk t bt loc =>
     -- For other terms, resolve recursively with expected type, preserve original type
     let t' ← resolveTerm ctx t expectedBt
