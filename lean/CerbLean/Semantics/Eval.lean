@@ -1119,8 +1119,36 @@ def evalPexpr (fuel : Nat) (env : List (HashMap Sym Value)) (pe : APexpr) : Inte
     | _ =>
       InterpM.throwTypeError "cfunction requires function pointer"
 
-  | .isScalar _e => InterpM.throwNotImpl "is_scalar"
-  | .isInteger _e => InterpM.throwNotImpl "is_integer"
+  -- is_scalar: check if a ctype is a scalar type (arithmetic or pointer or byte)
+  -- Corresponds to: PEis_scalar in core_eval.lem:1048-1057
+  --   AilTypesAux.is_scalar in ailTypesAux.lem:206-210
+  --   is_scalar = is_pointer || is_arithmetic (= is_integer || is_floating) || is_byte
+  -- Audited: 2026-02-09
+  -- Deviations: None
+  | .isScalar e =>
+    let v ← evalPexpr fuel' env (mkAPexpr e)
+    match v with
+    | .ctype ty =>
+      let result := match ty.ty with
+        | .basic _ | .pointer _ _ | .byte => true
+        | _ => false
+      if result then pure .true_ else pure .false_
+    | _ => InterpM.throwIllformed "is_scalar: operand must be ctype"
+
+  -- is_integer: check if a ctype is an integer type
+  -- Corresponds to: PEis_integer in core_eval.lem:1058-1067
+  --   AilTypesAux.is_integer in ailTypesAux.lem:35-41
+  -- Audited: 2026-02-09
+  -- Deviations: None
+  | .isInteger e =>
+    let v ← evalPexpr fuel' env (mkAPexpr e)
+    match v with
+    | .ctype ty =>
+      let result := match ty.ty with
+        | .basic (.integer _) => true
+        | _ => false
+      if result then pure .true_ else pure .false_
+    | _ => InterpM.throwIllformed "is_integer: operand must be ctype"
 
   -- is_signed: check if a ctype is a signed integer type
   -- Corresponds to: PEis_signed in core_eval.lem:1088-1095
