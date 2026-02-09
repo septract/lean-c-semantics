@@ -2,24 +2,22 @@
 # Wrapper to run Cerberus using the local build (binary directly)
 # Usage: ./scripts/cerberus [args...]
 
-set -e
+source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-CERBERUS_DIR="$PROJECT_DIR/cerberus"
 CERBERUS_BIN="$CERBERUS_DIR/_build/default/backend/driver/main.exe"
 
 # Verify local opam switch exists
 if [[ ! -d "$CERBERUS_DIR/_opam" ]]; then
-    echo "Error: Local opam switch not found at $CERBERUS_DIR/_opam"
-    echo "Run 'make cerberus-setup' first"
+    echo "Error: Local opam switch not found at $CERBERUS_DIR/_opam" >&2
+    echo "Run 'make cerberus-setup' first" >&2
     exit 1
 fi
 
 # Verify binary exists
 if [[ ! -x "$CERBERUS_BIN" ]]; then
-    echo "Error: Cerberus binary not found at $CERBERUS_BIN"
-    echo "Run 'make cerberus' first"
+    echo "Error: Cerberus binary not found at $CERBERUS_BIN" >&2
+    echo "Run 'make cerberus' first" >&2
     exit 1
 fi
 
