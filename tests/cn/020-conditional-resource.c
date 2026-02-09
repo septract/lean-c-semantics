@@ -3,6 +3,7 @@
 
 int conditional_read(int *p, int flag)
 /*@ requires take v = Owned<int>(p);
+             v <= 2147483646i32;
     ensures take v2 = Owned<int>(p);
             v == v2; @*/
 {

@@ -1151,26 +1151,48 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
     return AnnotTerm.mk (.binop cnOp t1 t2) t1.bt loc
 
   -- Catch exceptional condition (overflow checking)
+  -- Corresponds to: PEcatch_exceptional_condition in CN check.ml:986-1033
+  -- CN computes at extended precision (2*width + 4 bits) and checks representability.
+  -- We generate a verification obligation for the overflow check.
   | .catchExceptionalCondition ty op e1 e2 =>
-    -- Exceptional condition check: evaluate operation, checking for overflow
-    -- Use the IntegerType to determine the proper Bits type for operands
-    -- This is critical: ensures that 0 in "0 - x" (negation) gets Bits type
-    -- Corresponds to: CN's handling of PEcatch_exceptional_condition
     let opBt := integerTypeToBaseType ty
     let pe1 : APexpr := ⟨[], none, e1⟩
     let pe2 : APexpr := ⟨[], none, e2⟩
     let t1 ← checkPexpr pe1 (some opBt)
     let t2 ← checkPexpr pe2 (some t1.bt)
-    -- Map the Iop to CN binop
     let cnOp ← match op with
       | .add => pure BinOp.add
       | .sub => pure BinOp.sub
       | .mul => pure BinOp.mul
       | .div => pure BinOp.div
       | .rem_t => pure BinOp.rem
-      | .shl => TypingM.fail (.other "shift left (shl) not supported in CN catch_exceptional_condition")
-      | .shr => TypingM.fail (.other "shift right (shr) not supported in CN catch_exceptional_condition")
-    return AnnotTerm.mk (.binop cnOp t1 t2) t1.bt loc
+      | .shl => TypingM.fail (.other "shift left (shl) not supported in catch_exceptional_condition")
+      | .shr => TypingM.fail (.other "shift right (shr) not supported in catch_exceptional_condition")
+    -- Direct result at target precision (this is what gets returned to the caller)
+    let directResult := AnnotTerm.mk (.binop cnOp t1 t2) opBt loc
+    -- Extended-precision overflow check (CN check.ml:1003-1030)
+    -- Compute at wider bitvector to detect overflow before modular wrapping
+    let (_sign, width) ← match opBt with
+      | .bits s w => pure (s, w)
+      | _ => TypingM.fail (.other "catchExceptionalCondition: non-Bits operand type")
+    let extWidth := 2 * width + 4
+    let extBt : BaseType := .bits .signed extWidth
+    -- Cast operands to extended precision (CN check.ml:1005: large x = cast_ large_bt x)
+    let ext1 := AnnotTerm.mk (.cast extBt t1) extBt loc
+    let ext2 := AnnotTerm.mk (.cast extBt t2) extBt loc
+    -- Compute at extended precision (won't overflow with 2w+4 bits)
+    let extResult := AnnotTerm.mk (.binop cnOp ext1 ext2) extBt loc
+    -- Check representability: minInt ≤ extResult ≤ maxInt
+    -- CN check.ml:296-306: is_representable_integer
+    let minVal := intTypeMin ty
+    let maxVal := intTypeMax ty
+    let minTerm := AnnotTerm.mk (.const (.bits .signed extWidth minVal)) extBt loc
+    let maxTerm := AnnotTerm.mk (.const (.bits .signed extWidth maxVal)) extBt loc
+    let lowerBound := AnnotTerm.mk (.binop .le minTerm extResult) .bool loc
+    let upperBound := AnnotTerm.mk (.binop .le extResult maxTerm) .bool loc
+    let rangeCheck := AnnotTerm.mk (.binop .and_ lowerBound upperBound) .bool loc
+    TypingM.requireConstraint (.t rangeCheck) loc "UB036: exceptional condition (overflow)"
+    return directResult
 
   -- Type predicates (is_scalar, is_integer, etc.)
   -- These require actual type checking, not constant returns
@@ -1232,11 +1254,9 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
     | none => TypingM.fail (.other s!"cfunction: no function info for {funSym.name.getD "?"}")
 
   -- Union constructor
-  | .union_ tag member value =>
-    let peVal : APexpr := ⟨[], none, value⟩
-    let tVal ← checkPexpr peVal
-    -- For now, treat union like struct with single member
-    return AnnotTerm.mk (.struct_ tag [(member, tVal)]) (.struct_ tag) loc
+  -- CN does NOT support unions (check.ml:200: error "todo: union types")
+  | .union_ _tag _member _value =>
+    TypingM.fail (.other "union constructors not supported (CN: check.ml:200)")
 
   -- Pure memory operations (for memory model)
   | .pureMemop _op args =>
@@ -1251,14 +1271,10 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
     TypingM.modifyState fun s => { s with freshCounter := s.freshCounter + 1 }
     return AnnotTerm.mk (.apply memopSym argTerms) resBt loc
 
-  -- Constrained values (for memory model)
-  | .constrained constraints =>
-    -- Constrained values: evaluate constraints symbolically
-    for (_, constraint) in constraints do
-      let peCon : APexpr := ⟨[], some .boolean, constraint⟩
-      let _ ← checkPexpr peCon
-    -- Return a unit value (constraints are side effects)
-    return AnnotTerm.mk (.const .unit) .unit loc
+  -- Constrained values: Core memory model construct, not a CN pure expression.
+  -- CN's type checker never sees these directly.
+  | .constrained _constraints =>
+    TypingM.fail (.other "constrained values not supported in CN verification (Core memory model construct)")
 
   -- BMC assume
   | .bmcAssume e =>
@@ -1291,7 +1307,11 @@ where
     | .array => { id := 0, name := some "Array" }
     | .specified => { id := 0, name := some "Specified" }
     | .unspecified => { id := 0, name := some "Unspecified" }
-    | _ => { id := 0, name := some "Unknown" }
+    -- Remaining constructors are compile-time operations, not CN pattern constructors
+    | .ivmax | .ivmin | .ivsizeof | .ivalignof
+    | .ivCOMPL | .ivAND | .ivOR | .ivXOR
+    | .fvfromint | .ivfromfloat =>
+      panic! s!"ctorToSym: unsupported constructor: {repr c}"
 
   /-- Get maximum value of integer type.
       Uses 2^(w-1)-1 for signed, 2^w-1 for unsigned. -/
