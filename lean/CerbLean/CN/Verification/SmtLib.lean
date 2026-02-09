@@ -235,7 +235,7 @@ def binOpToTerm (op : BinOp) (lBt rBt : BaseType) (l r : Smt.Term) : TranslateRe
   -- If they don't, the type checker has a bug - don't mask it
   -- NOTE: loc + bits mismatches (pointer arithmetic) are expected with our
   -- simplified flat Int pointer model. These will be fixed when we implement
-  -- CN's proper structured pointer model.
+  -- CN's proper structured pointer model (C2 in audit report).
   if isBitsType lBt != isBitsType rBt then
     .unsupported s!"Type mismatch in binop {repr op}: left={repr lBt}, right={repr rBt}"
   else
