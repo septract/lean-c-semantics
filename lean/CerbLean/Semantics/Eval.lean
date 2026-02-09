@@ -801,7 +801,17 @@ def evalPexpr (fuel : Nat) (env : List (HashMap Sym Value)) (pe : APexpr) : Inte
   | .sym s =>
     match lookupEnv s env with
     | some v => pure v
-    | none => throw (.symbolNotFound s)
+    | none =>
+      -- Check if it's a procedure pointer (Cerberus: core_eval.lem:575-583)
+      -- If symbol is a Proc in file.funs, return null void pointer
+      let file ← InterpM.getFile
+      let isProc := file.funs.any fun (sym, decl) =>
+        sym == s && match decl with | .proc .. => true | _ => false
+      if isProc then
+        let nullVoidPtr : PointerValue := { prov := .none, base := .null { ty := .void } }
+        pure (.object (.pointer nullVoidPtr))
+      else
+        throw (.symbolNotFound s)
 
   | .impl ic =>
     -- Implementation-defined constants
@@ -910,7 +920,20 @@ def evalPexpr (fuel : Nat) (env : List (HashMap Sym Value)) (pe : APexpr) : Inte
       | some (_, .builtinDecl ..) =>
         InterpM.throwNotImpl s!"pure function call {s.name}: found builtinDecl, not fun"
       | none =>
-        InterpM.throwNotImpl s!"pure function call {s.name}: not found in stdlib (stdlib has {file.stdlib.length} entries)"
+        -- Fallback: search file.funs (user-defined functions)
+        -- Corresponds to: core_eval.lem:131-137
+        let funDecl := file.funs.find? fun (sym, _) => sym == s
+        match funDecl with
+        | some (_, .fun_ _ params body) =>
+          if argVals.length != params.length then
+            InterpM.throwTypeError s!"wrong number of arguments for {s.name}"
+          let bindings := params.zip argVals |>.map fun ((p, _), v) => (p, v)
+          let callEnv := mkEnvWithBindings bindings
+          evalPexpr fuel' callEnv body
+        | some _ =>
+          InterpM.throwTypeError s!"pure function call {s.name}: found in funs but not a Fun"
+        | none =>
+          InterpM.throwIllformed s!"pure function call {s.name}: not found in stdlib or funs"
     | .impl ic =>
       -- Implementation constant functions - dispatch to evalImplCall
       match ic with

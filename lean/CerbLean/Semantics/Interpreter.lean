@@ -58,18 +58,27 @@ def isUnspecified (v : Value) : Option Ctype :=
   | .loaded (.unspecified ty) => some ty
   | _ => none
 
-/-- Allocate errno global variable.
-    Corresponds to: driver.lem:1837-1839
+/-- Allocate errno global variable and initialize to 0.
+    Corresponds to: driver.lem:1837-1844
     ```lem
     Mem.bind (Mem.allocate_object tid0 (Symbol.PrefOther "errno")
-              (Mem.alignof_ival Ctype.signed_int) Ctype.signed_int Nothing Nothing)
+              (Mem.alignof_ival Ctype.signed_int) Ctype.signed_int Nothing Nothing) (fun ptr_val ->
+      let zero = Mem.integer_value_mval (Ctype.Signed Ctype.Int_) (Mem.integer_ival 0) in
+      Mem.bind (Mem.store (Loc.other "errno init") Ctype.signed_int false ptr_val zero) (fun _ ->
+        Mem.return ptr_val))
     ```
     This happens AFTER global allocation to match Cerberus's memory layout. -/
 def allocateErrno : InterpM Unit := do
   let signedInt : Ctype := { ty := .basic (.integer (.signed .int_)) }
   let alignIval := alignofIval (← InterpM.getTypeEnv) signedInt
-  let _ ← InterpM.liftMem (MemoryOps.allocateObject "errno" alignIval signedInt none none)
-  pure ()
+  let errnoPtr ← InterpM.liftMem (MemoryOps.allocateObject "errno" alignIval signedInt none none)
+  -- Initialize errno to 0
+  -- Corresponds to: driver.lem:1841-1843
+  let zero := MemValue.integer (.signed .int_) (integerIval 0)
+  let _ ← InterpM.liftMem (storeImpl signedInt false errnoPtr zero)
+  -- Store errno pointer for impl proc dispatch
+  -- Corresponds to: setting th_st.errno in core_run_aux.lem:346
+  InterpM.setErrnoPtr errnoPtr
 
 /-- Run the main function of a Core file.
     Corresponds to: driver_globals + driver_main in driver.lem
