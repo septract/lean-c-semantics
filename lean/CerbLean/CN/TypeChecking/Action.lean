@@ -173,8 +173,8 @@ Each handler implements the separation logic semantics for a memory action.
     should provide the type information, or we should examine the size expression. -/
 def handleCreate (align : APexpr) (size : APexpr) (ct : Ctype) (prefix_ : SymPrefix) (loc : Core.Loc)
     : TypingM IndexTerm := do
-  -- Evaluate alignment expression (for constraint generation)
-  let _alignVal ← checkPexpr align
+  -- Evaluate alignment expression
+  let alignVal ← checkPexpr align
   -- Evaluate size expression (for constraint generation)
   let _sizeVal ← checkPexpr size
 
@@ -195,7 +195,20 @@ def handleCreate (align : APexpr) (size : APexpr) (ct : Ctype) (prefix_ : SymPre
   let resource := mkOwnedResource ct .uninit ptrTerm defaultVal
   addResourceWithUnfold resource
 
-  -- TODO: Add alignment constraint (LC.T (alignedI_ ~align:align_v ~t:ret loc))
+  -- Add alignment fact: the freshly created pointer is aligned
+  -- Corresponds to: let align_v = cast_ Memory.uintptr_bt arg loc in
+  --                  add_c loc (LC.T (alignedI_ ~align:align_v ~t:ret loc)) in check.ml:1799-1800
+  -- CN casts alignment to uintptr_bt (Bits(Unsigned, 64)) before building the constraint.
+  -- CN adds this as a constraint (assumption), NOT as an obligation to prove.
+  -- The create operation guarantees the returned pointer is aligned.
+  -- CN: cast_ Memory.uintptr_bt arg loc (indexTerms.ml:683-684)
+  -- cast_ only wraps if types differ; uintptr_bt = Bits(Unsigned, 64)
+  let uintptrBt : BaseType := .bits .unsigned 64
+  let alignCast := match alignVal.bt with
+    | .bits .unsigned 64 => alignVal
+    | _ => AnnotTerm.mk (.cast uintptrBt alignVal) uintptrBt loc
+  let alignedLc := AnnotTerm.mk (.aligned ptrTerm alignCast) .bool loc
+  TypingM.addC (.t alignedLc)
   -- TODO: Add Alloc predicate (add_r loc (P (Req.make_alloc ret), O lookup))
 
   -- Return the new pointer
@@ -289,10 +302,15 @@ def handleStore (_locking : Bool) (tyPe : APexpr) (ptrPe : APexpr) (valPe : APex
   -- If so, we should keep the resource as Uninit, not Init
   let storeIsUnspecified := isUnspecifiedValue valPe
 
-  -- TODO: Check representability of the value
-  -- Corresponds to: representable_ (act.ct, varg) in check.ml lines 1863-1877
-  -- let in_range_lc := representable ct val
-  -- TypingM.ensureProvable in_range_lc
+  -- Check representability of stored value
+  -- Corresponds to: representable_ (act.ct, varg) in check.ml:1863-1877
+  -- CN generates this for ALL store types (integer, pointer, struct, etc.)
+  -- Skip for unspecified values: these come from dead PEundef branches where
+  -- the unreachability obligation (C7) already proves the branch is dead.
+  -- CN's inline solver would prune these branches before reaching the store.
+  if !storeIsUnspecified then
+    let repLc := AnnotTerm.mk (.representable ct val) .bool loc
+    TypingM.requireConstraint (.t repLc) loc "Write value not representable in type"
 
   -- Request (consume) Owned<T>(Uninit) - we need writable permission
   -- Corresponds to: RI.Special.predicate_request ... ({ name = Owned (act.ct, Uninit); ... }, None)
