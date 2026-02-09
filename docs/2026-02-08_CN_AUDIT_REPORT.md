@@ -2,8 +2,8 @@
 
 **Date**: 2026-02-08
 **Scope**: Full audit of CN implementation against reference CN (tmp/cn/)
-**Current status**: 42/46 tests passing (42 genuine passes confirmed by audit)
-**Updated**: 2026-02-08 — C1, C2, C5, C7 fixed; H6 partially fixed (path conditions + guard stripping)
+**Current status**: 43/46 tests passing
+**Updated**: 2026-02-08 — C1, C2, C3, C5, C7 fixed; pointer arithmetic elaboration added; H6 partially fixed
 **Method**: 5 parallel auditor agents + manual analysis
 
 ---
@@ -94,20 +94,12 @@ We represent pointers as plain `Int`. This means:
 3. Adding `ptr_shift`, `copy_alloc_id`, `addr_of` SMT functions
 4. Updating term translation for pointer operations
 
-### C3. Unit Type as SMT Bool
+### C3. Unit Type as SMT Bool — **FIXED**
 
-**Location**: `lean/CerbLean/CN/Verification/SmtLib.lean:71`
-**Severity**: HIGH
+**Location**: `lean/CerbLean/CN/Verification/SmtLib.lean`
+**Severity**: HIGH — **FIXED 2026-02-08**
 
-```lean
--- OUR CODE (WRONG):
-| .unit => .ok (Term.symbolT "Bool")  -- Unit as Bool
-
--- CN's solver.ml (CORRECT):
--- | BT.Unit -> CN_Tuple.t []  -- Unit as empty tuple
-```
-
-CN represents Unit as an empty tuple type in SMT, not Bool. Using Bool means unit values can be confused with boolean values.
+Unit type now uses `cn_tuple_0` empty tuple datatype matching CN's `solver.ml:405` (`BT.Unit -> CN_Tuple.t []`). The preamble declares `(declare-datatype cn_tuple_0 ((cn_tuple_0)))` and both the sort and value use `cn_tuple_0`.
 
 ### C4. Struct Types Unsupported in SMT
 
@@ -268,7 +260,7 @@ CN's `add_c` (typing.ml:403-412) simplifies the constraint, adds it to context, 
 
 CN's `add_r` (typing.ml:415-427) simplifies the resource, derives pointer facts from existing resources, adds to context, then calls `do_unfold_resources` which unpacks compound resources. Our `addR` just prepends to the resource list.
 
-### H9. Alloc_id Type as Int in SMT
+### H9. Alloc_id Type as Int in SMT — **CORRECT (not a bug)**
 
 **Location**: `SmtLib.lean:70`
 
@@ -276,7 +268,7 @@ CN's `add_r` (typing.ml:415-427) simplifies the resource, derives pointer facts 
 | .allocId => .ok (Term.symbolT "Int")
 ```
 
-CN uses a dedicated `CN_AllocId` type (an integer type but with distinct SMT sort). Using bare `Int` may allow SMT to incorrectly equate allocation IDs with other integers.
+Investigated: CN's `CN_AllocId` module (solver.ml:169-178) uses `SMT.t_int` (plain Int) when `use_vip = true` (the default, indexTerms.ml:469). Our encoding matches CN's default VIP mode exactly. Not a bug.
 
 ---
 
@@ -371,16 +363,21 @@ The integer type bug (C1) does NOT cause false passes in the current test suite 
 |----------|-------|-------|
 | Correct Pass | 33 | 001-007, 020-021, 024, 027-028, 031-033, 035-043, 047-053 |
 | Correct Expected Fail | 9 | 010-014, 025-026, 029-030 |
-| Wrong Fail (feature gap) | 4 | 022, 023, 044, 045 |
+| Wrong Fail (feature gap) | 3 | 023, 044, 045 |
 
-### Currently Failing Tests (4 failures — all feature gaps)
+### Currently Failing Tests (3 failures — all feature gaps)
 
 | Test | Root Cause |
 |------|-----------|
-| 022-pointer-arithmetic.c | Pointer+index arithmetic in specs creates type mismatch (`loc + bits`); `arrayShift` in body works but spec-side doesn't |
 | 023-struct-access.c | `memop ptrMemberShift not yet implemented` |
 | 044-pre-post-increment.c | Pre/post increment (++i, i++) generates complex Core IR not handled |
 | 045-struct-field-frame.c | Same memberShift gap as 023, plus struct field framing |
+
+### Recently Fixed Tests
+
+| Test | Fix |
+|------|-----|
+| 022-pointer-arithmetic.c | Pointer arithmetic elaboration in Resolve.lean: `ptr + int` → `arrayShift` (matching CN compile.ml:447-463) |
 
 ### Expected Fail Tests: Minor Concern
 

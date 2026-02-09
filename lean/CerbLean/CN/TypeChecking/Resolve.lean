@@ -34,7 +34,7 @@ import CerbLean.Core
 
 namespace CerbLean.CN.TypeChecking.Resolve
 
-open CerbLean.Core (Sym Loc)
+open CerbLean.Core (Sym Loc Ctype Ctype_)
 open CerbLean.CN.Types
 
 /-! ## Resolution Context
@@ -49,6 +49,10 @@ structure ResolveContext where
   nameToSymType : List (String × Sym × BaseType)
   /-- Counter for generating fresh symbol IDs -/
   nextFreshId : Nat
+  /-- Map from parameter name to its C type (for pointer arithmetic elaboration).
+      Corresponds to: CN's Loc(Some ct) carrying pointee types in BaseTypes.ml.
+      Our BaseType.loc doesn't carry the pointee type, so we store it separately. -/
+  paramCTypes : List (String × Ctype) := []
   deriving Inhabited
 
 namespace ResolveContext
@@ -79,6 +83,39 @@ def fresh (ctx : ResolveContext) (name : String) (bt : BaseType) : ResolveContex
   (ctx', sym)
 
 end ResolveContext
+
+/-! ## Pointer Arithmetic Elaboration
+
+CN's compile.ml (mk_binop, lines 447-463) converts pointer + integer to arrayShift
+at elaboration time, before type checking. CN's Loc type carries the pointee Ctype
+(`Loc of Sctypes.t option`), but our BaseType.loc does not. We recover the pointee
+type from the ResolveContext's paramCTypes or from nested arrayShift terms.
+-/
+
+/-- Extract pointee Ctype from a C type (Pointer(T) → some T). -/
+def getPointeeCtype (ct : Ctype) : Option Ctype :=
+  match ct.ty with
+  | .pointer _ pointeeTy => some { ty := pointeeTy }
+  | _ => none
+
+/-- Try to determine the pointee Ctype for a resolved pointer-typed AnnotTerm.
+    - If it's a symbol reference: look up in paramCTypes, extract pointee
+    - If it's an arrayShift: the element type is already known
+    Corresponds to: CN's IT.bt returning Loc(Some ct)
+-/
+def tryGetPointeeCtype (ctx : ResolveContext) (t : AnnotTerm) : Option Ctype :=
+  match t with
+  | .mk (.sym s) _ _ =>
+    -- Look up the symbol's C type from parameter info
+    match s.name with
+    | some name =>
+      ctx.paramCTypes.find? (fun (n, _) => n == name) |>.bind fun (_, ct) =>
+        getPointeeCtype ct
+    | none => none
+  | .mk (.arrayShift _ ct _) _ _ =>
+    -- Nested pointer arithmetic: element type is preserved
+    some ct
+  | _ => none
 
 /-! ## CN Builtin Functions
 
@@ -283,6 +320,9 @@ For binary operations: infer left operand, check right operand against left's ty
 inductive ResolveError where
   | symbolNotFound (name : String)
   | integerTooLarge (n : Int)
+  /-- Pointer arithmetic on expression with unknown pointee type.
+      Corresponds to: CN's Loc(None) case which would also fail. -/
+  | unknownPointeeType (context : String)
   deriving Repr, Inhabited
 
 abbrev ResolveResult α := Except ResolveError α
@@ -418,11 +458,43 @@ partial def resolveAnnotTerm (ctx : ResolveContext) (at_ : AnnotTerm)
     -- This is asymmetric and matches CN exactly.
     let l' ← resolveAnnotTerm ctx l none  -- INFER left
     let r' ← resolveAnnotTerm ctx r (some l'.bt)  -- CHECK right against left's type
-    -- Compute result type from operator
-    let resultBt := match op with
-      | .eq | .lt | .le | .and_ | .or_ | .implies => .bool
-      | _ => l'.bt  -- Arithmetic ops: result type matches left operand
-    return .mk (.binop op l' r') resultBt loc
+    -- Pointer arithmetic elaboration (CN's compile.ml:447-463, mk_binop):
+    -- When left operand is a pointer and op is add/sub, convert to arrayShift.
+    -- CN does this because Loc carries the pointee type (Loc of Sctypes.t option).
+    -- We recover it from paramCTypes or nested arrayShift terms.
+    match op, l'.bt with
+    | .add, .loc =>
+      match tryGetPointeeCtype ctx l' with
+      | some ct =>
+        -- Cast index to uintptr type (CN invariant: arrayShift index must be uintptr)
+        -- Corresponds to: cast_ Memory.uintptr_bt vt2 loc in check.ml:681
+        let uintptrBt : BaseType := .bits .unsigned 64
+        let castIdx := match r'.bt with
+          | .bits .unsigned 64 => r'  -- Already uintptr: no-op
+          | _ => AnnotTerm.mk (.cast uintptrBt r') uintptrBt loc
+        return .mk (.arrayShift l' ct castIdx) .loc loc
+      | none =>
+        throw (.unknownPointeeType "pointer + integer: cannot determine element type")
+    | .sub, .loc =>
+      match tryGetPointeeCtype ctx l' with
+      | some ct =>
+        -- ptr - int: arrayShift with negated index
+        -- Corresponds to: compile.ml sub_ (int_lit_ 0) idx
+        let uintptrBt : BaseType := .bits .unsigned 64
+        let castIdx := match r'.bt with
+          | .bits .unsigned 64 => r'
+          | _ => AnnotTerm.mk (.cast uintptrBt r') uintptrBt loc
+        let zeroLit := AnnotTerm.mk (.const (.bits .unsigned 64 0)) uintptrBt loc
+        let negIdx := AnnotTerm.mk (.binop .sub zeroLit castIdx) uintptrBt loc
+        return .mk (.arrayShift l' ct negIdx) .loc loc
+      | none =>
+        throw (.unknownPointeeType "pointer - integer: cannot determine element type")
+    | _, _ =>
+      -- Normal (non-pointer) binary operation
+      let resultBt := match op with
+        | .eq | .lt | .le | .and_ | .or_ | .implies => .bool
+        | _ => l'.bt  -- Arithmetic ops: result type matches left operand
+      return .mk (.binop op l' r') resultBt loc
   | .mk (.unop op arg) _bt loc =>
     -- For unary ops, thread expected type to operand
     let arg' ← resolveAnnotTerm ctx arg expectedBt
@@ -573,12 +645,14 @@ def resolveFunctionSpec
     (params : List (Sym × BaseType))
     (returnType : BaseType := .unit)
     (nextFreshId : Nat := 1000)
+    (paramCTypes : List (String × Ctype) := [])
     : ResolveResult FunctionSpec := do
   -- Build initial context with parameters INCLUDING TYPES
   let paramCtx : ResolveContext := {
     nameToSymType := params.filterMap fun (sym, bt) =>
       sym.name.map fun name => (name, sym, bt)
     nextFreshId := nextFreshId
+    paramCTypes := paramCTypes
   }
 
   -- Create fresh return symbol with return type and add to context
