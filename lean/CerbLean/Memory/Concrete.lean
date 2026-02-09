@@ -703,7 +703,7 @@ def storeImpl (ty : Ctype) (isLocking : Bool) (ptr : PointerValue) (val : MemVal
   match ptr.base with
   | .null _ => throw (.access .nullPtr none)
   | .function _ => throw (.access .functionPtr none)
-  | .concrete _ addr =>
+  | .concrete unionMem addr =>
     let alloc ← getAllocation ptr
 
     -- Check read-only
@@ -730,6 +730,14 @@ def storeImpl (ty : Ctype) (isLocking : Bool) (ptr : PointerValue) (val : MemVal
     -- Note: memValueToBytes now returns List AbsByte with proper provenance
     let bytes := memValueToBytes env val
     writeBytes addr bytes
+
+    -- Update last used union member if pointer has union member annotation
+    -- Corresponds to: impl_mem.ml:1695-1698
+    match unionMem with
+    | some membr =>
+      let st ← get
+      set { st with lastUsedUnionMembers := st.lastUsedUnionMembers.insert addr membr }
+    | none => pure ()
 
     -- Lock if requested
     if isLocking then
@@ -769,8 +777,17 @@ def killImpl (isDynamic : Bool) (ptr : PointerValue) : ConcreteMemM Unit := do
       | some alloc =>
         if addr != alloc.base then
           throw (.free .outOfBound)
-        -- Mark as dead
-        set { st with deadAllocations := allocId :: st.deadAllocations }
+        -- Validate dynamic allocation for free()
+        -- Corresponds to: impl_mem.ml:1516-1526
+        if isDynamic then
+          if !st.dynamicAddrs.contains alloc.base then
+            throw (.free .nonMatching)
+        -- Mark as dead and remove from allocations
+        -- Corresponds to: impl_mem.ml:1539-1542
+        set { st with
+          deadAllocations := allocId :: st.deadAllocations
+          allocations := st.allocations.erase allocId
+        }
       | none =>
         throw (.free .nonMatching)
     | _ =>
@@ -860,7 +877,9 @@ def diffPtrvalImpl (elemTy : Ctype) (p1 p2 : PointerValue) : ConcreteMemM Intege
 def effArrayShiftPtrvalImpl (ptr : PointerValue) (elemTy : Ctype) (n : IntegerValue) : ConcreteMemM PointerValue := do
   let env ← read
   match ptr.base with
-  | .null ty => pure { ptr with base := .null ty }
+  | .null _ =>
+    -- Corresponds to: impl_mem.ml:2248-2252 — fail on NULL
+    throw .arrayShift
   | .function sym => pure { ptr with base := .function sym }
   | .concrete unionMem addr =>
     let elemSize := sizeof env elemTy

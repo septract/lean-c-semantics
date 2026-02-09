@@ -75,6 +75,9 @@ structure InterpState where
   /-- Next exclusion ID for negative polarity annotations
       (matches E.fresh_excluded_id in core_reduction.lem) -/
   nextExclusionId : Nat := 0
+  /-- Errno pointer value (set during initialization).
+      Corresponds to: errno field in core_run_aux.lem:346 -/
+  errnoPtr : Option PointerValue := none
   deriving Inhabited
 
 /-! ## Interpreter Monad -/
@@ -141,6 +144,19 @@ def liftMem (m : ConcreteMemM α) : InterpM α := do
     pure result
   | .error err =>
     throw (.memoryError err)
+
+/-- Set the errno pointer (called during initialization).
+    Corresponds to: setting errno in core_run_aux.lem:346 -/
+def setErrnoPtr (ptr : PointerValue) : InterpM Unit := do
+  modify fun st => { st with errnoPtr := some ptr }
+
+/-- Get the errno pointer.
+    Corresponds to: errno field in core_run_aux.lem:346 -/
+def getErrnoPtr : InterpM PointerValue := do
+  let st ← get
+  match st.errnoPtr with
+  | some ptr => pure ptr
+  | none => throw (.illformedProgram "errno proc called but errno not allocated")
 
 /-- Get a fresh exclusion ID for negative polarity annotations.
     Matches E.fresh_excluded_id in core_reduction.lem -/

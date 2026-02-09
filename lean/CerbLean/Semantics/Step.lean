@@ -570,10 +570,30 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
         })
       | .error err => throw err
     | .impl ic =>
-      let msg := match ic with
-        | .other name => s!"builtin function '{name}' not implemented (requires driver layer)"
-        | _ => s!"impl proc: {repr ic}"
-      throw (.notImplemented msg)
+      match ic with
+      | .other "errno" =>
+        -- Return errno pointer
+        -- Corresponds to: core_reduction.lem:959-968
+        match pes with
+        | [] =>
+          let errnoPtr ← InterpM.getErrnoPtr
+          let resultVal := Value.loaded (.specified (.pointer errnoPtr))
+          let resultExpr := mkValueExpr [] resultVal
+          pure (.continue_ { st with arena := resultExpr })
+        | _ => throw (.illformedProgram "wrong arguments for __builtin_errno")
+      | .other "exit" =>
+        -- exit(n) terminates with the given value
+        -- Corresponds to: core_reduction.lem:988-996
+        match pes with
+        | [exitCodeExpr] =>
+          let exitVal ← evalPexpr defaultPexprFuel st.env exitCodeExpr
+          pure (.done exitVal)
+        | _ => throw (.illformedProgram "exit: wrong number of arguments")
+      | _ =>
+        let msg := match ic with
+          | .other name => s!"builtin function '{name}' not implemented (requires driver layer)"
+          | _ => s!"impl proc: {repr ic}"
+        throw (.notImplemented msg)
 
   -- Eaction: execute memory action
   -- Corresponds to: core_action_step in core_run.lem:275-650

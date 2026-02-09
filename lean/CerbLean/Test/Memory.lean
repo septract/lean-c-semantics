@@ -156,8 +156,8 @@ def testUseAfterFree : IO Unit := do
     -- Allocate
     let ptr ← allocateImpl "x" 4 (some intTy) 4 .writable none
 
-    -- Free it
-    killImpl true ptr
+    -- Free it (static kill, not dynamic — allocation was not via malloc)
+    killImpl false ptr
 
     -- Try to load - should fail
     let (_, _) ← loadImpl intTy ptr
@@ -178,8 +178,8 @@ def testDoubleFree : IO Unit := do
 
   let result := runConcreteMemM emptyEnv (do
     let ptr ← allocateImpl "x" 4 (some intTy) 4 .writable none
-    killImpl true ptr
-    killImpl true ptr  -- Double free
+    killImpl false ptr
+    killImpl false ptr  -- Double free
   )
 
   match result with
