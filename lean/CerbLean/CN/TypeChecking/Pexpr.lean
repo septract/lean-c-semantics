@@ -649,27 +649,64 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
     return AnnotTerm.mk (.unop .not t) .bool loc
 
   -- Conditional
-  -- Propagate expected type to both branches.
-  -- Process both branches, then cross-propagate types: if one branch produced
-  -- a more specific type (e.g., bits signed 32 vs integer from undef), re-check
-  -- the weaker branch with the stronger type as expectedBt. This ensures dead
-  -- branches (undef) get the correct type annotation for SMT translation.
+  -- Corresponds to: PEif in cn/lib/check.ml lines 1034-1056
+  -- CN passes path conditions to each branch:
+  --   check_pexpr (c :: path_cs) e1     -- then branch gets condition
+  --   check_pexpr (not_ c :: path_cs) e2  -- else branch gets negated condition
+  -- CN's `provable` wraps checks with: (and path_cs) => constraint
+  -- In our post-hoc model, we add path conditions as constraints so that
+  -- obligations generated inside branches (e.g., PEundef unreachability)
+  -- have the branch condition in their assumptions.
+  --
+  -- **Lazy muCore**: When the else branch is PEundef, this is a Core IR safety
+  -- guard pattern (e.g., PtrValidForDeref → ptr, else undef). CN's muCore
+  -- transformation (core_to_mucore.ml) strips these guards entirely — the type
+  -- checker never sees PEundef from guards. We match this by skipping the undef
+  -- branch and returning only the then-branch result.
   | .if_ cond thenE elseE =>
     let peCond : APexpr := ⟨[], some .boolean, cond⟩
     let peThen : APexpr := ⟨[], pe.ty, thenE⟩
     let peElse : APexpr := ⟨[], pe.ty, elseE⟩
     let tCond ← checkPexpr peCond (some .bool)
+    -- Lazy muCore: strip guard patterns where else branch is PEundef.
+    -- CN's muCore transformation removes these entirely (core_to_mucore.ml).
+    -- The safety is guaranteed by the resource system (Owned<T>(ptr) implies
+    -- pointer validity), not by the PtrValidForDeref guard.
+    match elseE with
+    | .undef _ _ =>
+      -- Guard pattern: ite(check, value, undef) → just return value
+      -- Corresponds to: core_to_mucore.ml stripping PtrValidForDeref guards
+      let tThen ← checkPexpr peThen expectedBt
+      return tThen
+    | _ =>
+    -- Normal conditional (not a guard pattern)
+    -- Save constraints before adding path conditions
+    let savedConstraints ← TypingM.getConstraints
+    -- Check then branch with condition as path constraint
+    -- Corresponds to: check_pexpr (c :: path_cs) e1
+    TypingM.addC (.t tCond)
     let tThen ← checkPexpr peThen expectedBt
+    -- Restore constraints, add negation for else branch
+    -- Corresponds to: check_pexpr (not_ c loc :: path_cs) e2
+    TypingM.modifyContext (fun ctx => { ctx with constraints := savedConstraints })
+    let notCond := AnnotTerm.mk (.unop .not tCond) .bool loc
+    TypingM.addC (.t notCond)
     let tElse ← checkPexpr peElse expectedBt
+    -- Restore original constraints (path conditions are scoped to branches)
+    TypingM.modifyContext (fun ctx => { ctx with constraints := savedConstraints })
     -- Cross-propagate: if types differ and one is more specific, re-check
     let (tThen, tElse) ← match tThen.bt, tElse.bt with
       | .bits _ _, .integer =>
         -- Then has precise bits type, re-check else with that type
+        TypingM.addC (.t notCond)
         let tElse' ← checkPexpr peElse (some tThen.bt)
+        TypingM.modifyContext (fun ctx => { ctx with constraints := savedConstraints })
         pure (tThen, tElse')
       | .integer, .bits _ _ =>
         -- Else has precise bits type, re-check then with that type
+        TypingM.addC (.t tCond)
         let tThen' ← checkPexpr peThen (some tElse.bt)
+        TypingM.modifyContext (fun ctx => { ctx with constraints := savedConstraints })
         pure (tThen', tElse)
       | _, _ => pure (tThen, tElse)
     return AnnotTerm.mk (.ite tCond tThen tElse) tThen.bt loc
@@ -1030,22 +1067,21 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
     return AnnotTerm.mk (.struct_ tag memberTerms) resBt loc
 
   -- Undefined behavior marker
-  | .undef _uloc _ub =>
-    -- In CN, undef represents a path that leads to undefined behavior.
-    -- When we encounter it in a conditional branch, it means that branch
-    -- should not be taken. We return a symbolic term representing undefined.
-    -- The CN verifier will ensure this value is never actually used
-    -- (i.e., the path condition leading here is unsatisfiable).
-    -- Prefer expectedBt (from surrounding context) over pe.ty, since Core's
-    -- type for undef is often `loaded integer` which lacks sign/width info.
-    -- For `loaded integer`, use `.integer` since the value is never used and
-    -- the Core IR only tells us it's some integer type (no sign/width).
+  -- Corresponds to: PEundef in cn/lib/check.ml lines 1067-1074
+  -- CN calls `provable (LC.T (bool_ false))` to check if the path is unreachable:
+  --   - If provable (path is dead): return default value
+  --   - If not provable (UB is reachable): fail with Undefined_behaviour error
+  -- In our post-hoc model, we add an obligation that `false` must hold under
+  -- current assumptions. If SMT finds the path is reachable, this obligation
+  -- will fail, correctly flagging the UB.
+  | .undef _uloc ub =>
+    let falseTerm := AnnotTerm.mk (.const (.bool false)) .bool loc
+    TypingM.requireConstraint (.t falseTerm) loc s!"undefined behavior ({repr ub}) must be unreachable"
+    -- Return a default value (matches CN's `default_ expect loc` for dead paths)
     let resBt ← match expectedBt with
       | some bt => pure bt
       | none => match pe.ty with
         | some (.loaded .integer) | some (.object .integer) =>
-          -- Core says integer but no sign/width — use unbounded integer
-          -- This is safe because undef values are never actually used
           pure .integer
         | _ => requireCoreBaseTypeToCN pe.ty "undef expression"
     return AnnotTerm.mk (.sym undefSym) resBt loc
@@ -1094,17 +1130,25 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
       return argVal
 
   -- Wrap integer (modular arithmetic)
-  | .wrapI ty _op e1 e2 =>
-    -- Wrap integer: compute the operation with modular wrapping
-    -- Use the IntegerType to determine the proper Bits type for operands
-    -- Corresponds to: CN's handling of integer operations with Bits types
+  -- Corresponds to: PEwrapI in cn/lib/check.ml lines 945-985
+  -- CN performs the arithmetic operation; for bitvector types, modular wrapping
+  -- is inherent in the bitvec semantics (no explicit wrapI_ wrapper needed).
+  | .wrapI ty op e1 e2 =>
     let opBt := integerTypeToBaseType ty
     let pe1 : APexpr := ⟨[], none, e1⟩
     let pe2 : APexpr := ⟨[], none, e2⟩
     let t1 ← checkPexpr pe1 (some opBt)
     let t2 ← checkPexpr pe2 (some t1.bt)
-    -- Return a symbolic operation (the wrapping is implicit in the type)
-    return AnnotTerm.mk (.binop .add t1 t2) t1.bt loc
+    -- Map Iop to CN BinOp (matches CN's check.ml lines 966-983)
+    let cnOp ← match op with
+      | .add => pure BinOp.add
+      | .sub => pure BinOp.sub
+      | .mul => pure BinOp.mul
+      | .div => pure BinOp.div
+      | .rem_t => pure BinOp.rem
+      | .shl => TypingM.fail (.other "shift left (shl) not yet supported in PEwrapI")
+      | .shr => TypingM.fail (.other "shift right (shr) not yet supported in PEwrapI")
+    return AnnotTerm.mk (.binop cnOp t1 t2) t1.bt loc
 
   -- Catch exceptional condition (overflow checking)
   | .catchExceptionalCondition ty op e1 e2 =>
