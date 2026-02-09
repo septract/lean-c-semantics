@@ -224,6 +224,7 @@ def checkFunctionWithParams
     (loc : Core.Loc)
     (functionSpecs : FunctionSpecMap := {})
     (funInfoMap : Core.FunInfoMap := {})
+    (tagDefs : Core.TagDefs := [])
     : TypeCheckResult :=
   -- For trusted specs, skip verification
   if spec.trusted then
@@ -309,7 +310,7 @@ def checkFunctionWithParams
       -- This is the CN-matching approach: resolve names to symbols before type checking.
       -- Corresponds to: CN's Cabs_to_ail.desugar_cn_* functions
       -- Pass return type so 'return' symbol gets the correct type
-      let resolveResult := (Resolve.resolveFunctionSpec spec cnParams.reverse returnBt nextFreshId paramCTypes).mapError fun e =>
+      let resolveResult := (Resolve.resolveFunctionSpec spec cnParams.reverse returnBt nextFreshId paramCTypes tagDefs).mapError fun e =>
         match e with
         | .symbolNotFound name => s!"Symbol not found: {name}"
         | .integerTooLarge n => s!"Integer too large for any CN type: {n}"
@@ -333,6 +334,7 @@ def checkFunctionWithParams
         labelDefs := muProc.labels  -- Label definitions from transformation
         functionSpecs := functionSpecs  -- Pre-built function types for ccall
         funInfoMap := funInfoMap  -- C-level function signatures for cfunction/params_length
+        tagDefs := tagDefs  -- Struct/union definitions for resource unpacking
       }
 
       -- Step 9: Run type checking on transformed body

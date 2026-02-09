@@ -3,7 +3,7 @@
 **Date**: 2026-02-08
 **Scope**: Full audit of CN implementation against reference CN (tmp/cn/)
 **Current status**: 43/46 tests passing
-**Updated**: 2026-02-08 — C1, C2, C3, C5, C7 fixed; pointer arithmetic elaboration added; H6 partially fixed
+**Updated**: 2026-02-09 — C1, C2, C3, C4, C5, C7 fixed; H6, H8 partially fixed; pointer arithmetic elaboration added; struct tag resolution added
 **Method**: 5 parallel auditor agents + manual analysis
 
 ---
@@ -101,18 +101,27 @@ We represent pointers as plain `Int`. This means:
 
 Unit type now uses `cn_tuple_0` empty tuple datatype matching CN's `solver.ml:405` (`BT.Unit -> CN_Tuple.t []`). The preamble declares `(declare-datatype cn_tuple_0 ((cn_tuple_0)))` and both the sort and value use `cn_tuple_0`.
 
-### C4. Struct Types Unsupported in SMT
+### C4. Struct Types Unsupported in SMT — **FIXED**
 
-**Location**: `lean/CerbLean/CN/Verification/SmtLib.lean:73-75`
-**Severity**: HIGH — blocks struct verification
+**Location**: `lean/CerbLean/CN/Verification/SmtLib.lean`
+**Severity**: HIGH — **FIXED 2026-02-09**
 
-```lean
-| .struct_ tag => .unsupported s!"struct type {tagStr}"
-```
+Struct SMT support implemented matching CN's `CN_Structs` (solver.ml:1035-1067):
+- `declare-datatype` declarations for all structs with field selectors (`member_struct_fld`)
+- Naming convention matches CN: `tag_name_N` for sorts/constructors, `member_struct_fld` for selectors
+- `baseTypeToSort` maps `struct_ tag` to the declared sort
+- Term translation: `struct_` → constructor application, `structMember` → selector, `structUpdate` → full reconstruction
+- Struct declarations emitted in both `checkObligation` and `obligationToSmtLib2`
+- Unions explicitly skipped (CN does not support unions: check.ml:200)
 
-CN declares each struct as an SMT datatype with constructor fields matching struct members. We mark structs as unsupported. This blocks tests 023 and 045.
+Additionally, struct resource unpacking/repacking implemented matching CN's pack.ml:
+- `addResourceWithUnfold` replaces `addR` everywhere, matching CN's `add_r + do_unfold_resources` (typing.ml:687-694)
+- `unpackStructResource` matches `unpack_owned` (pack.ml:104-140): `Owned<struct>(p)` → per-field `Owned<field_type>(memberShift(p, tag, field))`
+- `tryRepackStruct` matches `packing_ft` (pack.ml:42-92): collects field resources and reconstructs struct value
+- Recursive unpacking for nested structs
+- Struct tag IDs resolved during spec resolution (Resolve.lean), matching CN's `Cabs_to_ail`
 
-**Fix**: Implement struct SMT encoding following CN's `CN_Struct.declare` pattern.
+**Remaining**: Test 023 still fails because `structMember` terms from the parser have `.unit` type instead of the field's actual type. This is an H1 (wellTyped/type inference) issue, not a struct SMT issue.
 
 ### C5. PEwrapI Always Returns Add
 
@@ -197,15 +206,15 @@ This is a deliberate design choice but introduces risks:
 ### H3. Resource Inference Simplifications
 
 **CN reference**: `tmp/cn/lib/resourceInference.ml` (~600 lines)
-**Our implementation**: `lean/CerbLean/CN/TypeChecking/Inference.lean` (~216 lines)
+**Our implementation**: `lean/CerbLean/CN/TypeChecking/Inference.lean` (~415 lines)
 
 Differences:
-1. **No packing/unpacking**: CN can "pack" struct fields into a struct Owned and vice versa. We can't.
+1. ~~**No packing/unpacking**~~: **PARTIALLY FIXED 2026-02-09** — Struct unpacking (`unpackStructResource`, matching `unpack_owned` in pack.ml:104-140) and repacking (`tryRepackStruct`, matching `packing_ft` in pack.ml:42-92) are now implemented. Recursive unpacking handles nested structs. Array unpacking is still missing.
 2. **No span resources**: CN handles array-style resources with `QPredicates`. We don't.
-3. **Simplified matching**: We do syntactic + single-candidate SMT. CN does full constraint-based matching.
+3. **Simplified matching**: We do syntactic + single-candidate SMT. CN does full constraint-based matching via `Simplify.LogicalConstraints.simp` (fast path) and solver (slow path). Our `termSyntacticEq` approximates the fast path for structural cases.
 4. **No simplification**: CN calls `Simplify.IndexTerms.simp` before comparison. We don't.
 
-**Impact**: Complex resource patterns (struct fields, arrays) won't work.
+**Impact**: Array resource patterns won't work. Simple struct patterns now work.
 
 ### H4. Remaining Fall-Through Defaults in Pexpr.lean
 
@@ -254,11 +263,16 @@ Our code always evaluates both branches and has a "cross-propagation" hack for t
 
 CN's `add_c` (typing.ml:403-412) simplifies the constraint, adds it to context, TELLS THE SOLVER via `Solver.assume`, and extracts symbol equalities. Our `addC` just appends to a list — no simplification, no solver, no equality extraction.
 
-### H8. Missing `add_r` Semantics (Pointer Facts + Resource Unfolding)
+### H8. Missing `add_r` Semantics (Pointer Facts + Resource Unfolding) — **PARTIALLY FIXED**
 
-**Location**: `Monad.lean:308`
+**Location**: `Monad.lean:308`, `Inference.lean:168`
+**PARTIALLY FIXED 2026-02-09**
 
-CN's `add_r` (typing.ml:415-427) simplifies the resource, derives pointer facts from existing resources, adds to context, then calls `do_unfold_resources` which unpacks compound resources. Our `addR` just prepends to the resource list.
+CN's `add_r` (typing.ml:415-427) simplifies the resource, derives pointer facts from existing resources, adds to context, then calls `do_unfold_resources` which unpacks compound resources.
+
+`addResourceWithUnfold` now replaces all `addR` calls (in Action.lean and Inference.lean), matching CN's `add_r + do_unfold_resources` pattern. Struct resources are automatically unpacked into field resources recursively.
+
+**Still missing**: Resource simplification, pointer fact derivation from existing resources.
 
 ### H9. Alloc_id Type as Int in SMT — **CORRECT (not a bug)**
 
@@ -369,9 +383,9 @@ The integer type bug (C1) does NOT cause false passes in the current test suite 
 
 | Test | Root Cause |
 |------|-----------|
-| 023-struct-access.c | `memop ptrMemberShift not yet implemented` |
+| 023-struct-access.c | Struct SMT works; blocked by H1 (structMember type inference: parser gives `.unit`, need field type) |
 | 044-pre-post-increment.c | Pre/post increment (++i, i++) generates complex Core IR not handled |
-| 045-struct-field-frame.c | Same memberShift gap as 023, plus struct field framing |
+| 045-struct-field-frame.c | Same H1 type inference issue as 023 |
 
 ### Recently Fixed Tests
 
@@ -507,20 +521,20 @@ Additional fixes completed (not originally in quick wins):
 |----|----------|---------|------|--------|
 | C1 | CRITICAL | Integer types `.integer` vs `.bits` | Action.lean:116 | **FIXED 2026-02-08** — `ctypeToBaseType` now delegates to `ctypeInnerToBaseType` (Bits mapping) |
 | C2 | CRITICAL | Pointer SMT encoding Int vs algebraic datatype | SmtLib.lean:69 | **FIXED 2026-02-08** — `declare-datatype pointer` preamble, ptr_shift/copy_alloc_id/addr_of/bits_to_ptr/alloc_id_of helpers, TypeEnv threading for memberShift/offsetOf |
-| C3 | HIGH | Unit SMT encoding Bool vs empty tuple | SmtLib.lean:71 | Open |
-| C4 | HIGH | Struct types unsupported in SMT | SmtLib.lean:73 | Open |
+| C3 | HIGH | Unit SMT encoding Bool vs empty tuple | SmtLib.lean:71 | **FIXED 2026-02-08** — `cn_tuple_0` empty tuple datatype matching CN |
+| C4 | HIGH | Struct types unsupported in SMT | SmtLib.lean:73 | **FIXED 2026-02-09** — Struct SMT declarations, sort mapping, term translation, resource unpacking/repacking, tag resolution |
 | C5 | CRITICAL | PEwrapI always returns add | Pexpr.lean:1130 | **FIXED 2026-02-08** — now maps each Iop to correct BinOp |
 | C6 | CRITICAL | PEcatch_exceptional_condition no overflow check | Pexpr.lean:1153 | Open |
 | C7 | CRITICAL | PEundef never fails | Pexpr.lean:1067 | **FIXED 2026-02-08** — generates `requireConstraint(false)` unreachability obligation |
 | C8 | HIGH | Spec structure flat vs recursive LRT/LAT/AT | Spec.lean | Open |
 | H1 | HIGH | No wellTyped checking | (missing) | Open |
 | H2 | MEDIUM | Lazy muCore vs upfront muCore | (by design) | Accepted |
-| H3 | HIGH | Resource inference simplified | Inference.lean | Open |
+| H3 | HIGH | Resource inference simplified | Inference.lean | **PARTIALLY FIXED 2026-02-09** — Struct packing/unpacking implemented; array resources and simplification still missing |
 | H4 | MEDIUM | Remaining fall-through defaults | Pexpr.lean | Open |
 | H5 | HIGH | No inline solver during type checking | Monad.lean | Architectural |
 | H6 | MEDIUM | PEif always evaluates both branches | Pexpr.lean:657 | **PARTIALLY FIXED 2026-02-08** — path conditions (CN's `path_cs`) now tracked; guard patterns stripped (lazy muCore). Still evaluates both non-guard branches (no solver pruning). |
 | H7 | MEDIUM | add_c missing solver assume + equality extraction | Monad.lean:303 | Open |
-| H8 | MEDIUM | add_r missing pointer facts + unfolding | Monad.lean:308 | Open |
+| H8 | MEDIUM | add_r missing pointer facts + unfolding | Monad.lean:308 | **PARTIALLY FIXED 2026-02-09** — `addResourceWithUnfold` replaces all `addR` calls; struct unfolding works; pointer facts still missing |
 | H9 | LOW | AllocId as Int in SMT | SmtLib.lean:70 | Open |
 | M1 | LOW | MemByte as Int in SMT | SmtLib.lean | Open |
 | M2 | MEDIUM | Missing representable/good constraints | Action.lean:311 | Open |
