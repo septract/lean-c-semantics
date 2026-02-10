@@ -1127,7 +1127,8 @@ mutual
       let locJ ← getField exprJ "loc"
       let loc ← parseLoc locJ
       let ubStr ← getStr exprJ "ub"
-      .ok (Pexpr.undef loc (.other ubStr))
+      let ub ← UndefinedBehavior.fromString ubStr
+      .ok (Pexpr.undef loc ub)
     | "PEerror" =>
       let msg ← getStr exprJ "message"
       let e ← getField exprJ "expr"
