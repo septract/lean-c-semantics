@@ -249,8 +249,8 @@ def alignUp (n : Nat) (align : Nat) : Nat :=
 
 mutual
   /-- Compute sizeof for inner ctype.
-      Corresponds to: sizeof in impl_mem.ml:2492
-      Audited: 2026-01-01
+      Corresponds to: sizeof in impl_mem.ml:131-171
+      Audited: 2026-02-10
       Deviations: None -/
   partial def sizeof_ (env : TypeEnv) : Ctype_ → Nat
     | .void => 0  -- void has size 0
@@ -263,7 +263,14 @@ mutual
     | .atomic ty => sizeof_ env ty
     | .struct_ tag =>
       match env.lookupTag tag with
-      | some (.struct_ members _) => structSize env members
+      | some (.struct_ members _) =>
+        -- Cerberus: offsetsof ~ignore_flexible:true for regular members only (impl_mem.ml:168)
+        let endOffset := members.foldl (init := (0 : Nat)) fun offset m =>
+          let memberAlign := alignof env m.ty
+          let alignedOffset := alignUp offset memberAlign
+          alignedOffset + sizeof env m.ty
+        -- Cerberus: align to alignof(struct) which includes flex member (impl_mem.ml:169)
+        alignUp endOffset (alignof_ env (.struct_ tag))
       | some (.union_ _) => panic! s!"sizeof: expected struct but found union for tag {tag.name}"
       | none => panic! s!"sizeof: undefined struct tag {tag.name}"
     | .union_ tag =>
@@ -281,8 +288,8 @@ mutual
     sizeof_ env ct.ty
 
   /-- Compute alignof for inner ctype.
-      Corresponds to: alignof in impl_mem.ml:2494
-      Audited: 2026-01-01
+      Corresponds to: alignof in impl_mem.ml:196-253
+      Audited: 2026-02-10
       Deviations: None -/
   partial def alignof_ (env : TypeEnv) : Ctype_ → Nat
     | .void => 1
@@ -294,7 +301,12 @@ mutual
     | .atomic ty => alignof_ env ty
     | .struct_ tag =>
       match env.lookupTag tag with
-      | some (.struct_ members _) => structAlign env members
+      | some (.struct_ members flexOpt) =>
+        -- Cerberus includes flex member alignment in init (impl_mem.ml:235-239)
+        let flexAlign := match flexOpt with
+          | some flex => alignof env flex.ty
+          | none => 1
+        members.foldl (init := flexAlign) fun acc m => max acc (alignof env m.ty)
       | some (.union_ _) => panic! s!"alignof: expected struct but found union for tag {tag.name}"
       | none => panic! s!"alignof: undefined struct tag {tag.name}"
     | .union_ tag =>

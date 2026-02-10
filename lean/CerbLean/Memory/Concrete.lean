@@ -373,7 +373,7 @@ partial def memValueToBytes (env : TypeEnv) (val : MemValue) : List AbsByte :=
     match env.lookupTag tag with
     | some (.struct_ fields _) =>
       let offsets := structOffsets env fields
-      let size := structSize env fields
+      let size := sizeof_ env (.struct_ tag)
       let bytes := List.replicate size (mkAbsByte (some 0))
       members.foldl (init := bytes) fun acc (name, _, mval) =>
         match offsets.find? (·.1 == name) with
@@ -581,8 +581,8 @@ partial def reconstructValue (env : TypeEnv) (ty : Ctype) (bytes : List AbsByte)
     -- Audited: 2026-01-06
     match env.lookupTag tag with
     | some (.struct_ fields _) =>
-      let structSize := structSize env fields
-      let structBytes := bytes.take structSize
+      let structSz := sizeof_ env (.struct_ tag)
+      let structBytes := bytes.take structSz
       let memberInfo := structMemberInfo env fields
       -- Fold over members, tracking previous offset like Cerberus
       let (_, revMembers) ← memberInfo.foldlM (init := (0, [])) fun (prevOffset, acc) (membIdent, membTy, membOffset) => do
