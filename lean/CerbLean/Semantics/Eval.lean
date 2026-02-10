@@ -71,6 +71,12 @@ open CerbLean.Core
 open CerbLean.Memory
 open Std (HashMap)
 
+/-- Lift a Layout `Except String` result into `InterpM`, mapping errors to type errors. -/
+private def liftLayout (r : Except String α) : InterpM α :=
+  match r with
+  | .ok a => pure a
+  | .error msg => InterpM.throwTypeError msg
+
 /-! ## Bitwise Operations for Integers
 
 Implements infinite two's complement bitwise operations matching Zarith/GMP semantics.
@@ -529,7 +535,7 @@ def evalCtor (c : Ctor) (args : List Value) : InterpM Value := do
     match args with
     | [.ctype ty] =>
       let env ← InterpM.getTypeEnv
-      let iv := sizeofIval env ty
+      let iv ← liftLayout (sizeofIval env ty)
       pure (.object (.integer iv))
     | _ => InterpM.throwTypeError "IVsizeof requires ctype"
 
@@ -537,7 +543,7 @@ def evalCtor (c : Ctor) (args : List Value) : InterpM Value := do
     match args with
     | [.ctype ty] =>
       let env ← InterpM.getTypeEnv
-      let iv := alignofIval env ty
+      let iv ← liftLayout (alignofIval env ty)
       pure (.object (.integer iv))
     | _ => InterpM.throwTypeError "IValignof requires ctype"
 
@@ -856,10 +862,10 @@ def evalPexpr (fuel : Nat) (env : List (HashMap Sym Value)) (pe : APexpr) : Inte
       pure (.object (.integer (minIval typeEnv ity)))
     | .sizeof_ ty =>
       let typeEnv ← InterpM.getTypeEnv
-      pure (.object (.integer (sizeofIval typeEnv ty)))
+      pure (.object (.integer (← liftLayout (sizeofIval typeEnv ty))))
     | .alignof_ ty =>
       let typeEnv ← InterpM.getTypeEnv
-      pure (.object (.integer (alignofIval typeEnv ty)))
+      pure (.object (.integer (← liftLayout (alignofIval typeEnv ty))))
     | .other name =>
       -- Implementation-defined constants
       -- Corresponds to: implementation.lem:487-491 for Characters module
@@ -1042,7 +1048,7 @@ def evalPexpr (fuel : Nat) (env : List (HashMap Sym Value)) (pe : APexpr) : Inte
       match valueToInt idxVal with
       | some iv =>
         let typeEnv ← InterpM.getTypeEnv
-        let newPtr := arrayShiftPtrval typeEnv pv ty iv
+        let newPtr ← liftLayout (arrayShiftPtrval typeEnv pv ty iv)
         pure (.object (.pointer newPtr))
       | none => InterpM.throwTypeError "array index must be integer"
     | _ => InterpM.throwTypeError "arrayShift requires pointer"
@@ -1052,7 +1058,7 @@ def evalPexpr (fuel : Nat) (env : List (HashMap Sym Value)) (pe : APexpr) : Inte
     match ptrVal with
     | .object (.pointer pv) =>
       let typeEnv ← InterpM.getTypeEnv
-      let newPtr := memberShiftPtrval typeEnv pv tag member
+      let newPtr ← liftLayout (memberShiftPtrval typeEnv pv tag member)
       pure (.object (.pointer newPtr))
     | _ => InterpM.throwTypeError "memberShift requires pointer"
 

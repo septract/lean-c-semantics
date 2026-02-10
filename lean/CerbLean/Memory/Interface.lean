@@ -138,15 +138,15 @@ def minIval (_env : TypeEnv) (ity : IntegerType) : IntegerValue :=
     Corresponds to: sizeof_ival in memory_model.ml:140
     Audited: 2026-01-01
     Deviations: None -/
-def sizeofIval (env : TypeEnv) (ty : Ctype) : IntegerValue :=
-  integerIval (sizeof env ty)
+def sizeofIval (env : TypeEnv) (ty : Ctype) : Except String IntegerValue := do
+  pure (integerIval (← sizeof env ty))
 
 /-- alignof(ty) as integer value.
     Corresponds to: alignof_ival in memory_model.ml:141
     Audited: 2026-01-01
     Deviations: None -/
-def alignofIval (env : TypeEnv) (ty : Ctype) : IntegerValue :=
-  integerIval (alignof env ty)
+def alignofIval (env : TypeEnv) (ty : Ctype) : Except String IntegerValue := do
+  pure (integerIval (← alignof env ty))
 
 /-! ## Memory Value Constructors
 
@@ -357,33 +357,33 @@ are in the MemoryOps typeclass and perform bounds checking.
     Computes: ptr + (n * sizeof(elemTy))
     Audited: 2026-01-01
     Deviations: None -/
-def arrayShiftPtrval (env : TypeEnv) (ptr : PointerValue) (elemTy : Ctype) (n : IntegerValue) : PointerValue :=
+def arrayShiftPtrval (env : TypeEnv) (ptr : PointerValue) (elemTy : Ctype) (n : IntegerValue) : Except String PointerValue := do
   match ptr.base with
   -- Cerberus: impl_mem.ml:2214-2217 — shifting NULL is undefined behaviour
-  | .null _ => panic! "arrayShiftPtrval: shifting a NULL pointer is undefined behaviour"
-  | .function sym => { ptr with base := .function sym }  -- Keep function ptr
+  | .null _ => throw "arrayShiftPtrval: shifting a NULL pointer is undefined behaviour"
+  | .function sym => pure { ptr with base := .function sym }  -- Keep function ptr
   | .concrete unionMem addr =>
-    let elemSize := sizeof env elemTy
+    let elemSize ← sizeof env elemTy
     -- Handle negative offsets properly (n.val is Int, not Nat)
     let offset := n.val * elemSize
     let newAddr := (addr : Int) + offset
     -- Convert back to Nat (should be non-negative after bounds check)
-    { ptr with base := .concrete unionMem newAddr.toNat }
+    pure { ptr with base := .concrete unionMem newAddr.toNat }
 
 /-- Pure struct member shift.
     Corresponds to: member_shift_ptrval in memory_model.ml:110
     Audited: 2026-01-01
     Deviations: None -/
-def memberShiftPtrval (env : TypeEnv) (ptr : PointerValue) (tag : Sym) (member : Identifier) : PointerValue :=
+def memberShiftPtrval (env : TypeEnv) (ptr : PointerValue) (tag : Sym) (member : Identifier) : Except String PointerValue := do
   match ptr.base with
-  | .null ty => { ptr with base := .null ty }
-  | .function sym => { ptr with base := .function sym }
+  | .null ty => pure { ptr with base := .null ty }
+  | .function sym => pure { ptr with base := .function sym }
   | .concrete _ addr =>
-    let offset := memberOffset env tag member
+    let offset ← memberOffset env tag member
     -- For union members, track which member we're accessing
     let unionMem := match env.lookupTag tag with
       | some (.union_ _) => some member
       | _ => none
-    { ptr with base := .concrete unionMem (addr + offset) }
+    pure { ptr with base := .concrete unionMem (addr + offset) }
 
 end CerbLean.Memory

@@ -21,6 +21,12 @@ open CerbLean.Core
 open CerbLean.Memory
 open Std (HashMap)
 
+/-- Lift a Layout `Except String` result into `InterpM`, mapping errors to type errors. -/
+private def liftLayout (r : Except String α) : InterpM α :=
+  match r with
+  | .ok a => pure a
+  | .error msg => InterpM.throwTypeError msg
+
 /-! ## Call Procedure
 
 Corresponds to: call_proc in core_run.lem:30-70
@@ -697,7 +703,7 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
         match alignVal, sizeVal with
         | .object (.integer alignIv), .ctype ty =>
           let typeEnv ← InterpM.getTypeEnv
-          let size := sizeof typeEnv ty
+          let size ← liftLayout (sizeof typeEnv ty)
           let prefixName := prefix_.val
           let ptr ← InterpM.liftMem (allocateImpl prefixName size (some ty) alignIv.val.toNat .writable none)
           let resultVal := Value.object (.pointer ptr)
@@ -714,7 +720,7 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
         match alignVal, sizeVal with
         | .object (.integer alignIv), .ctype ty =>
           let typeEnv ← InterpM.getTypeEnv
-          let size := sizeof typeEnv ty
+          let size ← liftLayout (sizeof typeEnv ty)
           let prefixName := prefix_.val
           -- Convert Core value to MemValue
           match memValueFromValue ty initVal with
@@ -993,7 +999,7 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
       match alignVal, sizeVal with
       | .object (.integer alignIv), .ctype ty =>
         let typeEnv ← InterpM.getTypeEnv
-        let size := sizeof typeEnv ty
+        let size ← liftLayout (sizeof typeEnv ty)
         let prefixName := prefix_.val
         let ptr ← InterpM.liftMem (allocateImpl prefixName size (some ty) alignIv.val.toNat .writable none)
         let resultVal := Value.object (.pointer ptr)
@@ -1010,7 +1016,7 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
       match alignVal, sizeVal with
       | .object (.integer alignIv), .ctype ty =>
         let typeEnv ← InterpM.getTypeEnv
-        let size := sizeof typeEnv ty
+        let size ← liftLayout (sizeof typeEnv ty)
         let prefixName := prefix_.val
         match memValueFromValue ty initVal with
         | some mval =>
@@ -1645,7 +1651,7 @@ def prepareMainArgs (args : List String) : InterpM (Value × Value) := do
   for arg in args do
     let argMval := stringToCharArrayMval arg
     let argArrayTy := Ctype.mk' (.array charTy.ty (some (arg.length + 1)))  -- +1 for null
-    let argSize := sizeof typeEnv argArrayTy
+    let argSize ← liftLayout (sizeof typeEnv argArrayTy)
     -- Cerberus: Mem.allocate_object tid0 (Symbol.PrefOther "argv refs") ...
     let argPtr ← InterpM.liftMem (allocateImpl "argv refs" argSize (some argArrayTy) 1 .writable (some argMval))
     argPtrs := argPtrs ++ [argPtr]
@@ -1660,8 +1666,8 @@ def prepareMainArgs (args : List String) : InterpM (Value × Value) := do
   let argvArrayMval := arrayMval argvArrayElems
   let argvArrayLen := args.length + 1  -- argc + 1 for null terminator
   let argvArrayTy := Ctype.mk' (.array charPtrTy.ty (some argvArrayLen))
-  let argvArraySize := sizeof typeEnv argvArrayTy
-  let argvArrayAlign := alignof typeEnv argvArrayTy
+  let argvArraySize ← liftLayout (sizeof typeEnv argvArrayTy)
+  let argvArrayAlign ← liftLayout (alignof typeEnv argvArrayTy)
   -- Cerberus: Mem.allocate_object tid0 pref (Mem.alignof_ival argv_array_ty) argv_array_ty Nothing Nothing
   let argvArrayPtr ← InterpM.liftMem (allocateImpl "argv array" argvArraySize (some argvArrayTy) argvArrayAlign .writable (some argvArrayMval))
 
@@ -1671,8 +1677,8 @@ def prepareMainArgs (args : List String) : InterpM (Value × Value) := do
   --   so two objects are allocated: an array and a pointer to that array"
   -- Cerberus: argv_ty = mk_ctype_pointer no_qualifiers pointer_to_char
   let argvMval := pointerMval charPtrTy argvArrayPtr
-  let argvSize := sizeof typeEnv charPtrPtrTy
-  let argvAlign := alignof typeEnv charPtrPtrTy
+  let argvSize ← liftLayout (sizeof typeEnv charPtrPtrTy)
+  let argvAlign ← liftLayout (alignof typeEnv charPtrPtrTy)
   let argvPtr ← InterpM.liftMem (allocateImpl "argv" argvSize (some charPtrPtrTy) argvAlign .writable (some argvMval))
 
   -- Step 4: Allocate argc (signed int with value = number of args)
@@ -1681,8 +1687,8 @@ def prepareMainArgs (args : List String) : InterpM (Value × Value) := do
   -- Cerberus: argc_mem_val = Mem.integer_mval (Ctype.Signed Ctype.Int_) number_of_args
   let argc := args.length
   let argcMval := integerValueMval (.signed .int_) ⟨argc, .none⟩
-  let argcSize := sizeof typeEnv signedIntTy
-  let argcAlign := alignof typeEnv signedIntTy
+  let argcSize ← liftLayout (sizeof typeEnv signedIntTy)
+  let argcAlign ← liftLayout (alignof typeEnv signedIntTy)
   let argcPtr ← InterpM.liftMem (allocateImpl "argc" argcSize (some signedIntTy) argcAlign .writable (some argcMval))
 
   -- Return (argc_cval, argv_cval) as object pointers

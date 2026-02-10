@@ -118,15 +118,21 @@ abbrev ConcreteMemM := ReaderT TypeEnv MemM
 Internal utilities for the concrete memory model.
 -/
 
+/-- Lift a layout computation (Except String) into ConcreteMemM. -/
+private def liftLayout (r : Except String α) : ConcreteMemM α :=
+  match r with
+  | .ok a => pure a
+  | .error msg => throw (.typeError msg)
+
 /-- Get allocation ID from provenance.
     Audited: 2026-01-01
     Deviations: None -/
-def toAllocId (prov : Provenance) : Nat :=
+def toAllocId (prov : Provenance) : Except MemError Nat :=
   match prov with
-  | .some id => id
-  | .none => panic! "toAllocId: provenance is none"
-  | .symbolic iota => panic! s!"toAllocId: provenance is symbolic (iota={iota})"
-  | .device => panic! "toAllocId: provenance is device"
+  | .some id => .ok id
+  | .none => .error (.typeError "toAllocId: provenance is none")
+  | .symbolic iota => .error (.typeError s!"toAllocId: provenance is symbolic (iota={iota})")
+  | .device => .error (.typeError "toAllocId: provenance is device")
 
 /-- Check if a Ctype is atomic.
     Corresponds to: AilTypesAux.is_atomic in Cerberus -/
@@ -242,11 +248,10 @@ def writeBytesWithProv (addr : Nat) (bytes : List (Option UInt8)) (prov : Proven
     Deviations: None (little-endian byte order matches) -/
 def readBytes (addr : Nat) (size : Nat) : ConcreteMemM (List AbsByte) := do
   let st ← get
-  let bytes := List.range size |>.map fun i =>
+  (List.range size).mapM fun i =>
     match st.bytemap[addr + i]? with
-    | some b => b
-    | none => panic! s!"readBytes: address {addr + i} not in bytemap (reading {size} bytes from {addr})"
-  pure bytes
+    | some b => pure b
+    | none => throw (.access .outOfBoundPtr (some (addr + i)))
 
 /-! ## Value Serialization
 
@@ -283,7 +288,8 @@ def bytesToInt (bytes : List AbsByte) (signed : Bool) : Option Int :=
       | b :: rest =>
         let contribution := match b.value with
           | some v => (v.toNat : Int) <<< (i * 8)
-          | none => panic! "bytesToInt: unexpected none value (should have been caught earlier)"
+          -- Unreachable: guarded by `bytes.any (·.value.isNone)` check above
+          | none => panic! "bytesToInt: unreachable — all bytes checked non-none above"
         go rest (i + 1) (acc + contribution)
     let unsigned := go bytes 0 0
     if signed && bytes.length > 0 then
@@ -325,14 +331,15 @@ def rawToAbsBytes (bytes : List (Option UInt8)) : List AbsByte :=
     Audited: 2026-01-16
     Deviations:
     - Function pointer encoding simplified -/
-partial def memValueToBytes (env : TypeEnv) (val : MemValue) : List AbsByte :=
+partial def memValueToBytes (env : TypeEnv) (val : MemValue) : Except MemError (List AbsByte) := do
   match val with
   | .unspecified ty =>
-    List.replicate (sizeof env ty) (mkAbsByte none)
+    let sz ← (sizeof env ty).mapError .typeError
+    pure (List.replicate sz (mkAbsByte none))
   | .integer ity iv =>
     -- Integer bytes carry the integer's provenance (for pointer-derived integers)
     let rawBytes := intToBytes iv.val (integerTypeSize ity)
-    rawBytes.mapIdx fun i v => { prov := iv.prov, copyOffset := some i, value := v }
+    pure (rawBytes.mapIdx fun i v => { prov := iv.prov, copyOffset := some i, value := v })
   | .floating fty fv =>
     -- Store float as IEEE 754 bit representation
     -- Corresponds to: impl_mem.ml float storing (repr for floating types)
@@ -342,22 +349,22 @@ partial def memValueToBytes (env : TypeEnv) (val : MemValue) : List AbsByte :=
     | .finite f =>
       -- Convert float to IEEE 754 64-bit bits (always double precision)
       let bits := f.toBits.toNat
-      rawToAbsBytes (intToBytes bits size)
+      pure (rawToAbsBytes (intToBytes bits size))
     | .nan =>
       -- IEEE 754 quiet NaN: exponent all 1s, mantissa MSB = 1
       let bits := 0x7FF8000000000000  -- 64-bit NaN
-      rawToAbsBytes (intToBytes bits size)
+      pure (rawToAbsBytes (intToBytes bits size))
     | .posInf =>
       -- IEEE 754 +Infinity: sign=0, exponent all 1s, mantissa all 0s
       let bits := 0x7FF0000000000000  -- 64-bit +Infinity
-      rawToAbsBytes (intToBytes bits size)
+      pure (rawToAbsBytes (intToBytes bits size))
     | .negInf =>
       -- IEEE 754 -Infinity: sign=1, exponent all 1s, mantissa all 0s
       let bits := 0xFFF0000000000000  -- 64-bit -Infinity
-      rawToAbsBytes (intToBytes bits size)
+      pure (rawToAbsBytes (intToBytes bits size))
     | .unspecified =>
       -- Unspecified float value - store as unspecified bytes
-      List.replicate size (mkAbsByte none)
+      pure (List.replicate size (mkAbsByte none))
   | .pointer _ pv =>
     -- Pointer bytes carry the pointer's provenance
     -- Corresponds to: impl_mem.ml:1187 - AbsByte.v prov ~copy_offset:(Some i)
@@ -365,37 +372,38 @@ partial def memValueToBytes (env : TypeEnv) (val : MemValue) : List AbsByte :=
       | .null _ => (intToBytes 0 targetPtrSize, Provenance.none)
       | .function sym => (intToBytes sym.id targetPtrSize, pv.prov)
       | .concrete _ addr => (intToBytes addr targetPtrSize, pv.prov)
-    rawBytes.mapIdx fun i v => mkAbsByteWithProv prov i v
+    pure (rawBytes.mapIdx fun i v => mkAbsByteWithProv prov i v)
   | .array elems =>
-    elems.flatMap (memValueToBytes env)
+    let results ← elems.mapM (memValueToBytes env)
+    pure results.flatten
   | .struct_ tag members =>
     -- Layout struct with padding
     match env.lookupTag tag with
-    | some (.struct_ fields _) =>
-      let offsets := structOffsets env fields
-      let size := sizeof_ env (.struct_ tag)
+    | some (.struct_ fields _) => do
+      let offsets ← (structOffsets env fields).mapError .typeError
+      let size ← (sizeof_ env (.struct_ tag)).mapError .typeError
       let bytes := List.replicate size (mkAbsByte (some 0))
-      members.foldl (init := bytes) fun acc (name, _, mval) =>
+      members.foldlM (init := bytes) fun acc (name, _, mval) =>
         match offsets.find? (·.1 == name) with
-        | some (_, offset) =>
-          let memberBytes := memValueToBytes env mval
+        | some (_, offset) => do
+          let memberBytes ← memValueToBytes env mval
           -- Insert member bytes at offset
-          acc.mapIdx fun i b =>
+          pure (acc.mapIdx fun i b =>
             if i >= offset && i < offset + memberBytes.length then
               memberBytes[i - offset]!
-            else b
-        | none => panic! s!"memValueToBytes: member {name.name} not found in struct {tag.name}"
-    | some (.union_ _) => panic! s!"memValueToBytes: expected struct but found union for tag {tag.name}"
-    | none => panic! s!"memValueToBytes: undefined struct tag {tag.name}"
+            else b)
+        | none => throw (.typeError s!"memValueToBytes: member {name.name} not found in struct {tag.name}")
+    | some (.union_ _) => throw (.typeError s!"memValueToBytes: expected struct but found union for tag {tag.name}")
+    | none => throw (.typeError s!"memValueToBytes: undefined struct tag {tag.name}")
   | .union_ tag _ mval =>
     -- Union uses size of largest member
-    let memberBytes := memValueToBytes env mval
+    let memberBytes ← memValueToBytes env mval
     match env.lookupTag tag with
-    | some (.union_ fields) =>
-      let size := unionSize env fields
-      memberBytes ++ List.replicate (size - memberBytes.length) (mkAbsByte (some 0))
-    | some (.struct_ _ _) => panic! s!"memValueToBytes: expected union but found struct for tag {tag.name}"
-    | none => panic! s!"memValueToBytes: undefined union tag {tag.name}"
+    | some (.union_ fields) => do
+      let size ← (unionSize env fields).mapError .typeError
+      pure (memberBytes ++ List.replicate (size - memberBytes.length) (mkAbsByte (some 0)))
+    | some (.struct_ _ _) => throw (.typeError s!"memValueToBytes: expected union but found struct for tag {tag.name}")
+    | none => throw (.typeError s!"memValueToBytes: undefined union tag {tag.name}")
 
 /-- Collect all function pointer symbols from a MemValue.
     Used to register function pointers in funptrmap before serialization.
@@ -480,7 +488,7 @@ def allocateImpl (name : String) (size : Nat) (ty : Option Ctype)
   -- Audited: 2026-01-06
   match init with
   | some val =>
-    let bytes := memValueToBytes env val
+    let bytes ← liftExcept (memValueToBytes env val)
     writeBytes alignedAddr bytes
   | none =>
     -- Write unspecified bytes (NOT zero-initialized)
@@ -553,7 +561,7 @@ partial def reconstructValue (env : TypeEnv) (ty : Ctype) (bytes : List AbsByte)
     -- Corresponds to: abst in impl_mem.ml:986-994 (Array case)
     -- Audited: 2026-01-06
     let elemCty : Ctype := { ty := elemTy }
-    let elemSize := sizeof env elemCty
+    let elemSize ← liftLayout (sizeof env elemCty)
     let elems ← List.range n |>.mapM fun i => do
       let start := i * elemSize
       let elemBytes := bytes.drop start |>.take elemSize
@@ -581,19 +589,19 @@ partial def reconstructValue (env : TypeEnv) (ty : Ctype) (bytes : List AbsByte)
     -- Audited: 2026-01-06
     match env.lookupTag tag with
     | some (.struct_ fields _) =>
-      let structSz := sizeof_ env (.struct_ tag)
+      let structSz ← liftLayout (sizeof_ env (.struct_ tag))
       let structBytes := bytes.take structSz
-      let memberInfo := structMemberInfo env fields
+      let memberInfo ← liftLayout (structMemberInfo env fields)
       -- Fold over members, tracking previous offset like Cerberus
       let (_, revMembers) ← memberInfo.foldlM (init := (0, [])) fun (prevOffset, acc) (membIdent, membTy, membOffset) => do
         -- Corresponds to: let pad = N.to_int (N.sub memb_offset previous_offset) in
         let _pad := membOffset - prevOffset
         -- Corresponds to: let (taint, mval, acc_bs') = self ~offset:pad memb_ty (L.drop pad acc_bs) in
-        let membSize := sizeof env membTy
+        let membSize ← liftLayout (sizeof env membTy)
         let membBytes := structBytes.drop membOffset |>.take membSize
         let membVal ← reconstructValue env membTy membBytes
         -- Corresponds to: N.add memb_offset (sizeof memb_ty)
-        let newPrevOffset := membOffset + sizeof env membTy
+        let newPrevOffset := membOffset + membSize
         pure (newPrevOffset, (membIdent, membTy, membVal) :: acc)
       -- Corresponds to: MVstruct (tag_sym, List.rev rev_xs)
       pure (.struct_ tag revMembers.reverse)
@@ -667,7 +675,7 @@ def loadImpl (ty : Ctype) (ptr : PointerValue) : ConcreteMemM (Footprint × MemV
     -- Check allocation validity
     let alloc ← getAllocation ptr
 
-    let size := sizeof env ty
+    let size ← liftLayout (sizeof env ty)
     -- Check bounds
     if !isInBounds alloc addr size then
       throw (.access .outOfBoundPtr (some addr))
@@ -712,7 +720,7 @@ def storeImpl (ty : Ctype) (isLocking : Bool) (ptr : PointerValue) (val : MemVal
     | .readonly _ => throw .readonlyWrite
     | .writable => pure ()
 
-    let size := sizeof env ty
+    let size ← liftLayout (sizeof env ty)
     -- Check bounds
     if !isInBounds alloc addr size then
       throw (.access .outOfBoundPtr (some addr))
@@ -729,7 +737,7 @@ def storeImpl (ty : Ctype) (isLocking : Bool) (ptr : PointerValue) (val : MemVal
 
     -- Serialize and write
     -- Note: memValueToBytes now returns List AbsByte with proper provenance
-    let bytes := memValueToBytes env val
+    let bytes ← liftExcept (memValueToBytes env val)
     writeBytes addr bytes
 
     -- Update last used union member if pointer has union member annotation
@@ -745,7 +753,7 @@ def storeImpl (ty : Ctype) (isLocking : Bool) (ptr : PointerValue) (val : MemVal
     -- Derives readonly kind from allocation prefix (impl_mem.ml:1704-1710 select_ro_kind)
     if isLocking then
       let st ← get
-      let allocId := toAllocId ptr.prov
+      let allocId ← liftExcept (toAllocId ptr.prov)
       match st.allocations[allocId]? with
       | some allocRec =>
         let roKind := match allocRec.name with
@@ -753,7 +761,7 @@ def storeImpl (ty : Ctype) (isLocking : Bool) (ptr : PointerValue) (val : MemVal
           | "PrefTemporaryLifetime" => ReadonlyKind.temporaryLifetime
           | _ => ReadonlyKind.constQualified
         set { st with allocations := st.allocations.insert allocId { allocRec with isReadonly := .readonly roKind } }
-      | none => panic! s!"storeImpl: allocation {allocId} not found when trying to lock"
+      | none => throw (.typeError s!"storeImpl: allocation {allocId} not found when trying to lock")
 
     pure { kind := .write, base := addr, size := size }
 
@@ -878,7 +886,7 @@ def diffPtrvalImpl (elemTy : Ctype) (p1 p2 : PointerValue) : ConcreteMemM Intege
         -- Corresponds to: impl_mem.ml:1954-2063
         throw .ptrdiff
       else
-        let elemSize := sizeof env elemTy
+        let elemSize ← liftLayout (sizeof env elemTy)
         if elemSize == 0 then
           throw (.typeError "pointer difference with zero-sized element")
         let diff := (a1 : Int) - (a2 : Int)
@@ -901,7 +909,7 @@ def effArrayShiftPtrvalImpl (ptr : PointerValue) (elemTy : Ctype) (n : IntegerVa
     throw .arrayShift
   | .function sym => pure { ptr with base := .function sym }
   | .concrete unionMem addr =>
-    let elemSize := sizeof env elemTy
+    let elemSize ← liftLayout (sizeof env elemTy)
     let offset := n.val * elemSize
     let newAddr := (addr : Int) + offset
 
@@ -925,9 +933,9 @@ def effArrayShiftPtrvalImpl (ptr : PointerValue) (elemTy : Ctype) (n : IntegerVa
       -- No provenance, just do the arithmetic (no bounds checking possible)
       pure { ptr with base := .concrete unionMem newAddr.toNat }
     | .symbolic iota =>
-      panic! s!"effArrayShiftPtrvalImpl: symbolic provenance not implemented (iota={iota})"
+      throw (.typeError s!"effArrayShiftPtrvalImpl: symbolic provenance not implemented (iota={iota})")
     | .device =>
-      panic! "effArrayShiftPtrvalImpl: device provenance not implemented"
+      throw (.typeError "effArrayShiftPtrvalImpl: device provenance not implemented")
 
 /-- Effectful member shift.
     Corresponds to: eff_member_shift_ptrval in impl_mem.ml
@@ -935,7 +943,7 @@ def effArrayShiftPtrvalImpl (ptr : PointerValue) (elemTy : Ctype) (n : IntegerVa
     Deviations: None -/
 def effMemberShiftPtrvalImpl (ptr : PointerValue) (tag : Sym) (member : Identifier) : ConcreteMemM PointerValue := do
   let env ← read
-  pure (memberShiftPtrval env ptr tag member)
+  liftLayout (memberShiftPtrval env ptr tag member)
 
 /-- Integer to pointer conversion.
     Corresponds to: ptrfromint in impl_mem.ml
@@ -948,7 +956,7 @@ def ptrfromintImpl (_fromTy : IntegerType) (toTy : Ctype) (n : IntegerValue) : C
     -- Wrap integer to pointer range [0, 2^(8*sizeof_pointer) - 1]
     -- Corresponds to: impl_mem.ml:2126-2173
     let env ← read
-    let ptrSize := sizeof env (Ctype.mk' (.pointer {} .void))
+    let ptrSize ← liftLayout (sizeof env (Ctype.mk' (.pointer {} .void)))
     let ptrRange : Int := 2 ^ (8 * ptrSize)
     let wrappedAddr := ((n.val % ptrRange) + ptrRange) % ptrRange
     pure { prov := n.prov, base := .concrete none wrappedAddr.toNat }
@@ -995,7 +1003,7 @@ def isWellAlignedImpl (ty : Ctype) (ptr : PointerValue) : ConcreteMemM Bool := d
   | .null _ => pure true  -- NULL is well-aligned
   | .function _ => pure true
   | .concrete _ addr =>
-    let align := alignof env ty
+    let align ← liftLayout (alignof env ty)
     pure (addr % align == 0)
 
 /-- Check pointer validity for dereference.
@@ -1110,8 +1118,9 @@ def reallocImpl (align : IntegerValue) (ptr : PointerValue) (newSize : IntegerVa
     match newPtr.base with
     | .concrete _ newAddr =>
       writeBytes newAddr bytes
-    | .null _ => panic! "reallocImpl: allocateImpl returned null pointer"
-    | .function _ => panic! "reallocImpl: allocateImpl returned function pointer"
+    -- Unreachable: allocateImpl always returns .concrete pointer
+    | .null _ => throw (.typeError "reallocImpl: allocateImpl returned null pointer")
+    | .function _ => throw (.typeError "reallocImpl: allocateImpl returned function pointer")
 
     -- Free old allocation
     killImpl true ptr
@@ -1158,7 +1167,7 @@ instance : MemoryOps ConcreteMemM where
   -- Cerberus computes size from sizeof(ty), not from parameter
   allocateObject name align ty requestedAddr init := do
     let env ← read
-    let sz := sizeof env ty
+    let sz ← liftLayout (sizeof env ty)
     let al := align.val.toNat
     allocateImpl name sz (some ty) al .writable init
 
