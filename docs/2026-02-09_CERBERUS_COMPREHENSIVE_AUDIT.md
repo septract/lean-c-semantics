@@ -19,6 +19,7 @@
 9. [Phased Remediation Plan](#9-phased-remediation-plan)
 10. [Phase 0 Triage Results](#10-phase-0-triage-results) *(2026-02-09)*
 11. [Phase 0 MEDIUM Triage Results](#11-phase-0-medium-triage-results) *(2026-02-10)*
+12. [Phase 0 LOW Triage Results](#12-phase-0-low-triage-results) *(2026-02-10)*
 
 ---
 
@@ -2071,7 +2072,91 @@ With both CRITICAL/HIGH and MEDIUM triage complete, the remediation picture is d
 
 **Resolved**: All 8 CRITICAL, all 15 HIGH (including H1 fix), 21 of 22 MEDIUM
 **Remaining work**:
-1. **M19** (LOW): Wire `ctype_min`/`ctype_max` impl constants to interpreter; investigate wchar_t signedness
-2. **LOW triage**: 18 LOW-severity items not yet triaged (likely cosmetic/naming issues)
+1. ~~**M19** (LOW): Wire `ctype_min`/`ctype_max` impl constants to interpreter; investigate wchar_t signedness~~ **Investigated** (see Section 12); wchar_t/wint_t internal inconsistency fixed in Interface.lean
+2. ~~**LOW triage**: 18 LOW-severity items not yet triaged~~ **Done** (Section 12)
 3. **Regression testing**: Full test suite + fuzz testing to confirm no regressions
 4. **Documentation**: Update audit comments in verified files
+
+---
+
+## 12. Phase 0 LOW Triage Results
+
+**Date**: 2026-02-10
+**Method**: Single investigation agent read Lean code side-by-side with Cerberus reference for each LOW item.
+
+### 12.1 Summary Table
+
+| ID | Description | Status | Notes |
+|----|-------------|--------|-------|
+| **L1** | LoadedObjectType naming | **NOT APPLICABLE** | No such type exists; invalid finding |
+| **L2** | Symbol prefix type not modeled | **ALREADY CORRECT** | `SymPrefix` exists, parsed, threaded through actions |
+| **L3** | Create/Alloc prefix parameter | **ALREADY CORRECT** | All three action types accept prefix |
+| **L4** | Store memory order parameter | **ALREADY CORRECT** | Parsed, stored in AST, correctly unused for sequential model |
+| **L5** | File uses List instead of Map | **RECLASSIFY (INFO)** | Deliberate design: List for ordered, HashMap for lookup-heavy |
+| **L6** | Annotation type subset | **NOT APPLICABLE** | All 14 constructors present; audit used outdated Cerberus ref |
+| **L7** | OpExp (exponentiation) | **ALREADY CORRECT** | Implemented at Eval.lean:270 |
+| **L8** | IsNull memop | **NOT APPLICABLE** | Commented out in Cerberus mem_common.lem:378 |
+| **L9** | Flexible array member sizeof | **EDGE CASES WRONG** | Flex member alignment not included in struct alignment calc |
+| **L10** | Empty struct handling | **ALREADY CORRECT** | Both produce size 0 |
+| **L11** | Global initializer ordering | **ALREADY CORRECT** | List preserves JSON array order |
+| **L12** | Source location parsing | **ALREADY CORRECT** | All 5 forms parsed, explicit error on unknown |
+| **L13** | Va_start/copy/arg/end | **ALREADY CORRECT** | Fully implemented (not just stubs) |
+| **L14** | Pointer null type tracking | **ALREADY CORRECT** | `PVnull(ty : Ctype)` matches Cerberus |
+| **L15** | Cfvfromint/Civfromfloat | **ALREADY CORRECT** | Both defined and implemented |
+| **L16** | Ctype_max/min for all types | **ALREADY CORRECT** | Generic formula covers all types |
+| **L17** | Struct field name representation | **ALREADY CORRECT** | `Identifier` matches `Cabs.cabs_identifier` |
+| **L18** | kill(NULL) no-op handling | **ALREADY CORRECT** | `free(NULL)` returns unit for dynamic kill |
+
+### 12.2 M19 Resolution: wchar_t/wint_t Signedness
+
+**Date**: 2026-02-10
+
+Deep investigation of M19 revealed:
+
+1. **ctype_min/ctype_max impl constants**: These are vestigial in Cerberus -- they never appear in generated Core IR. `INT_MAX` etc. are resolved to literals by the C preprocessor before Core generation. The current "fail explicitly" behavior in `evalImplCall` is correct. **No change needed.**
+
+2. **wchar_t/wint_t signedness inconsistency**: Found inconsistencies in BOTH Cerberus and our codebase:
+
+   **Cerberus inconsistencies** (documented TODOs in impl_mem.ml):
+   - `is_signed_ity(Wchar_t) = true` (signed), but `max_ival`/`min_ival` treat it as unsigned
+   - `is_signed_ity(Wint_t) = true` (signed), but `min_ival` groups it with unsigned types (min=0)
+   - `wchar_t_alias = Signed Int_` at `ocaml_implementation.ml:167`
+
+   **Our internal inconsistency** (now fixed):
+   - `isSignedIntegerType(.wchar_t) = false` in Layout.lean:96 (matches max_ival behavior)
+   - But `maxIval(.wchar_t) = 2^31-1` and `minIval(.wchar_t) = -(2^31)` in Interface.lean treated it as signed
+
+   **Fix applied**: Updated `Interface.lean:maxIval/minIval` to match Cerberus `max_ival`/`min_ival` runtime behavior:
+   - `maxIval(.wchar_t)` changed from `2^31-1` to `2^32-1` (unsigned max)
+   - `minIval(.wchar_t)` changed from `-(2^31)` to `0` (unsigned min)
+   - `minIval(.wint_t)` changed from `-(2^31)` to `0` (matches Cerberus min_ival grouping)
+   - Added audit comments documenting the Cerberus inconsistency with impl_mem.ml line references
+
+### 12.3 Revised Finding Count (final)
+
+| Severity | Original | After CRIT/HIGH | After MEDIUM | After LOW | Change |
+|----------|----------|----------------|-------------|----------|--------|
+| **CRITICAL** | 8 | 0 | 0 | **0** | All 8 verified correct |
+| **HIGH** | 15 | 1 | 0 | **0** | H1 fixed (commit 3413dc7) |
+| **MEDIUM** | 22 | 22 | 1 | **1** | M19 investigated, wchar_t fixed |
+| **LOW** | 18 | 18 | 19 | **1** | 13 verified correct, 3 N/A, 1 INFO |
+| **INFO** | 10 | 12 | 12 | **13** | +1 from L5 reclassification |
+| **Total open** | **63** | **53** | **32** | **2** | 61 resolved |
+
+### 12.4 Remaining Open Items
+
+Only **2 items** remain after full triage:
+
+1. **M19** (LOW): `ctype_min`/`ctype_max` not wired to interpreter. Investigated and determined to be vestigial (never appears in Core IR). Current fail-explicitly behavior is correct. Can be closed as INFO.
+
+2. **L9** (LOW): Flexible array member alignment not included in struct size calculation. Could produce wrong trailing padding for structs where the flex element type has higher alignment than all regular members. Very unlikely to be hit in practice.
+
+### 12.5 Final Assessment
+
+**All 63 audit findings have been triaged.** Results:
+- **51 verified correct** (81%)
+- **8 not applicable** (13%) — invalid findings or deliberate scope exclusions
+- **2 fixed** (3%) — H1 (UB codes), M19/wchar_t (signedness)
+- **2 remaining** (3%) — both LOW severity, unlikely to affect correctness in practice
+
+The implementation is substantially more faithful to Cerberus than the initial audit suggested. The audit's methodology of searching for potential differences was effective at identifying areas of concern, but in-depth code review shows that the vast majority of these concerns were already correctly handled.

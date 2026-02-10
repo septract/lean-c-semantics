@@ -83,9 +83,12 @@ val min_ival: Ctype.integerType -> integer_value
 -/
 
 /-- Maximum value for an integer type.
-    Corresponds to: max_ival in memory_model.ml:135
-    Audited: 2026-01-01
-    Deviations: None (LP64 assumptions match Cerberus) -/
+    Corresponds to: max_ival in impl_mem.ml:2367-2403
+    Audited: 2026-02-10 against impl_mem.ml
+    Note: Cerberus is internally inconsistent for wchar_t/wint_t:
+      - is_signed_ity says wchar_t=signed, wint_t=signed
+      - but max_ival groups wchar_t with unsigned types
+      - We match max_ival behavior (the runtime path) -/
 def maxIval (_env : TypeEnv) (ity : IntegerType) : IntegerValue :=
   let size := integerTypeSize ity
   let bits := size * 8
@@ -97,16 +100,21 @@ def maxIval (_env : TypeEnv) (ity : IntegerType) : IntegerValue :=
     | .unsigned _ => (2 ^ bits) - 1
     | .enum _ => (2 ^ 31) - 1  -- int range
     | .size_t => (2 ^ bits) - 1
-    | .wchar_t => (2 ^ 31) - 1
-    | .wint_t => (2 ^ 31) - 1
+    -- Cerberus max_ival groups Wchar_t with unsigned types (impl_mem.ml:2388-2391)
+    | .wchar_t => (2 ^ bits) - 1
+    -- Cerberus max_ival groups Wint_t with signed types (impl_mem.ml:2393-2395)
+    | .wint_t => (2 ^ (bits - 1)) - 1
     | .ptrdiff_t => (2 ^ (bits - 1)) - 1
     | .ptraddr_t => (2 ^ bits) - 1
   integerIval maxVal
 
 /-- Minimum value for an integer type.
-    Corresponds to: min_ival in memory_model.ml:136
-    Audited: 2026-01-01
-    Deviations: None (LP64 assumptions match Cerberus) -/
+    Corresponds to: min_ival in impl_mem.ml:2405-2436
+    Audited: 2026-02-10 against impl_mem.ml
+    Note: Cerberus is internally inconsistent for wchar_t/wint_t:
+      - is_signed_ity says wchar_t=signed, wint_t=signed
+      - but min_ival groups both with unsigned types (min=0)
+      - We match min_ival behavior (the runtime path) -/
 def minIval (_env : TypeEnv) (ity : IntegerType) : IntegerValue :=
   let size := integerTypeSize ity
   let bits := size * 8
@@ -118,8 +126,10 @@ def minIval (_env : TypeEnv) (ity : IntegerType) : IntegerValue :=
     | .unsigned _ => 0
     | .enum _ => -(2 ^ 31)  -- int range
     | .size_t => 0
-    | .wchar_t => -(2 ^ 31)
-    | .wint_t => -(2 ^ 31)
+    -- Cerberus min_ival groups Wchar_t with unsigned types (impl_mem.ml:2417-2423)
+    | .wchar_t => 0
+    -- Cerberus min_ival groups Wint_t with unsigned types (impl_mem.ml:2417-2423)
+    | .wint_t => 0
     | .ptrdiff_t => -(2 ^ (bits - 1))
     | .ptraddr_t => 0
   integerIval minVal
