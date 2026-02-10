@@ -252,108 +252,120 @@ mutual
       Corresponds to: sizeof in impl_mem.ml:131-171
       Audited: 2026-02-10
       Deviations: None -/
-  partial def sizeof_ (env : TypeEnv) : Ctype_ → Nat
-    | .void => 0  -- void has size 0
-    | .basic bty => basicTypeSize bty
-    | .array elemTy (some n) => n * sizeof_ env elemTy
-    | .array _ none => 0  -- Flexible array member
-    | .function .. => 0  -- Functions don't have size
-    | .functionNoParams .. => 0
-    | .pointer .. => targetPtrSize
+  partial def sizeof_ (env : TypeEnv) (ty : Ctype_) : Except String Nat :=
+    match ty with
+    | .void => pure 0  -- void has size 0
+    | .basic bty => pure (basicTypeSize bty)
+    | .array elemTy (some n) => do pure (n * (← sizeof_ env elemTy))
+    | .array _ none => pure 0  -- Flexible array member
+    | .function .. => pure 0  -- Functions don't have size
+    | .functionNoParams .. => pure 0
+    | .pointer .. => pure targetPtrSize
     | .atomic ty => sizeof_ env ty
     | .struct_ tag =>
       match env.lookupTag tag with
-      | some (.struct_ members _) =>
+      | some (.struct_ members _) => do
         -- Cerberus: offsetsof ~ignore_flexible:true for regular members only (impl_mem.ml:168)
-        let endOffset := members.foldl (init := (0 : Nat)) fun offset m =>
-          let memberAlign := alignof env m.ty
+        let endOffset ← members.foldlM (init := (0 : Nat)) fun offset m => do
+          let memberAlign ← alignof env m.ty
           let alignedOffset := alignUp offset memberAlign
-          alignedOffset + sizeof env m.ty
+          let sz ← sizeof env m.ty
+          pure (alignedOffset + sz)
         -- Cerberus: align to alignof(struct) which includes flex member (impl_mem.ml:169)
-        alignUp endOffset (alignof_ env (.struct_ tag))
-      | some (.union_ _) => panic! s!"sizeof: expected struct but found union for tag {tag.name}"
-      | none => panic! s!"sizeof: undefined struct tag {tag.name}"
+        let al ← alignof_ env (.struct_ tag)
+        pure (alignUp endOffset al)
+      | some (.union_ _) => throw s!"sizeof: expected struct but found union for tag {tag.name}"
+      | none => throw s!"sizeof: undefined struct tag {tag.name}"
     | .union_ tag =>
       match env.lookupTag tag with
       | some (.union_ members) => unionSize env members
-      | some (.struct_ _ _) => panic! s!"sizeof: expected union but found struct for tag {tag.name}"
-      | none => panic! s!"sizeof: undefined union tag {tag.name}"
-    | .byte => 1
+      | some (.struct_ _ _) => throw s!"sizeof: expected union but found struct for tag {tag.name}"
+      | none => throw s!"sizeof: undefined union tag {tag.name}"
+    | .byte => pure 1
 
   /-- Compute sizeof for a type.
       Corresponds to: sizeof in impl_mem.ml:2492
       Audited: 2026-01-01
       Deviations: None -/
-  partial def sizeof (env : TypeEnv) (ct : Ctype) : Nat :=
+  partial def sizeof (env : TypeEnv) (ct : Ctype) : Except String Nat :=
     sizeof_ env ct.ty
 
   /-- Compute alignof for inner ctype.
       Corresponds to: alignof in impl_mem.ml:196-253
       Audited: 2026-02-10
       Deviations: None -/
-  partial def alignof_ (env : TypeEnv) : Ctype_ → Nat
-    | .void => 1
-    | .basic bty => basicTypeAlign bty
+  partial def alignof_ (env : TypeEnv) (ty : Ctype_) : Except String Nat :=
+    match ty with
+    | .void => pure 1
+    | .basic bty => pure (basicTypeAlign bty)
     | .array elemTy _ => alignof_ env elemTy
-    | .function .. => 1
-    | .functionNoParams .. => 1
-    | .pointer .. => targetPtrSize
+    | .function .. => pure 1
+    | .functionNoParams .. => pure 1
+    | .pointer .. => pure targetPtrSize
     | .atomic ty => alignof_ env ty
     | .struct_ tag =>
       match env.lookupTag tag with
-      | some (.struct_ members flexOpt) =>
+      | some (.struct_ members flexOpt) => do
         -- Cerberus includes flex member alignment in init (impl_mem.ml:235-239)
-        let flexAlign := match flexOpt with
+        let flexAlign ← match flexOpt with
           | some flex => alignof env flex.ty
-          | none => 1
-        members.foldl (init := flexAlign) fun acc m => max acc (alignof env m.ty)
-      | some (.union_ _) => panic! s!"alignof: expected struct but found union for tag {tag.name}"
-      | none => panic! s!"alignof: undefined struct tag {tag.name}"
+          | none => pure 1
+        members.foldlM (init := flexAlign) fun acc m => do
+          let a ← alignof env m.ty
+          pure (max acc a)
+      | some (.union_ _) => throw s!"alignof: expected struct but found union for tag {tag.name}"
+      | none => throw s!"alignof: undefined struct tag {tag.name}"
     | .union_ tag =>
       match env.lookupTag tag with
       | some (.union_ members) => unionAlign env members
-      | some (.struct_ _ _) => panic! s!"alignof: expected union but found struct for tag {tag.name}"
-      | none => panic! s!"alignof: undefined union tag {tag.name}"
-    | .byte => 1
+      | some (.struct_ _ _) => throw s!"alignof: expected union but found struct for tag {tag.name}"
+      | none => throw s!"alignof: undefined union tag {tag.name}"
+    | .byte => pure 1
 
   /-- Compute alignof for a type.
       Corresponds to: alignof in impl_mem.ml:2494
       Audited: 2026-01-01
       Deviations: None -/
-  partial def alignof (env : TypeEnv) (ct : Ctype) : Nat :=
+  partial def alignof (env : TypeEnv) (ct : Ctype) : Except String Nat :=
     alignof_ env ct.ty
 
   /-- Compute struct size including padding and tail padding.
       Corresponds to: sizeof for Struct case, using offsetsof
       Audited: 2026-01-01
       Deviations: None -/
-  partial def structSize (env : TypeEnv) (members : List FieldDef) : Nat :=
-    let (endOffset, maxAlign) := members.foldl (init := (0, 1)) fun (offset, maxA) m =>
-      let memberAlign := alignof env m.ty
+  partial def structSize (env : TypeEnv) (members : List FieldDef) : Except String Nat := do
+    let (endOffset, maxAlign) ← members.foldlM (init := ((0 : Nat), (1 : Nat))) fun (offset, maxA) m => do
+      let memberAlign ← alignof env m.ty
       let alignedOffset := alignUp offset memberAlign
-      let newOffset := alignedOffset + sizeof env m.ty
-      (newOffset, max maxA memberAlign)
-    alignUp endOffset maxAlign
+      let sz ← sizeof env m.ty
+      pure (alignedOffset + sz, max maxA memberAlign)
+    pure (alignUp endOffset maxAlign)
 
   /-- Compute struct alignment (max of member alignments).
       Audited: 2026-01-01
       Deviations: None -/
-  partial def structAlign (env : TypeEnv) (members : List FieldDef) : Nat :=
-    members.foldl (init := 1) fun acc m => max acc (alignof env m.ty)
+  partial def structAlign (env : TypeEnv) (members : List FieldDef) : Except String Nat :=
+    members.foldlM (init := (1 : Nat)) fun acc m => do
+      let a ← alignof env m.ty
+      pure (max acc a)
 
   /-- Compute union size (max of member sizes, aligned to max alignment).
       Audited: 2026-01-01
       Deviations: None -/
-  partial def unionSize (env : TypeEnv) (members : List FieldDef) : Nat :=
-    let maxSize := members.foldl (init := 0) fun acc m => max acc (sizeof env m.ty)
-    let maxA := unionAlign env members
-    alignUp maxSize maxA
+  partial def unionSize (env : TypeEnv) (members : List FieldDef) : Except String Nat := do
+    let maxSize ← members.foldlM (init := (0 : Nat)) fun acc m => do
+      let sz ← sizeof env m.ty
+      pure (max acc sz)
+    let maxA ← unionAlign env members
+    pure (alignUp maxSize maxA)
 
   /-- Compute union alignment (max of member alignments).
       Audited: 2026-01-01
       Deviations: None -/
-  partial def unionAlign (env : TypeEnv) (members : List FieldDef) : Nat :=
-    members.foldl (init := 1) fun acc m => max acc (alignof env m.ty)
+  partial def unionAlign (env : TypeEnv) (members : List FieldDef) : Except String Nat :=
+    members.foldlM (init := (1 : Nat)) fun acc m => do
+      let a ← alignof env m.ty
+      pure (max acc a)
 end
 
 /-! ## Member Offsets
@@ -365,56 +377,56 @@ Corresponds to: offsetsof in impl_mem.ml
     Corresponds to: offsetsof in impl_mem.ml:98-127
     Audited: 2026-01-06
     Deviations: Returns list instead of (list, last_offset) -/
-def structOffsets (env : TypeEnv) (members : List FieldDef) : List (Identifier × Nat) :=
-  let (_, offsets) := members.foldl (init := (0, [])) fun (offset, acc) m =>
-    let memberAlign := alignof env m.ty
+def structOffsets (env : TypeEnv) (members : List FieldDef) : Except String (List (Identifier × Nat)) := do
+  let (_, offsets) ← members.foldlM (init := ((0 : Nat), ([] : List (Identifier × Nat)))) fun (offset, acc) m => do
+    let memberAlign ← alignof env m.ty
     let alignedOffset := alignUp offset memberAlign
-    let newOffset := alignedOffset + sizeof env m.ty
-    (newOffset, acc ++ [(m.name, alignedOffset)])
-  offsets
+    let sz ← sizeof env m.ty
+    pure (alignedOffset + sz, acc ++ [(m.name, alignedOffset)])
+  pure offsets
 
 /-- Compute member info (name, type, offset) for a struct.
     Corresponds to: offsetsof in impl_mem.ml:98-127
     Returns: [(memb_ident, memb_ty, memb_offset)] matching Cerberus exactly.
     Audited: 2026-01-06
     Deviations: None -/
-def structMemberInfo (env : TypeEnv) (members : List FieldDef) : List (Identifier × Ctype × Nat) :=
-  let (_, info) := members.foldl (init := (0, [])) fun (offset, acc) m =>
-    let memberAlign := alignof env m.ty
+def structMemberInfo (env : TypeEnv) (members : List FieldDef) : Except String (List (Identifier × Ctype × Nat)) := do
+  let (_, info) ← members.foldlM (init := ((0 : Nat), ([] : List (Identifier × Ctype × Nat)))) fun (offset, acc) m => do
+    let memberAlign ← alignof env m.ty
     let alignedOffset := alignUp offset memberAlign
-    let newOffset := alignedOffset + sizeof env m.ty
-    (newOffset, acc ++ [(m.name, m.ty, alignedOffset)])
-  info
+    let sz ← sizeof env m.ty
+    pure (alignedOffset + sz, acc ++ [(m.name, m.ty, alignedOffset)])
+  pure info
 
 /-- Get member offset from tag definition.
     Corresponds to: offsetof_ival in impl_mem.ml
     Audited: 2026-01-01
     Deviations: None -/
-def memberOffset (env : TypeEnv) (tag : Sym) (member : Identifier) : Nat :=
+def memberOffset (env : TypeEnv) (tag : Sym) (member : Identifier) : Except String Nat := do
   match env.lookupTag tag with
   | some (.struct_ members _) =>
-    let offsets := structOffsets env members
+    let offsets ← structOffsets env members
     match offsets.find? (·.1 == member) with
-    | some (_, offset) => offset
-    | none => panic! s!"memberOffset: member {member.name} not found in struct {tag.name}"
+    | some (_, offset) => pure offset
+    | none => throw s!"memberOffset: member {member.name} not found in struct {tag.name}"
   | some (.union_ _) =>
     -- All union members start at offset 0
-    0
-  | none => panic! s!"memberOffset: undefined tag {tag.name}"
+    pure 0
+  | none => throw s!"memberOffset: undefined tag {tag.name}"
 
 /-- Get member type from tag definition.
     Audited: 2026-01-01
     Deviations: None -/
-def memberType (env : TypeEnv) (tag : Sym) (member : Identifier) : Ctype :=
+def memberType (env : TypeEnv) (tag : Sym) (member : Identifier) : Except String Ctype :=
   match env.lookupTag tag with
   | some (.struct_ members _) =>
     match members.find? (·.name == member) with
-    | some field => field.ty
-    | none => panic! s!"memberType: member {member.name} not found in struct {tag.name}"
+    | some field => pure field.ty
+    | none => throw s!"memberType: member {member.name} not found in struct {tag.name}"
   | some (.union_ members) =>
     match members.find? (·.name == member) with
-    | some field => field.ty
-    | none => panic! s!"memberType: member {member.name} not found in union {tag.name}"
-  | none => panic! s!"memberType: undefined tag {tag.name}"
+    | some field => pure field.ty
+    | none => throw s!"memberType: member {member.name} not found in union {tag.name}"
+  | none => throw s!"memberType: undefined tag {tag.name}"
 
 end CerbLean.Memory

@@ -20,6 +20,12 @@ open CerbLean.Core
 open CerbLean.Memory
 open CerbLean.PrettyPrint
 
+/-- Lift a Layout `Except String` result into `InterpM`, mapping errors to type errors. -/
+private def liftLayout (r : Except String α) : InterpM α :=
+  match r with
+  | .ok a => pure a
+  | .error msg => InterpM.throwTypeError msg
+
 /-! ## Interpreter Result -/
 
 /-- Result of running a program -/
@@ -70,7 +76,7 @@ def isUnspecified (v : Value) : Option Ctype :=
     This happens AFTER global allocation to match Cerberus's memory layout. -/
 def allocateErrno : InterpM Unit := do
   let signedInt : Ctype := { ty := .basic (.integer (.signed .int_)) }
-  let alignIval := alignofIval (← InterpM.getTypeEnv) signedInt
+  let alignIval ← liftLayout (alignofIval (← InterpM.getTypeEnv) signedInt)
   let errnoPtr ← InterpM.liftMem (MemoryOps.allocateObject "errno" alignIval signedInt none none)
   -- Initialize errno to 0
   -- Corresponds to: driver.lem:1841-1843

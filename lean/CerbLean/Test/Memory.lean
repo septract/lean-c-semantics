@@ -38,30 +38,38 @@ def expectError (m : ConcreteMemM α) (check : MemError → Bool) (msg : String 
 -- Helper to create Ctype from Ctype_
 abbrev ct := Ctype.mk'
 
+/-- Unwrap sizeof for tests — panics on error (acceptable in tests) -/
+def sizeof! (env : TypeEnv) (ct : Ctype) : Nat :=
+  match sizeof env ct with | .ok n => n | .error e => panic! s!"test: {e}"
+
+/-- Unwrap alignof for tests — panics on error (acceptable in tests) -/
+def alignof! (env : TypeEnv) (ct : Ctype) : Nat :=
+  match alignof env ct with | .ok n => n | .error e => panic! s!"test: {e}"
+
 /-- Test basic type sizes -/
 def testBasicSizes : IO Unit := do
   let env := emptyEnv
 
   -- Integer types
-  assert! sizeof env (ct (.basic (.integer (.signed .ichar)))) == 1
-  assert! sizeof env (ct (.basic (.integer (.signed .short)))) == 2
-  assert! sizeof env (ct (.basic (.integer (.signed .int_)))) == 4
-  assert! sizeof env (ct (.basic (.integer (.signed .long)))) == 8
-  assert! sizeof env (ct (.basic (.integer (.signed .longLong)))) == 8
+  assert! sizeof! env (ct (.basic (.integer (.signed .ichar)))) == 1
+  assert! sizeof! env (ct (.basic (.integer (.signed .short)))) == 2
+  assert! sizeof! env (ct (.basic (.integer (.signed .int_)))) == 4
+  assert! sizeof! env (ct (.basic (.integer (.signed .long)))) == 8
+  assert! sizeof! env (ct (.basic (.integer (.signed .longLong)))) == 8
 
   -- Unsigned same sizes
-  assert! sizeof env (ct (.basic (.integer (.unsigned .int_)))) == 4
+  assert! sizeof! env (ct (.basic (.integer (.unsigned .int_)))) == 4
 
   -- Floating types (Cerberus stores all floats as 8-byte doubles internally)
-  assert! sizeof env (ct (.basic (.floating (.realFloating .float)))) == 8
-  assert! sizeof env (ct (.basic (.floating (.realFloating .double)))) == 8
-  assert! sizeof env (ct (.basic (.floating (.realFloating .longDouble)))) == 8
+  assert! sizeof! env (ct (.basic (.floating (.realFloating .float)))) == 8
+  assert! sizeof! env (ct (.basic (.floating (.realFloating .double)))) == 8
+  assert! sizeof! env (ct (.basic (.floating (.realFloating .longDouble)))) == 8
 
   -- Pointer
-  assert! sizeof env (ct (.pointer {} .void)) == 8
+  assert! sizeof! env (ct (.pointer {} .void)) == 8
 
   -- Bool
-  assert! sizeof env (ct (.basic (.integer .bool))) == 1
+  assert! sizeof! env (ct (.basic (.integer .bool))) == 1
 
   IO.println "✓ Basic size tests passed"
 
@@ -69,11 +77,11 @@ def testBasicSizes : IO Unit := do
 def testAlignment : IO Unit := do
   let env := emptyEnv
 
-  assert! alignof env (ct (.basic (.integer (.signed .ichar)))) == 1
-  assert! alignof env (ct (.basic (.integer (.signed .int_)))) == 4
-  assert! alignof env (ct (.basic (.integer (.signed .long)))) == 8
-  assert! alignof env (ct (.basic (.floating (.realFloating .double)))) == 8
-  assert! alignof env (ct (.pointer {} .void)) == 8
+  assert! alignof! env (ct (.basic (.integer (.signed .ichar)))) == 1
+  assert! alignof! env (ct (.basic (.integer (.signed .int_)))) == 4
+  assert! alignof! env (ct (.basic (.integer (.signed .long)))) == 8
+  assert! alignof! env (ct (.basic (.floating (.realFloating .double)))) == 8
+  assert! alignof! env (ct (.pointer {} .void)) == 8
 
   IO.println "✓ Alignment tests passed"
 
@@ -82,13 +90,13 @@ def testArraySizes : IO Unit := do
   let env := emptyEnv
 
   -- int[10] = 40 bytes
-  assert! sizeof env (ct (.array (.basic (.integer (.signed .int_))) (some 10))) == 40
+  assert! sizeof! env (ct (.array (.basic (.integer (.signed .int_))) (some 10))) == 40
 
   -- char[100] = 100 bytes
-  assert! sizeof env (ct (.array (.basic (.integer .char)) (some 100))) == 100
+  assert! sizeof! env (ct (.array (.basic (.integer .char)) (some 100))) == 100
 
   -- Flexible array member has size 0
-  assert! sizeof env (ct (.array (.basic (.integer (.signed .int_))) none)) == 0
+  assert! sizeof! env (ct (.array (.basic (.integer (.signed .int_))) none)) == 0
 
   IO.println "✓ Array size tests passed"
 
