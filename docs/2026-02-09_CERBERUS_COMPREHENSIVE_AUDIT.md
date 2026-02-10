@@ -18,6 +18,7 @@
 8. [Prioritized Recommendations](#8-prioritized-recommendations)
 9. [Phased Remediation Plan](#9-phased-remediation-plan)
 10. [Phase 0 Triage Results](#10-phase-0-triage-results) *(2026-02-09)*
+11. [Phase 0 MEDIUM Triage Results](#11-phase-0-medium-triage-results) *(2026-02-10)*
 
 ---
 
@@ -1658,7 +1659,7 @@ The remediation is complete when:
 | **C6** | Pointer arithmetic bounds | **ALREADY CORRECT** | ~~CRITICAL~~ → RESOLVED |
 | **C7** | Pointer comparison same-alloc | **ALREADY CORRECT** | ~~CRITICAL~~ → RESOLVED |
 | **C8** | Load deserialization | **ALREADY CORRECT** | ~~CRITICAL~~ → RESOLVED |
-| **H1** | UB code completeness | **EDGE CASES WRONG** | HIGH (minor gaps) |
+| **H1** | UB code completeness | **FIXED** (commit 3413dc7) | ~~HIGH~~ → RESOLVED |
 | **H2** | wrapI | **ALREADY CORRECT** | ~~HIGH~~ → RESOLVED |
 | **H3** | conv_loaded_int | **ALREADY CORRECT** | ~~HIGH~~ → RESOLVED |
 | **H4** | Function pointers | **ALREADY CORRECT** | ~~HIGH~~ → RESOLVED |
@@ -1679,8 +1680,8 @@ The remediation is complete when:
 | Severity | Original Count | After Triage | Change |
 |----------|---------------|-------------|--------|
 | **CRITICAL** | 8 | **0** | All 8 verified correct |
-| **HIGH** | 15 | **1** (H1 only) | 12 verified correct, 2 reclassified to INFO |
-| **MEDIUM** | 22 | 22 (not yet triaged) | Unchanged |
+| **HIGH** | 15 | **0** | 12 verified correct, 2 reclassified to INFO, H1 fixed (commit 3413dc7) |
+| **MEDIUM** | 22 | **1** (M19 only) | 18 verified correct, 3 reclassified to N/A; see Section 11 |
 | **LOW** | 18 | 18 (not yet triaged) | Unchanged |
 | **INFO** | 10 | 12 | +2 from H8, H9 reclassification |
 
@@ -1846,14 +1847,231 @@ Given these triage results, the original 6-phase remediation plan can be signifi
 
 **Phase 2 (Interpreter Semantics)**: All items verified correct. **No work needed.**
 
-**Phase 3 (Types & UB)**: Only H1 needs attention — add missing atomic-related UB codes (UB045-UB052) from `undefined.lem`. **Minimal work** (~1 hour).
+**Phase 3 (Types & UB)**: H1 has been fixed (commit 3413dc7 — full 238-code UB enumeration with HashMap-based lookup). **Complete.**
 
-**Phase 4 (Parser & Edge Cases)**: MEDIUM items not yet triaged. These should be the next investigation focus.
+**Phase 4 (Parser & Edge Cases)**: MEDIUM items triaged (Section 11). Only M19 (ctype_min/max wiring + wchar_t signedness) remains as edge case. **Minimal work.**
 
 **Phase 5 (Hardening & Docs)**: Still needed for documentation updates and ensuring unsupported features fail explicitly.
 
 **Recommended next steps**:
-1. Triage the 22 MEDIUM items (same method as Phase 0)
-2. Fix H1 — add missing UB codes from `undefined.lem`
-3. Run comprehensive regression testing to confirm: `make test`, `./scripts/fuzz_csmith.sh 200`
-4. Update audit comments in files that were verified correct
+1. ~~Triage the 22 MEDIUM items~~ **Done** (Section 11)
+2. ~~Fix H1~~ **Done** (commit 3413dc7)
+3. Fix M19 — wire ctype_min/ctype_max impl constants; investigate wchar_t signedness vs Cerberus inconsistency
+4. Triage the 18 LOW items
+5. Run comprehensive regression testing: `make test`, `./scripts/fuzz_csmith.sh 200`
+6. Update audit comments in files that were verified correct
+
+---
+
+## 11. Phase 0 MEDIUM Triage Results
+
+**Date**: 2026-02-10
+**Method**: Three parallel investigation agents read Lean code side-by-side with Cerberus reference code for each MEDIUM item. Same methodology as Section 10.
+
+### 11.1 Summary Table
+
+| ID | Description | Status | Revised Severity |
+|----|-------------|--------|-----------------|
+| **M1** | LoadedObjectType merges StoredStruct/StoredUnion | **NOT APPLICABLE** | ~~MEDIUM~~ → REMOVED (invalid finding) |
+| **M2** | Sym missing digest field | **ALREADY CORRECT** | ~~MEDIUM~~ → RESOLVED |
+| **M3** | Realloc memop handling | **ALREADY CORRECT** | ~~MEDIUM~~ → RESOLVED |
+| **M4** | Memcmp memop handling | **ALREADY CORRECT** | ~~MEDIUM~~ → RESOLVED |
+| **M5** | PtrWellAligned memop handling | **ALREADY CORRECT** | ~~MEDIUM~~ → RESOLVED |
+| **M6** | Ewseq vs Esseq distinction | **ALREADY CORRECT** | ~~MEDIUM~~ → RESOLVED |
+| **M7** | ND/End explores all alternatives | **ALREADY CORRECT** | ~~MEDIUM~~ → RESOLVED |
+| **M8** | Evaluation contexts cover all forms | **ALREADY CORRECT** | ~~MEDIUM~~ → RESOLVED |
+| **M9** | FunctionNoParams ctype constructor | **ALREADY CORRECT** | ~~MEDIUM~~ → RESOLVED |
+| **M10** | Qualifiers const/restrict/volatile | **ALREADY CORRECT** | ~~MEDIUM~~ → RESOLVED |
+| **M11** | Atomic(ctype) constructor | **ALREADY CORRECT** | ~~MEDIUM~~ → RESOLVED |
+| **M12** | Array size Option Nat | **ALREADY CORRECT** | ~~MEDIUM~~ → RESOLVED |
+| **M13** | Wchar_t, Wint_t, Ptraddr_t types | **ALREADY CORRECT** | ~~MEDIUM~~ → RESOLVED |
+| **M14** | Intmax_t, Intptr_t signed/unsigned | **ALREADY CORRECT** | ~~MEDIUM~~ → RESOLVED |
+| **M15** | PNVI taint/expose tracking | **NOT APPLICABLE** | ~~MEDIUM~~ → REMOVED (deliberate scope exclusion) |
+| **M16** | memcpy preserves provenance | **ALREADY CORRECT** | ~~MEDIUM~~ → RESOLVED |
+| **M17** | Ebound scope boundary semantics | **ALREADY CORRECT** | ~~MEDIUM~~ → RESOLVED |
+| **M18** | catchExceptionalCondition handling | **ALREADY CORRECT** | ~~MEDIUM~~ → RESOLVED |
+| **M19** | Ctype_min/max impl constants | **EDGE CASES WRONG** | LOW (explicit failure; wchar_t issue) |
+| **M20** | SHF_relaxed shift behavior flags | **NOT APPLICABLE** | ~~MEDIUM~~ → REMOVED (SHF_relaxed doesn't exist) |
+| **M21** | Plain_char_is_signed | **ALREADY CORRECT** | ~~MEDIUM~~ → RESOLVED |
+| **M22** | Long double layout | **ALREADY CORRECT** | ~~MEDIUM~~ → RESOLVED (matches Cerberus hack) |
+
+### 11.2 Revised Finding Count (cumulative)
+
+| Severity | Original Count | After CRITICAL/HIGH Triage | After MEDIUM Triage | Change |
+|----------|---------------|---------------------------|---------------------|--------|
+| **CRITICAL** | 8 | 0 | **0** | All 8 verified correct |
+| **HIGH** | 15 | 1 (H1) | **0** | H1 fixed (commit 3413dc7) |
+| **MEDIUM** | 22 | 22 | **1** (M19 only) | 18 verified correct, 3 not applicable |
+| **LOW** | 18 | 18 | **19** | +1 from M19 reclassification |
+| **INFO** | 10 | 12 | **12** | Unchanged |
+| **Total open** | **63** | **53** | **32** | 31 resolved so far |
+
+### 11.3 Detailed Findings
+
+---
+
+#### M1 - LoadedObjectType merges StoredStruct/StoredUnion
+**Status**: NOT APPLICABLE (FINDING INVALID)
+**Evidence**: The finding references "StoredStruct/StoredUnion" but these constructors do not exist in Cerberus. In `core.ott:30-36`, `core_object_type` has: `integer | floating | pointer | array | struct tag | union tag`. In `core.ott:71-78`, `core_base_type` has `| core_object_type` (the `object` variant) and `| loaded core_object_type` (the `loaded` variant). Both take the same `core_object_type`. In Lean (`Core/Types.lean:31-38,60-69`), `ObjectType` and `BaseType` match this structure exactly. The struct-vs-union distinction is preserved through `ObjectType.struct_` vs `ObjectType.union_`. No information is lost.
+
+---
+
+#### M2 - Sym missing digest field
+**Status**: ALREADY CORRECT
+**Evidence**: Cerberus `symbol.lem:126-127`: `type sym = Symbol of digest * nat * symbol_description`. Lean `Core/Sym.lean:96-105`: struct with `digest : Digest`, `id : Nat`, `description : SymbolDescription`. The `digest` field is present (line 98), type `Digest` = `String` (line 50). The `BEq` instance (line 116-117) compares both `digest` and `id`, matching Cerberus's `symbolEqual`.
+
+---
+
+#### M3 - Realloc memop handling
+**Status**: ALREADY CORRECT
+**Evidence**: Lean `Semantics/Step.lean:1289-1291` dispatches `.realloc` with args `[align, oldPtr, size]`, calling `MemoryOps.realloc`, returning pointer. Cerberus `driver.lem:818-821` dispatches `Mem_common.Realloc` with matching args. Lean `Memory/Concrete.lean:1091-1101` handles NULL pointer (acts as malloc), validates old allocation, copies data, kills old allocation.
+
+---
+
+#### M4 - Memcmp memop handling
+**Status**: ALREADY CORRECT
+**Evidence**: Lean `Semantics/Step.lean:1286-1288` dispatches `.memcmp` with matching arg types and returns integer. Cerberus `driver.lem:809-812` dispatches `Mem_common.Memcmp` similarly. Lean `Memory/Concrete.lean:1061-1085` reads bytes, compares byte-by-byte, returns -1/0/+1.
+
+---
+
+#### M5 - PtrWellAligned memop handling
+**Status**: ALREADY CORRECT
+**Evidence**: Lean `Semantics/Step.lean:1265-1267` dispatches `.ptrWellAligned` with args `[ctype, pointer]`. Cerberus `driver.lem:814-816` dispatches `PtrWellAligned` with matching types. Lean `Memory/Concrete.lean:992-999` checks `addr % align == 0`, NULL = well-aligned.
+
+---
+
+#### M6 - Ewseq vs Esseq distinction
+**Status**: ALREADY CORRECT
+**Evidence**: Lean `Semantics/Step.lean:409-460` handles `.wseq`; lines 463-510 handle `.sseq` with structurally identical value-reduction code. CRITICAL distinction preserved: `breakAtSseq` (`State.lean:243-261`) only stops at `.sseq`, not `.wseq` — sseq is a barrier for neg action transformation, wseq is not. Matches `core_reduction.lem:374-410` and `break_at_sseq` (lines 804-847).
+
+---
+
+#### M7 - ND/End explores all alternatives
+**Status**: ALREADY CORRECT
+**Evidence**: Lean `Semantics/Step.lean:1146-1153` handles `.nd es` by returning `StepResult.branches` with all alternatives. `NDDriver.lean:61-107` `exploreAll` explores ALL branches with state save/restore per branch (lines 79-82). Matches Cerberus's `ND.pick` in `nondeterminism.lem:187-203`.
+
+---
+
+#### M8 - Evaluation contexts cover all expression forms
+**Status**: ALREADY CORRECT
+**Evidence**: Cerberus `core_reduction.lem:509-574` `get_ctx` covers: Epure, Ememop, Eaction, Ecase, Elet, Eif, Eccall, Eproc, Eunseq, Ewseq, Esseq, Ebound, End, Esave, Erun, Epar, Ewait, Eannot, Eexcluded. Lean `Semantics/Context.lean:137-200` `getCtx` covers the exact same set. Context type (lines 32-39) has same 6 constructors. `applyCtx` (lines 98-109) matches `apply_ctx` case-for-case.
+
+---
+
+#### M9 - FunctionNoParams ctype constructor
+**Status**: ALREADY CORRECT
+**Evidence**: Cerberus `ctype.lem:47-52` has both `Function` and `FunctionNoParams`. Lean `Core/Ctype.lean:87-89` has both `function` and `functionNoParams` with matching argument structure.
+
+---
+
+#### M10 - Qualifiers const/restrict/volatile
+**Status**: ALREADY CORRECT
+**Evidence**: Cerberus `ctype.lem:27-32` has `const`, `restrict`, `volatile` bool fields. Lean `Core/Ctype.lean:57-61` has identical struct with all three fields.
+
+---
+
+#### M11 - Atomic(ctype) constructor
+**Status**: ALREADY CORRECT
+**Evidence**: Cerberus `ctype.lem:58`: `| Atomic of ctype`. Lean `Core/Ctype.lean:91`: `| atomic (ty : Ctype_)`. Present and correct.
+
+---
+
+#### M12 - Array size Option Nat
+**Status**: ALREADY CORRECT
+**Evidence**: Cerberus `ctype.lem:40`: `| Array of ctype * (maybe integer)`. Lean `Core/Ctype.lean:83`: `| array (elemTy : Ctype_) (size : Option Nat)`. Using `Nat` instead of big integer is safe since array sizes are non-negative. `Option`/`maybe` handles flexible array members.
+
+---
+
+#### M13 - Wchar_t, Wint_t, Ptraddr_t integer types
+**Status**: ALREADY CORRECT
+**Evidence**: Cerberus `integerType.lem:31-35` has all three. Lean `Core/IntegerType.lean:44-55` has `wchar_t`, `wint_t`, `ptraddr_t` plus `size_t` and `ptrdiff_t`.
+
+---
+
+#### M14 - Intmax_t, Intptr_t signed/unsigned
+**Status**: ALREADY CORRECT
+**Evidence**: Cerberus `integerType.lem:10-21` has `Intmax_t | Intptr_t` as `integerBaseType` constructors used via `Signed | Unsigned`. Lean `Core/IntegerType.lean:27-38` has `intmax | intptr` as `IntBaseKind` constructors used via `signed | unsigned`.
+
+---
+
+#### M15 - PNVI taint/expose tracking
+**Status**: NOT APPLICABLE
+**Evidence**: Lean defines `Taint` enum and `taint` field in `Allocation` (`Memory/Types.lean:65-68,104`), matching Cerberus `impl_mem.ml:409`. The field is present for structural correctness but deliberately unused — it's only relevant for PNVI-ae/PNVI-ae-udi memory models which are out of scope. Multiple comments document this: `Memory/Concrete.lean:502,657,698,764,943`.
+
+---
+
+#### M16 - memcpy preserves byte-level provenance
+**Status**: ALREADY CORRECT
+**Evidence**: Lean memcpy (`Memory/Concrete.lean:1037-1053`) reads `AbsByte` objects via `readBytes` (line 243-249), each containing `prov : Provenance`, then writes them back via `writeBytes` (line 227-231), preserving all fields including provenance. Different mechanism from Cerberus (which uses load/store of unsigned_char at `impl_mem.ml:2635-2645`) but same semantic result.
+
+---
+
+#### M17 - Ebound scope boundary semantics
+**Status**: ALREADY CORRECT
+**Evidence**: Lean `Semantics/Step.lean:1130-1140` pushes `ContElem.bound` and steps into body. Lines 359-362: `bound(v)` passes value through (matches `core_reduction.lem:1207-1211` REMOVE-BOUND). Lines 1456-1458: `bound({A}v)` passes annotated value through (matches lines 1200-1204). `breakAtBound` (`State.lean:268-285`) correctly stops at `.bound` for neg action transformation.
+
+---
+
+#### M18 - catchExceptionalCondition handling
+**Status**: ALREADY CORRECT
+**Evidence**: Cerberus `core_eval.lem:99-111` computes operation, checks min/max, returns `Nothing` → UB036 if overflow. Lean `Semantics/Eval.lean:723-749` matches: dispatches same `iop` operations (add/sub/mul/div/rem_t/shl/shr), checks via `minIval`/`maxIval`, throws `ub036_exceptionalCondition` if out of range. Both use truncated division for shr.
+
+---
+
+#### M19 - Ctype_min/max implementation constants
+**Status**: EDGE CASES WRONG (reclassified to LOW)
+**Evidence**:
+- `ctype_min`/`ctype_max` are parsed as `.other` impl constants (`Parser.lean:823-824`) but NOT handled in `evalImplCall` (`Semantics/Eval.lean:770-800`) — they will throw "not implemented" at runtime. This is compliant with fail-never-guess.
+- The underlying min/max computation formulas ARE correctly implemented in `Memory/Layout.lean:104-119`.
+- **wchar_t signedness discrepancy**: `isSignedIntegerType` at `Layout.lean:96` says `wchar_t` is unsigned (`false`), but Cerberus `ocaml_implementation.ml:100-101` says signed (`true`). However, Cerberus itself is inconsistent — its `max_ival`/`min_ival` treat `wchar_t` as unsigned despite `is_signed_ity` saying signed.
+- **Impact**: LOW — ctype_min/max not wired up but fails explicitly; wchar_t issue mirrors a Cerberus inconsistency.
+
+---
+
+#### M20 - SHF_relaxed and shift behavior flags
+**Status**: NOT APPLICABLE (FINDING INVALID)
+**Evidence**: No `SHF_relaxed` flag exists in Cerberus (`implementation.lem`, `.impl` files — exhaustively searched). The actual shift-related flag is `SHR_signed_negative` (`implementation.lem:183`). Lean `Semantics/Eval.lean:787-797` correctly implements this as arithmetic right shift, matching `gcc_4.9.0_x86_64-apple-darwin10.8.0.impl:38-41`.
+
+---
+
+#### M21 - Plain_char_is_signed
+**Status**: ALREADY CORRECT
+**Evidence**: Cerberus DefaultImpl `ocaml_implementation.ml:257`: `~char_is_signed:true`. Lean `Layout.lean:90`: `.char => true`. Also `Eval.lean:1167` isSigned `.char => true` and `Eval.lean:1196` isUnsigned `.char => false`. All three Lean locations consistently match Cerberus.
+
+---
+
+#### M22 - Long double layout
+**Status**: ALREADY CORRECT (matches Cerberus)
+**Evidence**: Cerberus `ocaml_implementation.ml:211-212`: `RealFloating LongDouble -> Some 8 (* TODO:hack ==> 16 *)`. Lean `Layout.lean:128`: `.longDouble => 8` with comment "Cerberus uses 8". Both sizeof and alignof match (8 bytes). Memory test confirms at `Test/Memory.lean:58`. Note: CN subsystem uses 16 for long double bit width which may be intentional for CN reasoning.
+
+---
+
+### 11.4 Impact Assessment
+
+**MEDIUM triage results are very positive.** Of the 22 MEDIUM items:
+- **18** are ALREADY CORRECT (82%)
+- **3** are NOT APPLICABLE (invalid findings or deliberate scope exclusions)
+- **1** has edge cases wrong (M19 — reclassified to LOW)
+
+Combined with the CRITICAL/HIGH triage (Section 10), the cumulative results:
+- **45 items triaged** out of 63 total findings
+- **38 verified correct** (84%)
+- **5 not applicable** (11%)
+- **1 fixed** (H1, commit 3413dc7)
+- **1 edge case** (M19, reclassified LOW)
+- **18 remaining** (LOW severity, not yet triaged)
+
+### 11.5 Cross-Cutting Issue: wchar_t Signedness
+
+The memory-auditor identified a cross-cutting inconsistency: Lean's `isSignedIntegerType` at `Layout.lean:96` treats `wchar_t` as unsigned, while Cerberus's `is_signed_ity` at `ocaml_implementation.ml:100-101` treats it as signed. However, Cerberus's own `max_ival`/`min_ival` functions treat `wchar_t` as unsigned (grouping it with `Size_t` and `Unsigned _`). This is an inconsistency in Cerberus itself. Lean matches the min/max behavior but not `is_signed_ity`. Flagged as INFO for future investigation.
+
+### 11.6 Revised Remediation Plan
+
+With both CRITICAL/HIGH and MEDIUM triage complete, the remediation picture is dramatically simplified:
+
+**Resolved**: All 8 CRITICAL, all 15 HIGH (including H1 fix), 21 of 22 MEDIUM
+**Remaining work**:
+1. **M19** (LOW): Wire `ctype_min`/`ctype_max` impl constants to interpreter; investigate wchar_t signedness
+2. **LOW triage**: 18 LOW-severity items not yet triaged (likely cosmetic/naming issues)
+3. **Regression testing**: Full test suite + fuzz testing to confirm no regressions
+4. **Documentation**: Update audit comments in verified files
