@@ -305,80 +305,9 @@ def ppUnspecifiedUBContext : UnspecifiedUBContext → String
   | .memberofptr => "memberofptr"
   | .do_ => "do"
 
-/-- Pretty-print undefined behavior -/
-def ppUndefinedBehavior : UndefinedBehavior → String
-  -- Dummy
-  | .dummy msg => s!"DUMMY({msg})"
-  -- Unspecified lvalue
-  | .unspecifiedLvalue => "unspecified_lvalue"
-  -- Lifetime errors
-  | .ub009_outsideLifetime => "UB009_outside_lifetime"
-  | .ub010_pointerToDeadObject => "UB010_pointer_to_dead_object"
-  | .ub011_useIndeterminateAutomatic => "UB011_use_indeterminate_automatic_object"
-  | .ub_modifyingTemporaryLifetime => "UB_modifying_temporary_lifetime"
-  -- Trap representations
-  | .ub012_lvalueReadTrapRepresentation => "UB012_lvalue_read_trap_representation"
-  | .ub013_lvalueSideEffectTrap => "UB013_lvalue_side_effect_trap_representation"
-  -- Redeclaration/linkage
-  | .ub008_multipleLinkage => "UB008_multiple_linkage"
-  | .ub015_incompatibleRedeclaration => "UB015_incompatible_redeclaration"
-  -- Type conversion errors
-  | .ub017_outOfRangeFloatingIntConversion => "UB017_out_of_range_floating_integer_conversion"
-  | .ub019_lvalueNotAnObject => "UB019_lvalue_not_an_object"
-  | .ub024_outOfRangePointerToIntConversion => "UB024_out_of_range_pointer_to_integer_conversion"
-  | .ub025_misalignedPointerConversion => "UB025_misaligned_pointer_conversion"
-  -- String literals
-  | .ub033_modifyingStringLiteral => "UB033_modifying_string_literal"
-  -- Sequence point violations
-  | .ub035_unsequencedRace => "UB035_unsequenced_race"
-  | .ub036_exceptionalCondition => "UB036_exceptional_condition"
-  | .ub037_illtypedLoad => "UB037_illtyped_load"
-  -- Function calls
-  | .ub038_numberOfArgs => "UB038_number_of_args"
-  | .ub041_functionNotCompatible => "UB041_function_not_compatible"
-  -- Atomic
-  | .ub042_accessAtomicStructUnionMember => "UB042_access_atomic_structUnion_member"
-  -- Indirection
-  | .ub043_indirectionInvalidValue => "UB043_indirection_invalid_value"
-  -- Division
-  | .ub045a_divisionByZero => "UB045a_division_by_zero"
-  | .ub045b_moduloByZero => "UB045b_modulo_by_zero"
-  | .ub045c_quotientNotRepresentable => "UB045c_quotient_not_representable"
-  -- Pointer arithmetic
-  | .ub046_arrayPointerOutside => "UB046_array_pointer_outside"
-  | .ub047a_arrayPointerAdditionBeyondIndirection => "UB047a_array_pointer_addition_beyond_indirection"
-  | .ub047b_arrayPointerSubtractionBeyondIndirection => "UB047b_array_pointer_subtraction_beyond_indirection"
-  | .ub048_disjointArrayPointersSubtraction => "UB048_disjoint_array_pointers_subtraction"
-  | .ub050_pointersSubtractionNotRepresentable => "UB050_pointers_subtraction_not_representable"
-  -- Shifts
-  | .ub051a_negativeShift => "UB051a_negative_shift"
-  | .ub051b_shiftTooLarge => "UB51b_shift_too_large"
-  | .ub052a_negativeLeftShift => "UB052a_negative_left_shift"
-  | .ub052b_nonRepresentableLeftShift => "UB052b_non_representable_left_shift"
-  -- Pointer comparison
-  | .ub053_distinctAggregateUnionPointerComparison => "UB053_distinct_aggregate_union_pointer_comparison"
-  -- Assignment
-  | .ub054a_inexactlyOverlappingAssignment => "UB054a_inexactly_overlapping_assignment"
-  | .ub054b_incompatibleOverlappingAssignment => "UB054b_incompatible_overlapping_assignment"
-  -- Declarations
-  | .ub059_incompleteNoLinkageIdentifier => "UB059_incomplete_no_linkage_identifier"
-  | .ub061_noNamedMembers => "UB061_no_named_members"
-  | .ub064_modifyingConst => "UB064_modifying_const"
-  | .ub070_inlineNotDefined => "UB070_inline_not_defined"
-  | .ub071_noreturn => "UB071_noreturn"
-  -- End of function
-  | .ub088_endOfNonVoidFunction => "UB088_end_of_non_void_function"
-  -- CERB extensions
-  | .ub_cerb001_integerToDeadPointer => "UB_CERB001_integer_to_dead_pointer"
-  | .ub_cerb002a_outOfBoundLoad => "UB_CERB002a_out_of_bound_load"
-  | .ub_cerb002b_outOfBoundStore => "UB_CERB002b_out_of_bound_store"
-  | .ub_cerb002c_outOfBoundFree => "UB_CERB002c_out_of_bound_free"
-  | .ub_cerb002d_outOfBoundRealloc => "UB_CERB002d_out_of_bound_realloc"
-  | .ub_cerb003_invalidFunctionPointer => "UB_CERB003_invalid_function_pointer"
-  | .ub_cerb004_unspecified ctx => s!"UB_CERB004_unspecified__{ppUnspecifiedUBContext ctx}"
-  | .ub_cerb005_freeNullptr => "UB_CERB005_free_nullptr"
-  -- Catch-all
-  | .other name => name
+/-- Pretty-print undefined behavior.
+    Delegates to UndefinedBehavior.toString which has the canonical bimap strings. -/
+def ppUndefinedBehavior (ub : UndefinedBehavior) : String := ub.toString
 
 /-- Pretty-print memory operation -/
 def ppMemop : Memop → String
