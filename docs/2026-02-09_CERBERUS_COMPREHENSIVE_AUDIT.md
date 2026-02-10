@@ -2096,7 +2096,7 @@ With both CRITICAL/HIGH and MEDIUM triage complete, the remediation picture is d
 | **L6** | Annotation type subset | **NOT APPLICABLE** | All 14 constructors present; audit used outdated Cerberus ref |
 | **L7** | OpExp (exponentiation) | **ALREADY CORRECT** | Implemented at Eval.lean:270 |
 | **L8** | IsNull memop | **NOT APPLICABLE** | Commented out in Cerberus mem_common.lem:378 |
-| **L9** | Flexible array member sizeof | **EDGE CASES WRONG** | Flex member alignment not included in struct alignment calc |
+| **L9** | Flexible array member sizeof | **FIXED** | Fixed: `alignof_` now includes flex member; `sizeof_` uses full alignment for padding |
 | **L10** | Empty struct handling | **ALREADY CORRECT** | Both produce size 0 |
 | **L11** | Global initializer ordering | **ALREADY CORRECT** | List preserves JSON array order |
 | **L12** | Source location parsing | **ALREADY CORRECT** | All 5 forms parsed, explicit error on unknown |
@@ -2138,25 +2138,29 @@ Deep investigation of M19 revealed:
 |----------|----------|----------------|-------------|----------|--------|
 | **CRITICAL** | 8 | 0 | 0 | **0** | All 8 verified correct |
 | **HIGH** | 15 | 1 | 0 | **0** | H1 fixed (commit 3413dc7) |
-| **MEDIUM** | 22 | 22 | 1 | **1** | M19 investigated, wchar_t fixed |
-| **LOW** | 18 | 18 | 19 | **1** | 13 verified correct, 3 N/A, 1 INFO |
-| **INFO** | 10 | 12 | 12 | **13** | +1 from L5 reclassification |
-| **Total open** | **63** | **53** | **32** | **2** | 61 resolved |
+| **MEDIUM** | 22 | 22 | 1 | **0** | M19 investigated, wchar_t fixed |
+| **LOW** | 18 | 18 | 19 | **0** | 13 verified correct, 3 N/A, 1 INFO, L9 fixed |
+| **INFO** | 10 | 12 | 12 | **14** | +1 from L5, M19 vestigial → INFO |
+| **Total open** | **63** | **53** | **32** | **0** | All 63 resolved |
 
 ### 12.4 Remaining Open Items
 
-Only **2 items** remain after full triage:
+**All items resolved.** Previous remaining items:
 
-1. **M19** (LOW): `ctype_min`/`ctype_max` not wired to interpreter. Investigated and determined to be vestigial (never appears in Core IR). Current fail-explicitly behavior is correct. Can be closed as INFO.
+1. **M19** (closed as INFO): `ctype_min`/`ctype_max` not wired to interpreter. Investigated and determined to be vestigial (never appears in Core IR). Current fail-explicitly behavior is correct.
 
-2. **L9** (LOW): Flexible array member alignment not included in struct size calculation. Could produce wrong trailing padding for structs where the flex element type has higher alignment than all regular members. Very unlikely to be hit in practice.
+2. **L9** (FIXED, 2026-02-10): Flexible array member alignment was not included in struct alignment/size calculation. Fixed in `Layout.lean`:
+   - `alignof_(.struct_)` now includes flex member alignment in the fold initializer (matching `impl_mem.ml:235-239`)
+   - `sizeof_(.struct_)` now uses `alignof_` (which includes flex) for trailing padding alignment (matching `impl_mem.ml:162-171`)
+   - `Concrete.lean` callers updated to use `sizeof_ env (.struct_ tag)` instead of `structSize`
 
 ### 12.5 Final Assessment
 
-**All 63 audit findings have been triaged.** Results:
-- **51 verified correct** (81%)
+**All 63 audit findings have been triaged and resolved.** Results:
+- **49 verified correct** (78%)
 - **8 not applicable** (13%) — invalid findings or deliberate scope exclusions
-- **2 fixed** (3%) — H1 (UB codes), M19/wchar_t (signedness)
-- **2 remaining** (3%) — both LOW severity, unlikely to affect correctness in practice
+- **3 fixed** (5%) — H1 (UB codes), M19/wchar_t (signedness), L9 (flex array alignment)
+- **3 reclassified** (5%) — L5, M19 vestigial, H8/H9 promotions → INFO
+- **0 remaining**
 
 The implementation is substantially more faithful to Cerberus than the initial audit suggested. The audit's methodology of searching for potential differences was effective at identifying areas of concern, but in-depth code review shows that the vast majority of these concerns were already correctly handled.
