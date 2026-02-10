@@ -1,9 +1,22 @@
 /-
   Small-step execution semantics
-  Corresponds to: cerberus/frontend/model/core_run.lem (core_thread_step2)
+  Corresponds to: cerberus/frontend/model/core_reduction.lem (step_ctx)
 
   CRITICAL: This file must match Cerberus semantics EXACTLY.
   Each case is documented with its Cerberus correspondence.
+
+  Architecture note: This file uses a hybrid approach that is functionally
+  equivalent to core_reduction.lem. The stepping shell directly pattern-matches
+  the arena expression with a continuation-based stack (structurally similar to
+  core_run.lem's core_thread_step2), but implements core_reduction.lem semantics
+  throughout — including neg action transformation, Eunseq race detection via
+  contextual decomposition (getCtx/applyCtx), Eexcluded handling, and Eannot
+  merging. This hybrid works because get_ctx only produces multiple decompositions
+  for Eunseq; for all other expressions, direct pattern-matching is equivalent.
+
+  Note: core_run.lem is DEPRECATED. Some individual case comments still reference
+  core_run.lem line numbers for historical context; the semantics match
+  core_reduction.lem (which handles these cases identically for sequential execution).
 -/
 
 import CerbLean.Semantics.Monad
@@ -280,19 +293,19 @@ during pure expression evaluation (matching core_aux.lem:114-200).
 
 /-! ## Single Step Execution
 
-Corresponds to: core_thread_step2 in core_run.lem:~750-1655
+Corresponds to: step_ctx in core_reduction.lem:1073-1471
 
 The step function takes a ThreadState and returns a StepResult.
-Each case matches the corresponding case in Cerberus.
+Each case matches the corresponding case in Cerberus's core_reduction.lem.
 -/
 
 /-- Single step of execution.
-    Corresponds to: core_thread_step2 in core_run.lem
-    Audited: 2025-01-01 (partial - main cases only)
+    Corresponds to: step_ctx in core_reduction.lem:1073-1471
+    Audited: 2025-01-01 (partial - main cases only), 2026-02-10 (full audit vs core_reduction.lem)
     Deviations:
     - No PEconstrained handling (for bounded model checking)
     - No core_extern handling (external symbol remapping)
-    - Simplified memory action handling -/
+    - Missing GCC builtins: generic_ffs, ctz, bswap16/32/64 -/
 def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym LabeledConts)
     : InterpM StepResult := do
   let arena := st.arena
@@ -609,8 +622,8 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
         throw (.notImplemented msg)
 
   -- Eaction: execute memory action
-  -- Corresponds to: core_action_step in core_run.lem:275-650
-  -- For polarity handling, see core_reduction.lem:1280-1327:
+  -- Corresponds to: step_action in core_reduction.lem:621-801
+  -- Polarity handling: core_reduction.lem:1280-1327:
   --   Pos actions → DA_pos [] fp (execute directly)
   --   Neg actions → NEG ACTION TRANSFORMATION (create unseq structure)
   --

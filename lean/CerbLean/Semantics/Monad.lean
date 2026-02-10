@@ -1,6 +1,6 @@
 /-
   Interpreter monad and core types
-  Corresponds to: cerberus/frontend/model/core_run.lem
+  Corresponds to: cerberus/frontend/model/core_run_aux.lem (shared infrastructure)
 
   The monad structure follows Cerberus's execution model:
   - Reader for file and type environment (immutable during execution)

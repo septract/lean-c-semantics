@@ -112,14 +112,17 @@ type stack 'a =
   | Stack_cons2 of maybe Symbol.sym * context * stack 'a  -- for Core_reduction
 ```
 
-Note: We only implement Stack_empty and Stack_cons. Stack_cons2 is for Core_reduction
-which we don't use.
+Note: We implement Stack_empty and Stack_cons (with continuations). core_reduction.lem
+uses Stack_cons2 (with evaluation contexts), but our continuation-based representation is
+functionally equivalent — continuations flatten the nested context into a list. The
+core_reduction.lem semantics (neg actions, Eunseq race detection, etc.) are fully
+implemented using this representation.
 -/
 
 /-- Call stack for the interpreter.
     Corresponds to: stack in core_run_aux.lem:67-76
-    Audited: 2025-01-01
-    Deviations: We don't implement Stack_cons2 (only for Core_reduction) -/
+    Audited: 2025-01-01, 2026-02-10 (verified equivalent to core_reduction.lem Stack_cons2)
+    Deviations: Uses Stack_cons (continuation list) instead of Stack_cons2 (evaluation context) -/
 inductive Stack where
   /-- Empty stack (initial state or after all procedures return)
       Corresponds to: Stack_empty -/
@@ -143,8 +146,8 @@ def isEmpty : Stack → Bool
     let push_empty_continuation sym_opt sk =
       Stack_cons2 sym_opt CTX sk
     ```
-    Note: Cerberus uses Stack_cons2 with CTX, but we use Stack_cons with []
-    because we use the Stack_cons variant (not Stack_cons2 for Core_reduction) -/
+    Note: core_reduction.lem uses Stack_cons2 with CTX (empty context).
+    We use Stack_cons with [] (empty continuation), which is equivalent. -/
 def pushEmptyCont (procSym : Option Sym) (sk : Stack) : Stack :=
   .cons procSym [] sk
 
