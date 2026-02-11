@@ -71,7 +71,7 @@ Helper functions to create Owned predicates.
 def mkOwnedResource (ct : Ctype) (initState : Init) (ptr : IndexTerm) (value : IndexTerm)
     : Resource :=
   let pred : Predicate := {
-    name := .owned ct initState
+    name := .owned (some ct) initState
     pointer := ptr
     iargs := []
   }
@@ -236,7 +236,7 @@ def handleKill (kind : KillKind) (ptrPe : APexpr) (loc : Core.Loc)
 
   -- First try to consume Owned<T>(Uninit) for this pointer
   let uninitPred : Predicate := {
-    name := .owned ct .uninit
+    name := .owned (some ct) .uninit
     pointer := ptr
     iargs := []
   }
@@ -249,7 +249,7 @@ def handleKill (kind : KillKind) (ptrPe : APexpr) (loc : Core.Loc)
   | none =>
     -- Try consuming Owned<T>(Init) instead - memory may have been initialized
     let initPred : Predicate := {
-      name := .owned ct .init
+      name := .owned (some ct) .init
       pointer := ptr
       iargs := []
     }
@@ -315,7 +315,7 @@ def handleStore (_locking : Bool) (tyPe : APexpr) (ptrPe : APexpr) (valPe : APex
   -- Request (consume) Owned<T>(Uninit) - we need writable permission
   -- Corresponds to: RI.Special.predicate_request ... ({ name = Owned (act.ct, Uninit); ... }, None)
   let uninitPred : Predicate := {
-    name := .owned ct .uninit
+    name := .owned (some ct) .uninit
     pointer := ptr
     iargs := []
   }
@@ -339,7 +339,7 @@ def handleStore (_locking : Bool) (tyPe : APexpr) (ptrPe : APexpr) (valPe : APex
     -- Try consuming Init instead (overwriting initialized memory)
     -- This is valid in CN - you can write to already-initialized memory
     let initPred : Predicate := {
-      name := .owned ct .init
+      name := .owned (some ct) .init
       pointer := ptr
       iargs := []
     }
@@ -405,7 +405,7 @@ def handleLoad (tyPe : APexpr) (ptrPe : APexpr) (_order : Core.MemoryOrder) (loc
   -- Request (consume) Owned<T>(Init) - we need readable permission
   -- Load requires initialized memory (reading uninitialized is UB)
   let pred : Predicate := {
-    name := .owned ct .init
+    name := .owned (some ct) .init
     pointer := ptr
     iargs := []
   }

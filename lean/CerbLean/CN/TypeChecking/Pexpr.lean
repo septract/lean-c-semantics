@@ -853,6 +853,45 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
             TypingM.fail (.other s!"ivalignof: cannot compute alignment for {repr ct.ty} (requires type environment)")
         | _ => TypingM.fail (.other "ivalignof requires ctype constant argument")
       | _ => TypingM.fail (.other "ivalignof requires exactly 1 argument")
+    | .ivOR | .ivXOR | .ivAND =>
+      -- ivOR/ivXOR/ivAND(ctype, x, y) - bitwise binary operations
+      -- Corresponds to: CivAND | CivOR | CivXOR in cn/lib/check.ml lines 638-660
+      -- First arg is ctype, used to determine result base type via Memory.bt_of_sct
+      match args with
+      | [ctypeArg, arg2, arg3] =>
+        let peCtypeArg : APexpr := ⟨[], some .ctype, ctypeArg⟩
+        let tCtype ← checkPexpr peCtypeArg (some .ctype)
+        let ct ← match tCtype.term with
+          | .const (.ctypeConst ct) => pure ct
+          | _ => TypingM.fail (.other s!"{repr c} requires ctype constant as first argument")
+        let resBt := ctypeToBaseTypeBits ct
+        let peArg2 : APexpr := ⟨[], pe.ty, arg2⟩
+        let peArg3 : APexpr := ⟨[], pe.ty, arg3⟩
+        let t2 ← checkPexpr peArg2 (some resBt)
+        let t3 ← checkPexpr peArg3 (some resBt)
+        let op := match c with
+          | .ivOR => BinOp.bwOr
+          | .ivXOR => BinOp.bwXor
+          | .ivAND => BinOp.bwAnd
+          | _ => unreachable!
+        return AnnotTerm.mk (.binop op t2 t3) resBt loc
+      | _ => TypingM.fail (.other s!"{repr c} requires exactly 3 arguments (ctype, arg1, arg2)")
+    | .ivCOMPL =>
+      -- ivCOMPL(ctype, x) - bitwise complement
+      -- Corresponds to: CivCOMPL in cn/lib/check.ml lines 621-637
+      -- First arg is ctype, used to determine result base type via Memory.bt_of_sct
+      match args with
+      | [ctypeArg, arg2] =>
+        let peCtypeArg : APexpr := ⟨[], some .ctype, ctypeArg⟩
+        let tCtype ← checkPexpr peCtypeArg (some .ctype)
+        let ct ← match tCtype.term with
+          | .const (.ctypeConst ct) => pure ct
+          | _ => TypingM.fail (.other "ivCOMPL requires ctype constant as first argument")
+        let resBt := ctypeToBaseTypeBits ct
+        let peArg : APexpr := ⟨[], pe.ty, arg2⟩
+        let t ← checkPexpr peArg (some resBt)
+        return AnnotTerm.mk (.unop .bwCompl t) resBt loc
+      | _ => TypingM.fail (.other "ivCOMPL requires exactly 2 arguments (ctype, arg)")
     | _ =>
       -- Other constructors (nil, cons, array, etc.) are not supported
       -- Do not create symbolic terms - fail explicitly

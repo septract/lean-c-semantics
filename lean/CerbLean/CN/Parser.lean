@@ -21,18 +21,20 @@
   constraint     = expr
 
   resource       = pred "(" expr_list ")"
-  pred           = ("Owned" | "RW") ["<" ctype ">"]
-                 | ("Block" | "W")  ["<" ctype ">"]
+  pred           = ("Owned" | "RW") ["<" ctype ">"]  -- type optional, inferred from pointer
+                 | ("Block" | "W")  ["<" ctype ">"]  -- type optional, inferred from pointer
                  | UNAME                     -- user-defined predicate
 
   expr           = binary_expr ["?" expr ":" expr]
   binary_expr    = unary_expr (binop unary_expr)*
-  unary_expr     = "-" unary_expr | "!" unary_expr | "~" unary_expr | postfix_expr
+  unary_expr     = "-" unary_expr | "!" unary_expr | "~" unary_expr (bitwise complement)
+                 | postfix_expr
   postfix_expr   = atom_expr ("." IDENT | "->" IDENT)*
   atom_expr      = IDENT | NUMBER | "(" expr ")" | "(" cn_base_type ")" unary_expr
                  | "return" | "null" | "true" | "false"
                  | IDENT "(" expr_list ")"   -- function call
-  binop          = "==" | "!=" | "<" | "<=" | ">" | ">=" | "&&" | "||" | "+" | "-" | "*" | "/" | "%"
+  binop          = "==" | "!=" | "<" | "<=" | ">" | ">=" | "&&" | "||" | "implies"
+                 | "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "<<" | ">>"
 
   cn_base_type   = "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | ...
   ctype          = [sign] [size] [base] ["*"]*  -- C type for resources
@@ -396,7 +398,7 @@ partial def atomExpr : P AnnotTerm := do
       let name ← ident
       match name with
       | "return" => pure (mkTerm (.sym (mkSym "return")))
-      | "null" => pure (mkTerm (.const .null))
+      | "null" | "NULL" => pure (mkTerm (.const .null))
       | "true" => pure (mkTerm (.const (.bool true)))
       | "false" => pure (mkTerm (.const (.bool false)))
       | _ =>
@@ -477,60 +479,89 @@ partial def unaryExpr : P AnnotTerm := do
 
 /-- Parse a binary operator. Returns (opString, binop, swapOperands).
     For `>` and `>=`, we return the corresponding `<`/`<=` op with swap=true,
-    since CN normalizes a > b to b < a. -/
-partial def binop : P (String × BinOp × Bool) := lexeme do
-  let c ← any
-  match c with
-  | '+' => pure ("+", .add, false)
-  | '-' => pure ("-", .sub, false)
-  | '*' => pure ("*", .mul, false)
-  | '/' => pure ("/", .div, false)
-  | '%' => pure ("%", .mod_, false)
-  | '=' =>
-    let c2 ← peek?
-    if c2 == some '=' then do
-      let _ ← any
-      pure ("==", .eq, false)
-    else
-      fail "expected '==' operator"
-  | '!' =>
-    let c2 ← any
-    if c2 == '=' then pure ("!=", .eq, false)  -- Will be wrapped in NOT
-    else fail "expected '!=' operator"
-  | '<' =>
-    let c2 ← peek?
-    if c2 == some '=' then do
-      let _ ← any
-      pure ("<=", .le, false)
-    else
-      pure ("<", .lt, false)
-  | '>' =>
-    let c2 ← peek?
-    if c2 == some '=' then do
-      let _ ← any
-      -- >= becomes <= with swapped operands: a >= b  ↔  b <= a
-      pure (">=", .le, true)
-    else
-      -- > becomes < with swapped operands: a > b  ↔  b < a
-      pure (">", .lt, true)
-  | '&' =>
-    let c2 ← any
-    if c2 == '&' then pure ("&&", .and_, false)
-    else fail "expected '&&' operator"
-  | '|' =>
-    let c2 ← any
-    if c2 == '|' then pure ("||", .or_, false)
-    else fail "expected '||' operator"
-  | _ => fail s!"unexpected operator character: {c}"
+    since CN normalizes a > b to b < a.
+    Supports: arithmetic (+, -, *, /, %), comparison (==, !=, <, <=, >, >=),
+    logical (&&, ||, implies), bitwise (&, |, ^, <<, >>).
+    Reference: c_parser.mly lines 1900-1935 -/
+partial def binop : P (String × BinOp × Bool) :=
+  attempt keywordBinop <|> symbolBinop
+where
+  /-- Parse keyword binary operators (e.g., `implies`) -/
+  keywordBinop : P (String × BinOp × Bool) := lexeme do
+    keyword "implies"
+    pure ("implies", .implies, false)
+  /-- Parse symbolic binary operators -/
+  symbolBinop : P (String × BinOp × Bool) := lexeme do
+    let c ← any
+    match c with
+    | '+' => pure ("+", .add, false)
+    | '-' => pure ("-", .sub, false)
+    | '*' => pure ("*", .mul, false)
+    | '/' => pure ("/", .div, false)
+    | '%' => pure ("%", .rem, false)  -- CN's % maps to Rem (C remainder), not Mod
+    | '^' => pure ("^", .bwXor, false)
+    | '=' =>
+      let c2 ← peek?
+      if c2 == some '=' then do
+        let _ ← any
+        pure ("==", .eq, false)
+      else
+        fail "expected '==' operator"
+    | '!' =>
+      let c2 ← any
+      if c2 == '=' then pure ("!=", .eq, false)  -- Will be wrapped in NOT
+      else fail "expected '!=' operator"
+    | '<' =>
+      let c2 ← peek?
+      if c2 == some '<' then do
+        let _ ← any
+        pure ("<<", .shiftLeft, false)
+      else if c2 == some '=' then do
+        let _ ← any
+        pure ("<=", .le, false)
+      else
+        pure ("<", .lt, false)
+    | '>' =>
+      let c2 ← peek?
+      if c2 == some '>' then do
+        let _ ← any
+        pure (">>", .shiftRight, false)
+      else if c2 == some '=' then do
+        let _ ← any
+        -- >= becomes <= with swapped operands: a >= b  ↔  b <= a
+        pure (">=", .le, true)
+      else
+        -- > becomes < with swapped operands: a > b  ↔  b < a
+        pure (">", .lt, true)
+    | '&' =>
+      let c2 ← peek?
+      if c2 == some '&' then do
+        let _ ← any
+        pure ("&&", .and_, false)
+      else
+        pure ("&", .bwAnd, false)
+    | '|' =>
+      let c2 ← peek?
+      if c2 == some '|' then do
+        let _ ← any
+        pure ("||", .or_, false)
+      else
+        pure ("|", .bwOr, false)
+    | _ => fail s!"unexpected operator character: {c}"
 
-/-- Binary operator precedence (higher = tighter binding) -/
+/-- Binary operator precedence (higher = tighter binding).
+    Matches CN spec expression grammar (c_parser.mly lines 1947-2021).
+    NOTE: This differs from standard C precedence! CN groups bitwise ops with
+    arithmetic: `& ^ << >>` at mul level, `|` at add level.
+    This means `return == x | y` parses as `return == (x | y)` in CN.
+    Reference: c_parser.mly mul_expr, add_expr, rel_expr, bool_*_expr -/
 partial def binopPrec : String → Nat
-  | "*" | "/" | "%" => 6
-  | "+" | "-" => 5
-  | "<" | "<=" | ">" | ">=" => 4
-  | "==" | "!=" => 3
-  | "&&" => 2
-  | "||" => 1
+  | "*" | "/" | "%" | "&" | "^" | "<<" | ">>" => 6  -- mul_expr
+  | "+" | "-" | "|" => 5                              -- add_expr
+  | "<" | "<=" | ">" | ">=" | "==" | "!=" => 4       -- rel_expr
+  | "&&" => 3                                          -- bool_and_expr
+  | "implies" => 2                                     -- bool_implies_expr
+  | "||" => 1                                          -- bool_or_expr
   | _ => 0
 
 /-- Parse a binary expression using precedence climbing -/
@@ -576,27 +607,32 @@ end
 
 /-! ## Predicate Parsers -/
 
-/-- Parse a predicate name (Owned, Block, or user-defined) -/
+/-- Parse a predicate name (Owned, Block, or user-defined).
+    CN allows both `Owned<type>(p)` (explicit) and `Owned(p)` (type inferred from p).
+    Reference: c_parser.mly cn_pred production -/
 def predName : P ResourceName := do
   let name ← ident
   match name with
   | "Owned" | "RW" =>
-    -- Parse required type parameter: Owned<type> or RW<type>
+    -- Parse optional type parameter: Owned<type> or RW<type> or Owned or RW
     -- RW is the production name in CN; Owned is deprecated
-    -- CN requires explicit type; no defaulting
-    symbol "<"
-    let ct ← parseCtype
-    symbol ">"
-    pure (.owned ct .init)
+    -- When no type given, it will be inferred during resolution from the pointer's C type
+    let ctOpt ← optional (attempt do
+      symbol "<"
+      let ct ← parseCtype
+      symbol ">"
+      pure ct)
+    pure (.owned ctOpt .init)
   | "Block" | "W" =>
-    -- Parse required type parameter: Block<type> or W<type>
+    -- Parse optional type parameter: Block<type> or W<type> or Block or W
     -- W is the production name in CN; Block is deprecated
-    -- CN requires explicit type; no defaulting
-    symbol "<"
-    let ct ← parseCtype
-    symbol ">"
+    let ctOpt ← optional (attempt do
+      symbol "<"
+      let ct ← parseCtype
+      symbol ">"
+      pure ct)
     -- Block/W represents uninitialized memory
-    pure (.owned ct .uninit)
+    pure (.owned ctOpt .uninit)
   | _ =>
     if name.front.isUpper then
       pure (.pname (mkSym name))
@@ -639,7 +675,7 @@ def letClause : P Clause := do
   pure (.letBinding (mkSym name) e)
 
 /-- Keywords that should not be parsed as identifiers in expressions -/
-def cnKeywords : List String := ["requires", "ensures", "take", "let", "trusted"]
+def cnKeywords : List String := ["requires", "ensures", "take", "let", "trusted", "implies"]
 
 /-- Fail if next token is a keyword (using negative lookahead) -/
 def notKeyword : P Unit := do

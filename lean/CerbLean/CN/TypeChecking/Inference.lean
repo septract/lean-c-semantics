@@ -56,8 +56,8 @@ def ctypeEqualIgnoringAnnots (ct1 ct2 : Core.Ctype) : Bool :=
     Uses ctypeEqualIgnoringAnnots to match CN's Sctypes.equal. -/
 def nameSubsumed (name1 name2 : ResourceName) : Bool :=
   match name1, name2 with
-  | .owned ct1 .init, .owned ct2 .init => ctypeEqualIgnoringAnnots ct1 ct2
-  | .owned ct1 .uninit, .owned ct2 _ => ctypeEqualIgnoringAnnots ct1 ct2
+  | .owned (some ct1) .init, .owned (some ct2) .init => ctypeEqualIgnoringAnnots ct1 ct2
+  | .owned (some ct1) .uninit, .owned (some ct2) _ => ctypeEqualIgnoringAnnots ct1 ct2
   | .pname pn1, .pname pn2 => pn1 == pn2  -- Uses BEq Sym (digest + id, matching CN)
   | _, _ => false
 
@@ -128,7 +128,7 @@ def unpackStructResource (r : Resource) : TypingM (Option (List Resource)) := do
   match r.request with
   | .p pred =>
     match pred.name with
-    | .owned ct initState =>
+    | .owned (some ct) initState =>
       match ct.ty with
       | .struct_ tag =>
         -- Look up the struct definition
@@ -143,7 +143,7 @@ def unpackStructResource (r : Resource) : TypingM (Option (List Resource)) := do
             let fieldValue : IndexTerm := AnnotTerm.mk
               (.structMember r.output.value field.name) fieldBt r.output.value.loc
             let fieldPred : Predicate := {
-              name := .owned field.ty initState
+              name := .owned (some field.ty) initState
               pointer := fieldPtr
               iargs := []
             }
@@ -157,6 +157,7 @@ def unpackStructResource (r : Resource) : TypingM (Option (List Resource)) := do
         -- CN does not support unions (check.ml:200, sctypes.ml:192-198)
         TypingM.fail (.other s!"union types are not supported (tag: {tag.name.getD "?"})")
       | _ => return none  -- Not a struct/union type
+    | .owned none _ => TypingM.fail (.other "unpackStructResource: unresolved resource type (should have been inferred during resolution)")
     | .pname _ => return none  -- Not Owned
   | .q _ => return none  -- Not a predicate resource
 
@@ -269,7 +270,7 @@ we repack by requesting each field individually and combining them into a struct
     - Any field resource is missing -/
 def tryRepackStruct (requested : Predicate) : TypingM (Option (Predicate × Output)) := do
   match requested.name with
-  | .owned ct initState =>
+  | .owned (some ct) initState =>
     match ct.ty with
     | .union_ tag =>
       -- CN does not support unions (check.ml:200, sctypes.ml:192-198)
@@ -285,7 +286,7 @@ def tryRepackStruct (requested : Predicate) : TypingM (Option (Predicate × Outp
           let fieldPtr : IndexTerm := AnnotTerm.mk
             (.memberShift requested.pointer tag field.name) .loc requested.pointer.loc
           let fieldPred : Predicate := {
-            name := .owned field.ty initState
+            name := .owned (some field.ty) initState
             pointer := fieldPtr
             iargs := []
           }
@@ -305,7 +306,7 @@ def tryRepackStruct (requested : Predicate) : TypingM (Option (Predicate × Outp
                   (.memberShift requested.pointer tag fld) .loc requested.pointer.loc
                 let fResource : Resource := {
                   request := .p {
-                    name := .owned fDef.ty initState
+                    name := .owned (some fDef.ty) initState
                     pointer := fPtr
                     iargs := []
                   }
@@ -325,6 +326,7 @@ def tryRepackStruct (requested : Predicate) : TypingM (Option (Predicate × Outp
         TypingM.fail (.other s!"union types are not supported (tag: {tag.name.getD "?"})")
       | none => return none
     | _ => return none  -- Not a struct type
+  | .owned none _ => TypingM.fail (.other "tryRepackStruct: unresolved resource type (should have been inferred during resolution)")
   | .pname _ => return none  -- Only Owned can be repacked
 
 /-! ## Predicate Request
