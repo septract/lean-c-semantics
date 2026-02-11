@@ -207,8 +207,10 @@ def ppInit : Init → String
 
 /-- Pretty-print a resource name -/
 def ppResourceName : ResourceName → String
-  | .owned ct .init => s!"Owned<{ppCtype ct}>"
-  | .owned ct .uninit => s!"Block<{ppCtype ct}>"
+  | .owned (some ct) .init => s!"Owned<{ppCtype ct}>"
+  | .owned (some ct) .uninit => s!"Block<{ppCtype ct}>"
+  | .owned none .init => "Owned"
+  | .owned none .uninit => "Block"
   | .pname name => ppSym name
 
 /-- Pretty-print a predicate -/

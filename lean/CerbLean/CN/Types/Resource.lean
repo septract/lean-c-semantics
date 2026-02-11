@@ -53,8 +53,12 @@ type name =
     Audited: 2025-01-17
     Deviations: None -/
 inductive ResourceName where
-  /-- Built-in ownership predicate: RW<ct> (init) or W<ct> (uninit) -/
-  | owned (ct : Ctype) (initState : Init)
+  /-- Built-in ownership predicate: RW<ct> (init) or W<ct> (uninit).
+      The Ctype is optional — when `none`, it must be inferred from the pointer type
+      during resolution. This matches CN's parser which accepts both `Owned<int>(p)`
+      and `Owned(p)` (type inferred from p's declaration).
+      Corresponds to: Owned of Sctypes.t * init in request.ml -/
+  | owned (ct : Option Ctype) (initState : Init)
   /-- User-defined predicate by name -/
   | pname (name : Sym)
   deriving Repr, Inhabited
