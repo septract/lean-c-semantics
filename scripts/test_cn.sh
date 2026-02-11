@@ -2,6 +2,8 @@
 # Test CN type checking
 #
 # Usage: ./scripts/test_cn.sh              Run integration tests on tests/cn/
+#        ./scripts/test_cn.sh --nolibc     Skip libc (faster, skips *.libc.c tests)
+#        ./scripts/test_cn.sh --libc-only  Run only *.libc.* tests (with libc)
 #        ./scripts/test_cn.sh [file.c ...] Test specific C files
 #        ./scripts/test_cn.sh --unit       Run unit tests only (no Cerberus)
 
@@ -12,8 +14,22 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 LEAN_DIR="$PROJECT_ROOT/lean"
 TEST_CN="$LEAN_DIR/.lake/build/bin/test_cn"
 
+# Parse flags
+NO_LIBC=false
+LIBC_ONLY=false
+UNIT_ONLY=false
+POSITIONAL=()
+for arg in "$@"; do
+    case "$arg" in
+        --unit)       UNIT_ONLY=true ;;
+        --nolibc)     NO_LIBC=true ;;
+        --libc-only)  LIBC_ONLY=true ;;
+        *)            POSITIONAL+=("$arg") ;;
+    esac
+done
+
 # Handle --unit flag: run unit tests only (before build to avoid unnecessary work)
-if [ "$1" == "--unit" ]; then
+if $UNIT_ONLY; then
     echo "=== Building Lean project ==="
     (cd "$LEAN_DIR" && lake build test_cn 2>&1 | tail -5)
     echo ""
@@ -22,19 +38,36 @@ if [ "$1" == "--unit" ]; then
 fi
 
 # Determine test files (resolve paths before any cd)
-if [ $# -eq 0 ]; then
+if [ ${#POSITIONAL[@]} -eq 0 ]; then
     # No args: run all integration tests in tests/cn/
     TEST_FILES=("$PROJECT_ROOT"/tests/cn/*.c)
 else
     # Specific files provided — resolve to absolute paths
     TEST_FILES=()
-    for arg in "$@"; do
+    for arg in "${POSITIONAL[@]}"; do
         if [[ "$arg" = /* ]]; then
             TEST_FILES+=("$arg")
         else
             TEST_FILES+=("$PROJECT_ROOT/$arg")
         fi
     done
+fi
+
+# Filter test files based on libc flags
+if $NO_LIBC; then
+    FILTERED=()
+    for f in "${TEST_FILES[@]}"; do
+        [[ "$(basename "$f")" == *.libc.* ]] && continue
+        FILTERED+=("$f")
+    done
+    TEST_FILES=("${FILTERED[@]}")
+elif $LIBC_ONLY; then
+    FILTERED=()
+    for f in "${TEST_FILES[@]}"; do
+        [[ "$(basename "$f")" == *.libc.* ]] || continue
+        FILTERED+=("$f")
+    done
+    TEST_FILES=("${FILTERED[@]}")
 fi
 
 # Build Lean project (in subshell to avoid changing cwd)
@@ -84,7 +117,11 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
     fi
 
     # Generate JSON with Cerberus
-    if ! "$SCRIPT_DIR/cerberus" --switches=at_magic_comments --json_core_out="$TMP_JSON" "$TEST_FILE" 2>/dev/null; then
+    CERBERUS_FLAGS="--switches=at_magic_comments"
+    if $NO_LIBC; then
+        CERBERUS_FLAGS="--nolibc $CERBERUS_FLAGS"
+    fi
+    if ! "$SCRIPT_DIR/cerberus" $CERBERUS_FLAGS --json_core_out="$TMP_JSON" "$TEST_FILE" 2>/dev/null; then
         echo "  ERROR: Cerberus failed"
         TOTAL_FAIL=$((TOTAL_FAIL + 1))
         FAILED_FILES+=("$TEST_FILE")

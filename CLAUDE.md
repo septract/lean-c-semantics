@@ -1,5 +1,7 @@
 # Lean C Semantics
 
+> **⚠️ CRITICAL: NEVER run commands with `dangerouslyDisableSandbox`. Always run sandboxed. No exceptions.**
+
 > **⚠️ CRITICAL: Read "ABSOLUTE RULE: Fail, Never Guess" in Development Notes before writing any code. Never add fall-throughs. Never guess. Never approximate. Failure is always better than incorrect output.**
 
 ## Overview
@@ -299,8 +301,11 @@ Tests include: layout (sizeof/alignof), allocation, store/load roundtrip, null d
 **CN Verification Tests** (`make test-cn`):
 Tests for the CN separation logic type system implementation.
 ```bash
-make test-cn                              # Run integration tests on tests/cn/
+make test-cn                              # Run all CN integration tests (nolibc + libc)
+make test-cn-nolibc                       # Run integration tests (fast, --nolibc)
+make test-cn-libc                         # Run libc-only tests (*.libc.* files)
 make test-cn-unit                         # Run unit tests only (fast, no Cerberus)
+./scripts/test_cn.sh --nolibc             # Run tests without libc (skips *.libc.* tests)
 ./scripts/test_cn.sh                      # Run all tests in tests/cn/
 ./scripts/test_cn.sh /path/to/test.c      # Run a specific test
 ./scripts/test_cn.sh --unit               # Run unit tests only
@@ -309,6 +314,7 @@ make test-cn-unit                         # Run unit tests only (fast, no Cerber
 Test files in `tests/cn/` follow these conventions:
 - `NNN-description.c` - Tests expected to pass
 - `NNN-description.fail.c` - Tests expected to fail (e.g., double-free, use-after-free)
+- `NNN-description.libc.fail.c` - Expected-fail tests requiring libc (skipped with --nolibc)
 - `NNN-description.smt-fail.c` - Tests expected to fail at the SMT level (postcondition violations)
 
 The `.fail.c` and `.smt-fail.c` suffixes indicate the test should fail verification. The test infrastructure automatically passes `--expect-fail` to the test runner for these files.

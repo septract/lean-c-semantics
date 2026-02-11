@@ -6,7 +6,7 @@
 .PHONY: test-interp test-interp-minimal test-interp-debug test-one
 .PHONY: test-interp-full test-interp-minimal-full test-interp-debug-full test-interp-ci
 .PHONY: test-interp-seq
-.PHONY: test-genproof test-cn test-cn-unit
+.PHONY: test-genproof test-cn test-cn-nolibc test-cn-libc test-cn-unit
 .PHONY: test-verified verified-programs
 .PHONY: fuzz init update-cerberus help
 
@@ -115,6 +115,9 @@ test-genproof: lean cerberus
 	./scripts/test_genproof.sh --nolibc tests/minimal/001-return-literal.c
 	@echo "✓ GenProof pipeline test passed"
 
+# TODO: add test-interp-libc target to run *.libc.c tests with libc in CI
+# (currently only test-interp-full runs them, but it's not in the CI test target)
+
 # Interpreter Tests (fast mode with --nolibc, skips *.libc.c tests)
 test-interp-minimal: lean cerberus
 	./scripts/test_interp.sh --nolibc tests/minimal
@@ -142,10 +145,17 @@ test-interp-ci: lean cerberus
 test-interp-seq: lean cerberus
 	./scripts/test_interp.sh --nolibc --sequentialise --exclude=unseq tests/minimal
 
-# CN Tests
-# test-cn: run integration tests on tests/cn/*.c (requires Cerberus)
-test-cn: lean cerberus
-	./scripts/test_cn.sh
+# CN Tests (run both nolibc and libc-only, fail if either fails)
+test-cn:
+	$(MAKE) test-cn-nolibc; nolibc=$$?; $(MAKE) test-cn-libc; libc=$$?; exit $$(( nolibc || libc ))
+
+# CN Tests (fast mode with --nolibc, skips *.libc.* tests)
+test-cn-nolibc: lean cerberus
+	./scripts/test_cn.sh --nolibc
+
+# CN Tests (with libc — runs only *.libc.* tests)
+test-cn-libc: lean cerberus
+	./scripts/test_cn.sh --libc-only
 
 # test-cn-unit: run unit tests only (fast, no Cerberus)
 test-cn-unit: lean
