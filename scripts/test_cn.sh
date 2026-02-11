@@ -5,6 +5,8 @@
 #
 # Options:
 #   --unit         Run unit tests only (no Cerberus required)
+#   --nolibc       Skip libc (faster, skips *.libc.* tests)
+#   --libc-only    Run only *.libc.* tests (with libc)
 #   -v, --verbose  Show detailed output per test
 #   -h, --help     Show this help message
 
@@ -22,11 +24,15 @@ With file arguments, tests only those specific C files.
 
 Options:
   --unit         Run unit tests only (no Cerberus required)
+  --nolibc       Skip libc (faster, skips *.libc.* tests)
+  --libc-only    Run only *.libc.* tests (with libc)
   -v, --verbose  Show detailed output per test
   -h, --help     Show this help message
 
 Examples:
   ./scripts/test_cn.sh                      # All integration tests
+  ./scripts/test_cn.sh --nolibc             # Skip libc tests (faster)
+  ./scripts/test_cn.sh --libc-only          # Only libc tests
   ./scripts/test_cn.sh tests/cn/001-*.c     # Specific test
   ./scripts/test_cn.sh --unit               # Unit tests only
 EOF
@@ -35,6 +41,8 @@ EOF
 
 # Parse arguments
 UNIT_MODE=false
+NO_LIBC=false
+LIBC_ONLY=false
 VERBOSE=false
 TEST_ARGS=()
 
@@ -43,6 +51,14 @@ while [[ $# -gt 0 ]]; do
         -h|--help) usage ;;
         --unit)
             UNIT_MODE=true
+            shift
+            ;;
+        --nolibc)
+            NO_LIBC=true
+            shift
+            ;;
+        --libc-only)
+            LIBC_ONLY=true
             shift
             ;;
         -v|--verbose)
@@ -89,6 +105,23 @@ else
     done
 fi
 
+# Filter test files based on libc flags
+if $NO_LIBC; then
+    FILTERED=()
+    for f in "${TEST_FILES[@]}"; do
+        [[ "$(basename "$f")" == *.libc.* ]] && continue
+        FILTERED+=("$f")
+    done
+    TEST_FILES=("${FILTERED[@]}")
+elif $LIBC_ONLY; then
+    FILTERED=()
+    for f in "${TEST_FILES[@]}"; do
+        [[ "$(basename "$f")" == *.libc.* ]] || continue
+        FILTERED+=("$f")
+    done
+    TEST_FILES=("${FILTERED[@]}")
+fi
+
 # Build Lean project
 build_lean test_cn
 echo ""
@@ -131,7 +164,11 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
     fi
 
     # Generate JSON with Cerberus
-    if ! "$CERBERUS" --switches=at_magic_comments --json_core_out="$TMP_JSON" "$TEST_FILE" 2>/dev/null; then
+    CERBERUS_FLAGS="--switches=at_magic_comments"
+    if $NO_LIBC; then
+        CERBERUS_FLAGS="--nolibc $CERBERUS_FLAGS"
+    fi
+    if ! "$CERBERUS" $CERBERUS_FLAGS --json_core_out="$TMP_JSON" "$TEST_FILE" 2>/dev/null; then
         echo -e "${RED}  ERROR: Cerberus failed on $BASENAME${NC}"
         TOTAL_FAIL=$((TOTAL_FAIL + 1))
         FAILED_FILES+=("$TEST_FILE")

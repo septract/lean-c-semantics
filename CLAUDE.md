@@ -160,14 +160,17 @@ cd lean && .lake/build/bin/cerblean_memtest # Run directly
 
 **CN Verification Tests** (`make test-cn`):
 ```bash
-make test-cn                              # Run integration tests on tests/cn/
+make test-cn                              # Run all CN integration tests (nolibc + libc)
+make test-cn-nolibc                       # Run integration tests (fast, --nolibc)
+make test-cn-libc                         # Run libc-only tests (*.libc.* files)
 make test-cn-unit                         # Run unit tests only (fast, no Cerberus)
+./scripts/test_cn.sh --nolibc             # Run tests without libc (skips *.libc.* tests)
 ./scripts/test_cn.sh                      # Run all tests in tests/cn/
 ./scripts/test_cn.sh /path/to/test.c      # Run a specific test
 ./scripts/test_cn.sh --unit               # Run unit tests only
 ```
 
-CN test file conventions: `NNN-description.c` (pass), `NNN-description.fail.c` (expected fail), `NNN-description.smt-fail.c` (SMT-level fail). The `.fail.c` and `.smt-fail.c` suffixes auto-pass `--expect-fail`.
+CN test file conventions: `NNN-description.c` (pass), `NNN-description.fail.c` (expected fail), `NNN-description.libc.fail.c` (expected-fail requiring libc, skipped with --nolibc), `NNN-description.smt-fail.c` (SMT-level fail). The `.fail.c` and `.smt-fail.c` suffixes auto-pass `--expect-fail`.
 
 **Cerberus OCaml Code Coverage** (`scripts/test_coverage.sh`):
 ```bash
