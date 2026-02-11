@@ -89,7 +89,7 @@ Corresponds to: cn/coq/Reasoning/ResourceInference.v
 def nameSubsumed (n1 n2 : ResourceName) : Prop :=
   n1 = n2 ∨
   match n1, n2 with
-  | ResourceName.owned ct1 Init.uninit, ResourceName.owned ct2 Init.init => ct1 = ct2
+  | ResourceName.owned (some ct1) Init.uninit, ResourceName.owned (some ct2) Init.init => ct1 = ct2
   | _, _ => False
 
 /-- A resource inference step is valid when:
@@ -187,13 +187,14 @@ def interpOwned (ct : Ctype) (loc : Location) (initState : Init) (v : HeapValue)
 def interpPredicate (pred : Predicate) (outputVal : HeapValue) (ρ : Valuation)
     (h : HeapFragment) : Prop :=
   match pred.name with
-  | .owned ct initState =>
+  | .owned (some ct) initState =>
     match pred.pointer.term with
     | .sym s =>
       match ρ.lookup s with
       | some (.pointer (some loc)) => interpOwned ct loc initState outputVal h
       | _ => False
     | _ => False
+  | .owned none _ => False  -- Unresolved resource type
   | .pname _ => False  -- User predicates not yet supported
 
 /-- Interpretation of a resource

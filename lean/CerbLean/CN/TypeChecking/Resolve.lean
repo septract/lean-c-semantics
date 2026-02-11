@@ -132,7 +132,8 @@ def resolveCtypeTag (tagDefs : TagDefs) (ct : Ctype) : Ctype :=
     Fixes the Ctype inside Owned<T> predicates. -/
 def resolveResourceNameTag (tagDefs : TagDefs) (rn : ResourceName) : ResourceName :=
   match rn with
-  | .owned ct init => .owned (resolveCtypeTag tagDefs ct) init
+  | .owned (some ct) init => .owned (some (resolveCtypeTag tagDefs ct)) init
+  | .owned none init => .owned none init  -- Type to be inferred later
   | .pname _ => rn
 
 /-- Resolve struct/union tags in a BaseType. -/
@@ -282,11 +283,13 @@ def requestOutputBaseType (req : Request) (fallback : BaseType) : BaseType :=
   match req with
   | .p pred =>
     match pred.name with
-    | .owned ct _ => ctypeToOutputBaseType ct
+    | .owned (some ct) _ => ctypeToOutputBaseType ct
+    | .owned none _ => fallback  -- Type should have been inferred; use fallback
     | .pname _ => fallback  -- User-defined predicates keep their declared type
   | .q qpred =>
     match qpred.name with
-    | .owned ct _ => ctypeToOutputBaseType ct
+    | .owned (some ct) _ => ctypeToOutputBaseType ct
+    | .owned none _ => fallback  -- Type should have been inferred; use fallback
     | .pname _ => fallback
 
 /-! ## Symbol Resolution
@@ -582,12 +585,35 @@ partial def resolveAnnotTerm (ctx : ResolveContext) (at_ : AnnotTerm)
         | some resolved => return .mk (.apply resolved []) _bt loc
         | none => throw (.symbolNotFound name)
     | _, _ =>
-      -- Non-builtin function call: resolve symbol and args normally
-      match resolveSym ctx fn with
-      | some resolved =>
-        let args' ← args.mapM (resolveAnnotTerm ctx · none)
-        return .mk (.apply resolved args') _bt loc
-      | none => throw (.symbolNotFound (fn.name.getD "?"))
+      -- Check for multi-arg builtin functions
+      -- Corresponds to: CN's builtins.ml builtin_fun_defs
+      let args' ← args.mapM (resolveAnnotTerm ctx · none)
+      match fn.name with
+      | some "ptr_eq" =>
+        -- ptr_eq(p, q) => EQ(p, q) : Bool
+        -- Corresponds to: ptr_eq_def in cn/lib/builtins.ml line 126-127
+        match args' with
+        | [p, q] => return .mk (.binop .eq p q) .bool loc
+        | _ => throw (.other s!"ptr_eq requires exactly 2 arguments, got {args'.length}")
+      | some "addr_eq" =>
+        -- addr_eq(p, q) => EQ(addr(p), addr(q)) : Bool
+        -- Corresponds to: addr_eq_def in cn/lib/builtins.ml lines 139-145
+        -- TODO: need addr_ index term constructor
+        match args' with
+        | [p, q] => return .mk (.binop .eq p q) .bool loc
+        | _ => throw (.other s!"addr_eq requires exactly 2 arguments, got {args'.length}")
+      | some "is_null" =>
+        -- is_null(p) => EQ(p, NULL) : Bool
+        -- Corresponds to: is_null_def in cn/lib/builtins.ml lines 114-116
+        match args' with
+        | [p] => return .mk (.binop .eq p (.mk (.const .null) .loc loc)) .bool loc
+        | _ => throw (.other s!"is_null requires exactly 1 argument, got {args'.length}")
+      | _ =>
+        -- Non-builtin function call: resolve symbol and args normally
+        match resolveSym ctx fn with
+        | some resolved =>
+          return .mk (.apply resolved args') _bt loc
+        | none => throw (.symbolNotFound (fn.name.getD "?"))
   | .mk (.structMember obj member) _bt loc =>
     -- CN wellTyped.ml:695-706: infer obj type, extract struct tag, look up field type
     let obj' ← resolveAnnotTerm ctx obj none
@@ -619,7 +645,16 @@ def resolvePredicate (ctx : ResolveContext) (p : Predicate) : ResolveResult Pred
   let pointer' ← resolveAnnotTerm ctx p.pointer
   let iargs' ← p.iargs.mapM (resolveAnnotTerm ctx)
   let name' := resolveResourceNameTag ctx.tagDefs p.name
-  return { p with name := name', pointer := pointer', iargs := iargs' }
+  -- Infer resource type if missing (CN allows Owned(p) without <type>).
+  -- The type is inferred from the pointer's C type: if p : T*, then Owned(p) = Owned<T>(p).
+  -- Corresponds to: CN's desugaring in core_to_mucore.ml which resolves Owned types
+  let name'' ← match name' with
+    | .owned none init =>
+      match tryGetPointeeCtype ctx pointer' with
+      | some ct => pure (.owned (some (resolveCtypeTag ctx.tagDefs ct)) init)
+      | none => throw (.other "cannot infer resource type: pointer has unknown pointee type (use explicit Owned<type> syntax)")
+    | _ => pure name'
+  return { p with name := name'', pointer := pointer', iargs := iargs' }
 
 /-- Resolve symbols in a QPredicate.
     Also resolves struct/union tags in the resource name. -/

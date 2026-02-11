@@ -519,9 +519,16 @@ def runJsonTest (jsonPath : String) (expectFail : Bool := false) : IO UInt32 := 
         IO.println ""
 
     if count == 0 then
-      IO.println "(No CN annotations found)"
-      IO.println "Note: Use --switches=at_magic_comments when running Cerberus"
-      return 1
+      -- No CN annotations found. CN does not error in this case — it simply
+      -- has nothing to verify. The file is trivially correct (no specs to violate).
+      -- Matching CN's behavior: succeed with 0 functions verified.
+      IO.println "(No CN annotations found — trivially correct)"
+      if expectFail then
+        -- Expected failure but nothing to fail: test fails
+        IO.eprintln "=== EXPECTED FAILURE BUT NO ANNOTATIONS - TEST FAILED ==="
+        return 1
+      else
+        return 0
     else
       IO.println s!"Total: {count} function(s) with CN annotations"
       IO.println s!"Parse: {parseSuccess} success, {parseFail} failures"
@@ -745,9 +752,13 @@ def runJsonTestWithVerify (jsonPath : String) (expectFail : Bool := false) : IO 
         IO.println ""
 
     if count == 0 then
-      IO.println "(No CN annotations found)"
-      IO.println "Note: Use --switches=at_magic_comments when running Cerberus"
-      return 1
+      -- No CN annotations found — trivially correct (matching CN behavior)
+      IO.println "(No CN annotations found — trivially correct)"
+      if expectFail then
+        IO.eprintln "=== EXPECTED FAILURE BUT NO ANNOTATIONS - TEST FAILED ==="
+        return 1
+      else
+        return 0
     else
       IO.println s!"Total: {count} function(s) with CN annotations"
       IO.println s!"Parse: {parseSuccess} success, {parseFail} failures"
