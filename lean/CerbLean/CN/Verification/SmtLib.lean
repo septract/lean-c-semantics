@@ -463,7 +463,7 @@ def sizeOfCtypeNat (env : Option TypeEnv := none) : CerbLean.Core.Ctype_ → Opt
   | .pointer _ _ => some 8
   | .struct_ tag =>
     match env with
-    | some e => some (sizeof e { ty := Ctype_.struct_ tag })
+    | some e => (sizeof e { ty := Ctype_.struct_ tag }).toOption
     | none => none
   | _ => none
 
@@ -680,7 +680,9 @@ partial def termToSmtTerm (env : Option TypeEnv) : Types.Term → TranslateResul
     | some e =>
       match e.lookupTag tag with
       | some (.struct_ members _) =>
-        let offsets := structOffsets e members
+        match structOffsets e members with
+        | .error err => .unsupported s!"offsetOf: structOffsets failed: {err}"
+        | .ok offsets =>
         match offsets.find? (·.1 == member) with
         | some (_, offset) => .ok (mkBitVecLiteral 64 offset)
         | none => .unsupported s!"offsetOf: member {member.name} not found in struct {tagStr}"
@@ -698,7 +700,9 @@ partial def termToSmtTerm (env : Option TypeEnv) : Types.Term → TranslateResul
       | some e =>
         match e.lookupTag tag with
         | some (.struct_ members _) =>
-          let offsets := structOffsets e members
+          match structOffsets e members with
+          | .error err => .unsupported s!"memberShift: structOffsets failed: {err}"
+          | .ok offsets =>
           match offsets.find? (·.1 == member) with
           | some (_, offset) =>
             let offsetBv := mkBitVecLiteral 64 offset
