@@ -225,10 +225,10 @@ def checkFunctionWithParams
     (functionSpecs : FunctionSpecMap := {})
     (funInfoMap : Core.FunInfoMap := {})
     (tagDefs : Core.TagDefs := [])
-    : TypeCheckResult :=
+    : IO TypeCheckResult := do
   -- For trusted specs, skip verification
   if spec.trusted then
-    TypeCheckResult.ok
+    return TypeCheckResult.ok
   else
     -- Step 1: Get parameter IDs and scan for aliases
     let paramIds := params.map (·.1.id)
@@ -285,7 +285,7 @@ def checkFunctionWithParams
 
     match setupResult with
     | .error msg =>
-      TypeCheckResult.fail msg
+      return TypeCheckResult.fail msg
     | .ok (paramCtx, paramValueMap, nextFreshId, cnParams, paramCTypes) =>
       -- Step 3: Convert return type to CN BaseType
       -- Corresponds to: WProc extracting return_bt from function type
@@ -298,7 +298,7 @@ def checkFunctionWithParams
           | some bt => .ok bt
           | none => .error s!"Unsupported return type: {repr retTy}"
       match returnBtResult with
-      | .error msg => TypeCheckResult.fail msg
+      | .error msg => return TypeCheckResult.fail msg
       | .ok returnBt =>
 
       -- Step 4: Transform body to muCore form
@@ -317,7 +317,7 @@ def checkFunctionWithParams
         | .unknownPointeeType msg => s!"Pointer arithmetic error: {msg}"
         | .other msg => s!"Resolution error: {msg}"
       match resolveResult with
-      | .error msg => TypeCheckResult.fail msg
+      | .error msg => return TypeCheckResult.fail msg
       | .ok resolvedSpec =>
       -- Step 6: Create label context from label definitions
       -- Corresponds to: WProc.label_context in wellTyped.ml line 2474
@@ -327,7 +327,26 @@ def checkFunctionWithParams
       -- Step 7: Initial context (resources will be added by processPrecondition)
       let initialCtx := paramCtx
 
-      -- Step 8: Create initial state with ParamValueMap, LabelDefs, and obligation accumulation
+      -- Step 8: Initialize inline solver (managed at IO level)
+      -- The preamble includes pointer datatype and struct declarations.
+      -- Corresponds to: init_solver in typing.ml + Solver.make → declare_solver_basics
+      let structPreamble := CerbLean.CN.Verification.SmtLib.generateStructPreamble
+        { tagDefs := tagDefs : CerbLean.Memory.TypeEnv }
+      let preamble := CerbLean.CN.Verification.SmtLib.pointerPreamble ++ structPreamble
+      let solverChild ← try
+        let proc ← IO.Process.spawn {
+          cmd := "z3"
+          args := #["-in", "-smt2"]
+          stdin := .piped
+          stdout := .piped
+          stderr := .piped
+        }
+        proc.stdin.putStr preamble
+        proc.stdin.flush
+        pure (some proc)
+      catch _ => pure none
+
+      -- Step 9: Create initial state with ParamValueMap, LabelDefs, solver, and obligations
       let initialState : TypingState := {
         context := initialCtx
         freshCounter := nextFreshId + 1000  -- Leave room for resolution IDs
@@ -336,9 +355,11 @@ def checkFunctionWithParams
         functionSpecs := functionSpecs  -- Pre-built function types for ccall
         funInfoMap := funInfoMap  -- C-level function signatures for cfunction/params_length
         tagDefs := tagDefs  -- Struct/union definitions for resource unpacking
+        solverStdin := solverChild.map (·.stdin)    -- Inline solver for provable queries (H5)
+        solverStdout := solverChild.map (·.stdout)
       }
 
-      -- Step 9: Run type checking on transformed body
+      -- Step 10: Run type checking on transformed body
       -- Corresponds to: check_expr_top in check.ml lines 2317-2330
       let computation : TypingM Unit := do
         -- Process precondition: add resources to context, bind outputs
@@ -349,13 +370,23 @@ def checkFunctionWithParams
         -- fallthrough via Spine.subtype (for void functions)
         checkExprTop loc labels resolvedSpec returnBt muProc.body
 
-      match TypingM.run computation initialState with
+      let result ← TypingM.run computation initialState
+
+      -- Cleanup solver at IO level (regardless of success/failure)
+      if let some proc := solverChild then
+        try
+          proc.stdin.putStr "(exit)\n"
+          proc.stdin.flush
+          let _ ← proc.wait
+        catch _ => pure ()
+
+      match result with
       | .ok (_, finalState) =>
         -- Convert conditional failures to (Obligation, errorString) pairs
         let cfs := finalState.conditionalFailures.map fun cf =>
           (cf.obligation, toString cf.originalError)
-        TypeCheckResult.okWithAll finalState.obligations cfs
+        return TypeCheckResult.okWithAll finalState.obligations cfs
       | .error err =>
-        TypeCheckResult.fail (toString err)
+        return TypeCheckResult.fail (toString err)
 
 end CerbLean.CN.TypeChecking

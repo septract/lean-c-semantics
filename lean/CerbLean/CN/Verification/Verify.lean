@@ -89,7 +89,7 @@ def verifySpec
     (timeout : Option Nat := some 10)
     (env : Option TypeEnv := none) : IO VerificationResult := do
   -- Run type checking
-  let tcResult := checkSpecStandalone spec
+  let tcResult ← checkSpecStandalone spec
 
   if !tcResult.success then
     return {
