@@ -663,15 +663,22 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
   -- transformation (core_to_mucore.ml) strips these guards entirely — the type
   -- checker never sees PEundef from guards. We match this by skipping the undef
   -- branch and returning only the then-branch result.
+  -- Note: When the THEN branch is undef (e.g., division by zero), we do NOT strip
+  -- it — those are genuine safety checks handled by the four-way pattern.
   | .if_ cond thenE elseE =>
     let peCond : APexpr := ⟨[], some .boolean, cond⟩
     let peThen : APexpr := ⟨[], pe.ty, thenE⟩
     let peElse : APexpr := ⟨[], pe.ty, elseE⟩
     let tCond ← checkPexpr peCond (some .bool)
-    -- Lazy muCore: strip guard patterns where else branch is PEundef.
+    -- Lazy muCore: strip guard patterns where the ELSE branch is PEundef.
     -- CN's muCore transformation removes these entirely (core_to_mucore.ml).
-    -- The safety is guaranteed by the resource system (Owned<T>(ptr) implies
+    -- Pattern: ite(PtrValidForDeref, value, undef) → value
+    -- Safety is guaranteed by the resource system (Owned<T>(ptr) implies
     -- pointer validity), not by the PtrValidForDeref guard.
+    --
+    -- NOTE: We do NOT strip when THEN is undef (e.g., ite(y==0, undef, x/y)).
+    -- Those represent genuine safety checks (division by zero, etc.) that must
+    -- go through the normal four-way pattern to detect reachable undefined behavior.
     match elseE with
     | .undef _ _ =>
       -- Guard pattern: ite(check, value, undef) → just return value
@@ -679,34 +686,80 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
       let tThen ← checkPexpr peThen expectedBt
       return tThen
     | _ =>
-    -- Normal conditional (not a guard pattern)
-    -- Save constraints before adding path conditions
+    -- Normal conditional (not a guard pattern).
+    -- CN's four-way pruning pattern (check.ml lines 1039-1056):
+    -- Query both provable(c) and provable(¬c) up front, then match:
+    --   (proved, proved)  → inconsistent context, return default
+    --   (proved, _)       → only then-branch
+    --   (_, proved)       → only else-branch
+    --   (_, _)            → check both with path conditions
+    -- CN trusts the inline solver for path decisions and does NOT emit
+    -- backing obligations for pruned branches (the solver is treated as
+    -- a sound oracle for the path condition check).
     let savedConstraints ← TypingM.getConstraints
-    -- Check then branch with condition as path constraint
-    -- Corresponds to: check_pexpr (c :: path_cs) e1
+    let notCond := AnnotTerm.mk (.unop .not tCond) .bool loc
+    let condResult ← TypingM.provable (.t tCond)
+    let negResult ← TypingM.provable (.t notCond)
+    match condResult, negResult with
+    | .proved, .proved =>
+      -- Inconsistent context: both c and ¬c are provable.
+      -- Any term is valid here; CN returns default_ (check.ml:1044-1046).
+      -- Corresponds to: return (default_ expect loc)
+      let bt ← match expectedBt with
+        | some bt => pure bt
+        | none => requireCoreBaseTypeToCN pe.ty "PEif inconsistent context"
+      return AnnotTerm.mk (.const (.default bt)) bt loc
+    | .proved, _ =>
+      -- Condition is provable: only check then-branch.
+      -- Corresponds to: check_pexpr path_cs e1 (check.ml:1049)
+      TypingM.solverPush
+      TypingM.addC (.t tCond)
+      let tThen ← checkPexpr peThen expectedBt
+      TypingM.modifyContext (fun ctx => { ctx with constraints := savedConstraints })
+      TypingM.solverPop
+      return tThen
+    | _, .proved =>
+      -- Negation is provable: only check else-branch.
+      -- Corresponds to: check_pexpr path_cs e2 (check.ml:1052)
+      TypingM.solverPush
+      TypingM.addC (.t notCond)
+      let tElse ← checkPexpr peElse expectedBt
+      TypingM.modifyContext (fun ctx => { ctx with constraints := savedConstraints })
+      TypingM.solverPop
+      return tElse
+    | _, _ =>
+    -- Neither provable: check both branches with path conditions.
+    -- Corresponds to: check_pexpr (c :: path_cs) e1 / (not_ c :: path_cs) e2
+    TypingM.solverPush
     TypingM.addC (.t tCond)
     let tThen ← checkPexpr peThen expectedBt
-    -- Restore constraints, add negation for else branch
-    -- Corresponds to: check_pexpr (not_ c loc :: path_cs) e2
     TypingM.modifyContext (fun ctx => { ctx with constraints := savedConstraints })
-    let notCond := AnnotTerm.mk (.unop .not tCond) .bool loc
+    TypingM.solverPop
+    TypingM.solverPush
     TypingM.addC (.t notCond)
     let tElse ← checkPexpr peElse expectedBt
-    -- Restore original constraints (path conditions are scoped to branches)
     TypingM.modifyContext (fun ctx => { ctx with constraints := savedConstraints })
-    -- Cross-propagate: if types differ and one is more specific, re-check
+    TypingM.solverPop
+    -- Cross-propagation (our enhancement, not in CN):
+    -- When branch types differ (e.g., Bits vs Integer), re-check the less-specific
+    -- branch with the more-specific type to get better type inference.
+    -- CN's PEif (check.ml:1034-1056) does not re-check branches for type refinement.
     let (tThen, tElse) ← match tThen.bt, tElse.bt with
       | .bits _ _, .integer =>
         -- Then has precise bits type, re-check else with that type
+        TypingM.solverPush
         TypingM.addC (.t notCond)
         let tElse' ← checkPexpr peElse (some tThen.bt)
         TypingM.modifyContext (fun ctx => { ctx with constraints := savedConstraints })
+        TypingM.solverPop
         pure (tThen, tElse')
       | .integer, .bits _ _ =>
         -- Else has precise bits type, re-check then with that type
+        TypingM.solverPush
         TypingM.addC (.t tCond)
         let tThen' ← checkPexpr peThen (some tElse.bt)
         TypingM.modifyContext (fun ctx => { ctx with constraints := savedConstraints })
+        TypingM.solverPop
         pure (tThen', tElse)
       | _, _ => pure (tThen, tElse)
     return AnnotTerm.mk (.ite tCond tThen tElse) tThen.bt loc
@@ -1110,9 +1163,15 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
   -- CN calls `provable (LC.T (bool_ false))` to check if the path is unreachable:
   --   - If provable (path is dead): return default value
   --   - If not provable (UB is reachable): fail with Undefined_behaviour error
-  -- In our post-hoc model, we add an obligation that `false` must hold under
-  -- current assumptions. If SMT finds the path is reachable, this obligation
-  -- will fail, correctly flagging the UB.
+  --
+  -- **Known divergence**: CN fails immediately when `provable(false)` returns False.
+  -- We instead generate a post-hoc obligation and continue. This is intentional:
+  -- the inline solver doesn't always have enough context to prove branches dead
+  -- (e.g., a function precondition `y != 0` may not be in the right SMT form when
+  -- a division-by-zero guard is checked). By deferring to obligations, we let the
+  -- full obligation discharge (Phase 4) make the final soundness decision.
+  -- The tradeoff: we may explore more paths than CN does, but we never miss a
+  -- genuine UB that CN would catch (obligations still fail for live UB paths).
   | .undef _uloc ub =>
     let falseTerm := AnnotTerm.mk (.const (.bool false)) .bool loc
     TypingM.requireConstraint (.t falseTerm) loc s!"undefined behavior ({repr ub}) must be unreachable"

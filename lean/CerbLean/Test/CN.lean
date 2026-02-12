@@ -107,7 +107,7 @@ def runUnitTests : IO UInt32 := do
       IO.println s!"  pretty: {ppFunctionSpec spec}"
 
       -- Run type checker
-      let result := checkSpecStandalone spec
+      let result ← checkSpecStandalone spec
       if result.success then
         if expectFail then
           -- Expected to fail but passed
@@ -224,7 +224,7 @@ def runObligationTests : IO UInt32 := do
       failed := failed + 1
       IO.println s!"PARSE ERROR: {e}"
     | .ok spec =>
-      let result := checkSpecStandalone spec
+      let result ← checkSpecStandalone spec
       let numObligations := result.obligations.length
 
       -- Check structural success
@@ -272,7 +272,7 @@ def runAssumptionCaptureTest : IO UInt32 := do
     IO.println s!"PARSE ERROR: {e}"
     return 1
   | .ok parsedSpec =>
-    let result := checkSpecStandalone parsedSpec
+    let result ← checkSpecStandalone parsedSpec
 
     if !result.success then
       IO.println s!"FAIL: Type checking failed unexpectedly"
@@ -471,7 +471,7 @@ def runJsonTest (jsonPath : String) (expectFail : Bool := false) : IO UInt32 := 
             match findFunctionInfo file sym.name with
             | some info =>
               -- Full verification: check body against spec with parameters bound
-              let result := checkFunctionWithParams spec info.body info.params info.cParams info.retTy info.cRetTy Core.Loc.t.unknown functionSpecs file.funinfo file.tagDefs
+              let result ← checkFunctionWithParams spec info.body info.params info.cParams info.retTy info.cRetTy Core.Loc.t.unknown functionSpecs file.funinfo file.tagDefs
               if result.success then
                 -- Discharge conditional failures via SMT
                 let mut cfFailed := false
@@ -501,7 +501,7 @@ def runJsonTest (jsonPath : String) (expectFail : Bool := false) : IO UInt32 := 
             | none =>
               -- No body found - fall back to spec-only check
               IO.println "  (no body found, checking spec only)"
-              let result := checkSpecStandalone spec
+              let result ← checkSpecStandalone spec
               if result.success then
                 verifySuccess := verifySuccess + 1
                 IO.println "  PASS (spec-only)"
@@ -676,7 +676,7 @@ def runJsonTestWithVerify (jsonPath : String) (expectFail : Bool := false) : IO 
             match findFunctionInfo file sym.name with
             | some info =>
               -- Type check first
-              let tcResult := checkFunctionWithParams spec info.body info.params info.cParams info.retTy info.cRetTy Core.Loc.t.unknown functionSpecs file.funinfo file.tagDefs
+              let tcResult ← checkFunctionWithParams spec info.body info.params info.cParams info.retTy info.cRetTy Core.Loc.t.unknown functionSpecs file.funinfo file.tagDefs
               if !tcResult.success then
                 verifyFail := verifyFail + 1
                 IO.println "  TYPECHECK FAIL"
@@ -728,7 +728,7 @@ def runJsonTestWithVerify (jsonPath : String) (expectFail : Bool := false) : IO 
             | none =>
               -- No body found - spec-only check
               IO.println "  (no body found, checking spec only)"
-              let tcResult := checkSpecStandalone spec
+              let tcResult ← checkSpecStandalone spec
               if !tcResult.success then
                 verifyFail := verifyFail + 1
                 IO.println "  TYPECHECK FAIL"
