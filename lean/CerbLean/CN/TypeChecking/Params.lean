@@ -335,8 +335,8 @@ def checkFunctionWithParams
       let preamble := CerbLean.CN.Verification.SmtLib.pointerPreamble ++ structPreamble
       let solverChild ← try
         let proc ← IO.Process.spawn {
-          cmd := "z3"
-          args := #["-in", "-smt2"]
+          cmd := "cvc5"
+          args := #["--quiet", "--incremental", "--lang", "smt"]
           stdin := .piped
           stdout := .piped
           stderr := .piped
@@ -362,6 +362,13 @@ def checkFunctionWithParams
       -- Step 10: Run type checking on transformed body
       -- Corresponds to: check_expr_top in check.ml lines 2317-2330
       let computation : TypingM Unit := do
+        -- Declare all parameter variables to the inline solver.
+        -- Parameters were added to paramCtx directly (not via TypingM.addA which
+        -- calls solverDeclare), so we need to declare them explicitly here.
+        -- Corresponds to: init_solver declaring function params in typing.ml
+        for (sym, btOrVal, _) in initialCtx.computational do
+          TypingM.solverDeclare sym btOrVal.bt
+
         -- Process precondition: add resources to context, bind outputs
         processPrecondition resolvedSpec.requires loc
 

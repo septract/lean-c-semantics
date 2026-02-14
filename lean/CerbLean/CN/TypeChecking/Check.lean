@@ -141,11 +141,11 @@ def checkFunctionSpec
     return TypeCheckResult.ok
   else
     -- Initialize inline solver at IO level (lifecycle managed outside TypingM)
-    -- If Z3 is not available, proceed without inline solver (all ops become no-ops)
+    -- If cvc5 is not available, proceed without inline solver (all ops become no-ops)
     let solverChild ← try
       let proc ← IO.Process.spawn {
-        cmd := "z3"
-        args := #["-in", "-smt2"]
+        cmd := "cvc5"
+        args := #["--quiet", "--incremental", "--lang", "smt"]
         stdin := .piped
         stdout := .piped
         stderr := .piped

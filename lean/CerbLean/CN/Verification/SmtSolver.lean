@@ -8,7 +8,7 @@
 
   ```lean
   -- Discharge a single obligation
-  let result ← SmtSolver.checkObligation .z3 obligation
+  let result ← SmtSolver.checkObligation .cvc5 obligation
 
   -- Discharge all obligations
   let results ← SmtSolver.checkObligations .cvc5 obligations
@@ -132,11 +132,7 @@ def checkObligations
 
 /-! ## Convenience Functions -/
 
-/-- Check obligations with Z3 (default) -/
-def checkWithZ3 (obs : ObligationSet) (env : Option TypeEnv := none) : IO (List ObligationResult) :=
-  checkObligations .z3 obs (env := env)
-
-/-- Check obligations with cvc5 -/
+/-- Check obligations with cvc5 (default) -/
 def checkWithCvc5 (obs : ObligationSet) (env : Option TypeEnv := none) : IO (List ObligationResult) :=
   checkObligations .cvc5 obs (env := env)
 
