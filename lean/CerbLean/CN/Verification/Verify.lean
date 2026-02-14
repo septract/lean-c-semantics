@@ -71,7 +71,7 @@ instance : ToString VerificationResult where
 -/
 def verifyObligations
     (obs : ObligationSet)
-    (solver : SolverKind := .z3)
+    (solver : SolverKind := .cvc5)
     (timeout : Option Nat := some 10)
     (env : Option TypeEnv := none) : IO (List ObligationResult) := do
   if obs.isEmpty then
@@ -85,7 +85,7 @@ def verifyObligations
 -/
 def verifySpec
     (spec : FunctionSpec)
-    (solver : SolverKind := .z3)
+    (solver : SolverKind := .cvc5)
     (timeout : Option Nat := some 10)
     (env : Option TypeEnv := none) : IO VerificationResult := do
   -- Run type checking
@@ -176,7 +176,7 @@ def smokeTest : IO Unit := do
   }
 
   IO.println "Testing trivial obligation (True)..."
-  let result ← checkObligation .z3 trivialOb
+  let result ← checkObligation .cvc5 trivialOb
   IO.println s!"Result: {result.result}"
 
   -- Create a simple arithmetic obligation: x > 0 → x > 0
@@ -195,7 +195,7 @@ def smokeTest : IO Unit := do
   }
 
   IO.println "Testing arithmetic obligation (x > 0 → x > 0)..."
-  let result2 ← checkObligation .z3 arithmeticOb
+  let result2 ← checkObligation .cvc5 arithmeticOb
   IO.println s!"Result: {result2.result}"
 
   if let some q := result2.query then

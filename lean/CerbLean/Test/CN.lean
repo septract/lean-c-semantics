@@ -476,7 +476,7 @@ def runJsonTest (jsonPath : String) (expectFail : Bool := false) : IO UInt32 := 
                 -- Discharge conditional failures via SMT
                 let mut cfFailed := false
                 for (cfOb, cfErr) in result.conditionalFailures do
-                  let cfResult ← checkObligation .z3 cfOb (env := some typeEnv)
+                  let cfResult ← checkObligation .cvc5 cfOb (env := some typeEnv)
                   match cfResult.result with
                   | .valid =>
                     -- Branch is dead (obligation proved), error is vacuous
@@ -578,7 +578,7 @@ def runSmtSmokeTest : IO UInt32 := do
     loc := .unknown
     category := .arithmetic
   }
-  let result1 ← checkObligation .z3 trivialOb
+  let result1 ← checkObligation .cvc5 trivialOb
   match result1.result with
   | .valid =>
     passed := passed + 1
@@ -602,7 +602,7 @@ def runSmtSmokeTest : IO UInt32 := do
     loc := .unknown
     category := .arithmetic
   }
-  let result2 ← checkObligation .z3 arithmeticOb
+  let result2 ← checkObligation .cvc5 arithmeticOb
   match result2.result with
   | .valid =>
     passed := passed + 1
@@ -621,7 +621,7 @@ def runSmtSmokeTest : IO UInt32 := do
     loc := .unknown
     category := .arithmetic
   }
-  let result3 ← checkObligation .z3 invalidOb
+  let result3 ← checkObligation .cvc5 invalidOb
   match result3.result with
   | .invalid =>
     passed := passed + 1
@@ -688,7 +688,7 @@ def runJsonTestWithVerify (jsonPath : String) (expectFail : Bool := false) : IO 
                 let mut allPassed := true
                 let mut numVerified := 0
                 if !tcResult.obligations.isEmpty then
-                  let obResults ← checkObligations .z3 tcResult.obligations (some 10) (env := some typeEnv)
+                  let obResults ← checkObligations .cvc5 tcResult.obligations (some 10) (env := some typeEnv)
                   let allValid := obResults.all fun r => r.result matches .valid
                   if !allValid then
                     allPassed := false
@@ -702,7 +702,7 @@ def runJsonTestWithVerify (jsonPath : String) (expectFail : Bool := false) : IO 
 
                 -- Discharge conditional failures via SMT
                 for (cfOb, cfErr) in tcResult.conditionalFailures do
-                  let cfResult ← checkObligation .z3 cfOb (env := some typeEnv)
+                  let cfResult ← checkObligation .cvc5 cfOb (env := some typeEnv)
                   match cfResult.result with
                   | .valid =>
                     IO.println s!"  (dead branch confirmed: {cfOb.description})"
@@ -736,7 +736,7 @@ def runJsonTestWithVerify (jsonPath : String) (expectFail : Bool := false) : IO 
                 verifySuccess := verifySuccess + 1
                 IO.println "  PASS (no obligations)"
               else
-                let obResults ← checkObligations .z3 tcResult.obligations (some 10) (env := some typeEnv)
+                let obResults ← checkObligations .cvc5 tcResult.obligations (some 10) (env := some typeEnv)
                 let allValid := obResults.all fun r => r.result matches .valid
                 if allValid then
                   verifySuccess := verifySuccess + 1
