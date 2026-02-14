@@ -16,6 +16,7 @@ import CerbLean.CN.PrettyPrint
 import CerbLean.CN.TypeChecking
 import CerbLean.CN.Verification.Obligation
 import CerbLean.CN.Verification.Verify
+import CerbLean.Memory.Layout
 
 namespace CerbLean.Test.CN
 
@@ -26,6 +27,7 @@ open CerbLean.CN.PrettyPrint
 open CerbLean.CN.TypeChecking
 open CerbLean.CN.Verification
 open CerbLean.CN.Verification.SmtSolver (checkObligation checkObligations SolverKind)
+open CerbLean.Memory (TypeEnv)
 
 /-! ## Unit Test Cases
 
@@ -105,7 +107,7 @@ def runUnitTests : IO UInt32 := do
       IO.println s!"  pretty: {ppFunctionSpec spec}"
 
       -- Run type checker
-      let result := checkSpecStandalone spec
+      let result ← checkSpecStandalone spec
       if result.success then
         if expectFail then
           -- Expected to fail but passed
@@ -222,7 +224,7 @@ def runObligationTests : IO UInt32 := do
       failed := failed + 1
       IO.println s!"PARSE ERROR: {e}"
     | .ok spec =>
-      let result := checkSpecStandalone spec
+      let result ← checkSpecStandalone spec
       let numObligations := result.obligations.length
 
       -- Check structural success
@@ -270,7 +272,7 @@ def runAssumptionCaptureTest : IO UInt32 := do
     IO.println s!"PARSE ERROR: {e}"
     return 1
   | .ok parsedSpec =>
-    let result := checkSpecStandalone parsedSpec
+    let result ← checkSpecStandalone parsedSpec
 
     if !result.success then
       IO.println s!"FAIL: Type checking failed unexpectedly"
@@ -380,7 +382,11 @@ def buildFunctionSpecMap (file : Core.File) : FunctionSpecMap :=
               fp.sym.map fun s => (s, ctypeToOutputBaseType fp.ty)
           let returnBt := ctypeToOutputBaseType funInfo.returnType
           let maxParamId := cParams.foldl (init := 0) fun acc (s, _) => max acc s.id
-          let resolveResult := (resolveFunctionSpec spec cParams returnBt (maxParamId + 1)).toOption
+          -- Build C type map for pointer arithmetic elaboration
+          let paramCTypes : List (String × Core.Ctype) :=
+            funInfo.params.filterMap fun fp =>
+              fp.sym.bind fun s => s.name.map fun name => (name, fp.ty)
+          let resolveResult := (resolveFunctionSpec spec cParams returnBt (maxParamId + 1) paramCTypes).toOption
           match resolveResult with
           | none => none  -- Skip unresolvable specs
           | some resolvedSpec =>
@@ -438,6 +444,8 @@ def runJsonTest (jsonPath : String) (expectFail : Bool := false) : IO UInt32 := 
 
     -- Pre-pass: build function spec map for ccall resolution
     let functionSpecs := buildFunctionSpecMap file
+    -- Construct type environment for struct layouts (pointer model needs this)
+    let typeEnv := TypeEnv.fromFile file
 
     let mut count := 0
     let mut parseSuccess := 0
@@ -463,12 +471,12 @@ def runJsonTest (jsonPath : String) (expectFail : Bool := false) : IO UInt32 := 
             match findFunctionInfo file sym.name with
             | some info =>
               -- Full verification: check body against spec with parameters bound
-              let result := checkFunctionWithParams spec info.body info.params info.cParams info.retTy info.cRetTy Core.Loc.t.unknown functionSpecs file.funinfo
+              let result ← checkFunctionWithParams spec info.body info.params info.cParams info.retTy info.cRetTy Core.Loc.t.unknown functionSpecs file.funinfo file.tagDefs
               if result.success then
                 -- Discharge conditional failures via SMT
                 let mut cfFailed := false
                 for (cfOb, cfErr) in result.conditionalFailures do
-                  let cfResult ← checkObligation .z3 cfOb
+                  let cfResult ← checkObligation .cvc5 cfOb (env := some typeEnv)
                   match cfResult.result with
                   | .valid =>
                     -- Branch is dead (obligation proved), error is vacuous
@@ -493,7 +501,7 @@ def runJsonTest (jsonPath : String) (expectFail : Bool := false) : IO UInt32 := 
             | none =>
               -- No body found - fall back to spec-only check
               IO.println "  (no body found, checking spec only)"
-              let result := checkSpecStandalone spec
+              let result ← checkSpecStandalone spec
               if result.success then
                 verifySuccess := verifySuccess + 1
                 IO.println "  PASS (spec-only)"
@@ -511,9 +519,16 @@ def runJsonTest (jsonPath : String) (expectFail : Bool := false) : IO UInt32 := 
         IO.println ""
 
     if count == 0 then
-      IO.println "(No CN annotations found)"
-      IO.println "Note: Use --switches=at_magic_comments when running Cerberus"
-      return 1
+      -- No CN annotations found. CN does not error in this case — it simply
+      -- has nothing to verify. The file is trivially correct (no specs to violate).
+      -- Matching CN's behavior: succeed with 0 functions verified.
+      IO.println "(No CN annotations found — trivially correct)"
+      if expectFail then
+        -- Expected failure but nothing to fail: test fails
+        IO.eprintln "=== EXPECTED FAILURE BUT NO ANNOTATIONS - TEST FAILED ==="
+        return 1
+      else
+        return 0
     else
       IO.println s!"Total: {count} function(s) with CN annotations"
       IO.println s!"Parse: {parseSuccess} success, {parseFail} failures"
@@ -563,7 +578,7 @@ def runSmtSmokeTest : IO UInt32 := do
     loc := .unknown
     category := .arithmetic
   }
-  let result1 ← checkObligation .z3 trivialOb
+  let result1 ← checkObligation .cvc5 trivialOb
   match result1.result with
   | .valid =>
     passed := passed + 1
@@ -587,7 +602,7 @@ def runSmtSmokeTest : IO UInt32 := do
     loc := .unknown
     category := .arithmetic
   }
-  let result2 ← checkObligation .z3 arithmeticOb
+  let result2 ← checkObligation .cvc5 arithmeticOb
   match result2.result with
   | .valid =>
     passed := passed + 1
@@ -606,7 +621,7 @@ def runSmtSmokeTest : IO UInt32 := do
     loc := .unknown
     category := .arithmetic
   }
-  let result3 ← checkObligation .z3 invalidOb
+  let result3 ← checkObligation .cvc5 invalidOb
   match result3.result with
   | .invalid =>
     passed := passed + 1
@@ -635,6 +650,8 @@ def runJsonTestWithVerify (jsonPath : String) (expectFail : Bool := false) : IO 
 
     -- Pre-pass: build function spec map for ccall resolution
     let functionSpecs := buildFunctionSpecMap file
+    -- Construct type environment for struct layouts (pointer model needs this)
+    let typeEnv := TypeEnv.fromFile file
 
     let mut count := 0
     let mut parseSuccess := 0
@@ -659,7 +676,7 @@ def runJsonTestWithVerify (jsonPath : String) (expectFail : Bool := false) : IO 
             match findFunctionInfo file sym.name with
             | some info =>
               -- Type check first
-              let tcResult := checkFunctionWithParams spec info.body info.params info.cParams info.retTy info.cRetTy Core.Loc.t.unknown functionSpecs file.funinfo
+              let tcResult ← checkFunctionWithParams spec info.body info.params info.cParams info.retTy info.cRetTy Core.Loc.t.unknown functionSpecs file.funinfo file.tagDefs
               if !tcResult.success then
                 verifyFail := verifyFail + 1
                 IO.println "  TYPECHECK FAIL"
@@ -671,7 +688,7 @@ def runJsonTestWithVerify (jsonPath : String) (expectFail : Bool := false) : IO 
                 let mut allPassed := true
                 let mut numVerified := 0
                 if !tcResult.obligations.isEmpty then
-                  let obResults ← checkObligations .z3 tcResult.obligations (some 10)
+                  let obResults ← checkObligations .cvc5 tcResult.obligations (some 10) (env := some typeEnv)
                   let allValid := obResults.all fun r => r.result matches .valid
                   if !allValid then
                     allPassed := false
@@ -685,7 +702,7 @@ def runJsonTestWithVerify (jsonPath : String) (expectFail : Bool := false) : IO 
 
                 -- Discharge conditional failures via SMT
                 for (cfOb, cfErr) in tcResult.conditionalFailures do
-                  let cfResult ← checkObligation .z3 cfOb
+                  let cfResult ← checkObligation .cvc5 cfOb (env := some typeEnv)
                   match cfResult.result with
                   | .valid =>
                     IO.println s!"  (dead branch confirmed: {cfOb.description})"
@@ -711,7 +728,7 @@ def runJsonTestWithVerify (jsonPath : String) (expectFail : Bool := false) : IO 
             | none =>
               -- No body found - spec-only check
               IO.println "  (no body found, checking spec only)"
-              let tcResult := checkSpecStandalone spec
+              let tcResult ← checkSpecStandalone spec
               if !tcResult.success then
                 verifyFail := verifyFail + 1
                 IO.println "  TYPECHECK FAIL"
@@ -719,7 +736,7 @@ def runJsonTestWithVerify (jsonPath : String) (expectFail : Bool := false) : IO 
                 verifySuccess := verifySuccess + 1
                 IO.println "  PASS (no obligations)"
               else
-                let obResults ← checkObligations .z3 tcResult.obligations (some 10)
+                let obResults ← checkObligations .cvc5 tcResult.obligations (some 10) (env := some typeEnv)
                 let allValid := obResults.all fun r => r.result matches .valid
                 if allValid then
                   verifySuccess := verifySuccess + 1
@@ -735,9 +752,13 @@ def runJsonTestWithVerify (jsonPath : String) (expectFail : Bool := false) : IO 
         IO.println ""
 
     if count == 0 then
-      IO.println "(No CN annotations found)"
-      IO.println "Note: Use --switches=at_magic_comments when running Cerberus"
-      return 1
+      -- No CN annotations found — trivially correct (matching CN behavior)
+      IO.println "(No CN annotations found — trivially correct)"
+      if expectFail then
+        IO.eprintln "=== EXPECTED FAILURE BUT NO ANNOTATIONS - TEST FAILED ==="
+        return 1
+      else
+        return 0
     else
       IO.println s!"Total: {count} function(s) with CN annotations"
       IO.println s!"Parse: {parseSuccess} success, {parseFail} failures"

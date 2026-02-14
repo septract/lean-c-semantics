@@ -31,10 +31,11 @@
 
 import CerbLean.CN.Types
 import CerbLean.Core
+import CerbLean.Core.File
 
 namespace CerbLean.CN.TypeChecking.Resolve
 
-open CerbLean.Core (Sym Loc)
+open CerbLean.Core (Sym Loc Ctype Ctype_ TagDefs)
 open CerbLean.CN.Types
 
 /-! ## Resolution Context
@@ -49,6 +50,14 @@ structure ResolveContext where
   nameToSymType : List (String × Sym × BaseType)
   /-- Counter for generating fresh symbol IDs -/
   nextFreshId : Nat
+  /-- Map from parameter name to its C type (for pointer arithmetic elaboration).
+      Corresponds to: CN's Loc(Some ct) carrying pointee types in BaseTypes.ml.
+      Our BaseType.loc doesn't carry the pointee type, so we store it separately. -/
+  paramCTypes : List (String × Ctype) := []
+  /-- Tag definitions for resolving struct/union tags from parsed specs.
+      Corresponds to: CN's Cabs_to_ail resolving struct tag names to Sym.t.
+      The CN parser creates struct tags with id=0; we resolve them here. -/
+  tagDefs : TagDefs := []
   deriving Inhabited
 
 namespace ResolveContext
@@ -79,6 +88,92 @@ def fresh (ctx : ResolveContext) (name : String) (bt : BaseType) : ResolveContex
   (ctx', sym)
 
 end ResolveContext
+
+/-! ## Struct Tag Resolution
+
+The CN parser creates struct/union tags with placeholder id=0.
+CN resolves these during Cabs_to_ail by looking up tag names in the C translation environment.
+We do the same here using tagDefs from the Core file.
+-/
+
+/-- Resolve a struct tag by looking up its name in tagDefs.
+    If the tag has id=0 (unresolved from parser), find the real tag by name.
+    If the tag already has a real id, return it unchanged.
+    Corresponds to: CN's resolve_cn_ident for struct tags in Cabs_to_ail -/
+def resolveTag (tagDefs : TagDefs) (tag : Sym) : Sym :=
+  if tag.id != 0 then tag  -- Already resolved
+  else
+    match tag.name with
+    | some name =>
+      match tagDefs.find? (fun (s, _) => s.name == some name) with
+      | some (realTag, _) => realTag
+      | none => panic! s!"resolveTag: struct/union tag '{name}' not found in tagDefs"
+    | none => panic! s!"resolveTag: tag symbol has no name (id={tag.id})"
+
+/-- Resolve struct/union tags in a Ctype_ inner type.
+    Recursively fixes all struct/union tags with id=0. -/
+partial def resolveCtypeInnerTag (tagDefs : TagDefs) : Ctype_ → Ctype_
+  | .struct_ tag => .struct_ (resolveTag tagDefs tag)
+  | .union_ tag => .union_ (resolveTag tagDefs tag)
+  | .pointer q inner => .pointer q (resolveCtypeInnerTag tagDefs inner)
+  | .array inner sz => .array (resolveCtypeInnerTag tagDefs inner) sz
+  | .atomic inner => .atomic (resolveCtypeInnerTag tagDefs inner)
+  | .function rq rt ps v =>
+    .function rq (resolveCtypeInnerTag tagDefs rt)
+      (ps.map fun (q, t, b) => (q, resolveCtypeInnerTag tagDefs t, b)) v
+  | .functionNoParams rq rt => .functionNoParams rq (resolveCtypeInnerTag tagDefs rt)
+  | other => other
+
+/-- Resolve struct/union tags in a Ctype. -/
+def resolveCtypeTag (tagDefs : TagDefs) (ct : Ctype) : Ctype :=
+  { ct with ty := resolveCtypeInnerTag tagDefs ct.ty }
+
+/-- Resolve struct/union tags in a ResourceName.
+    Fixes the Ctype inside Owned<T> predicates. -/
+def resolveResourceNameTag (tagDefs : TagDefs) (rn : ResourceName) : ResourceName :=
+  match rn with
+  | .owned (some ct) init => .owned (some (resolveCtypeTag tagDefs ct)) init
+  | .owned none init => .owned none init  -- Type to be inferred later
+  | .pname _ => rn
+
+/-- Resolve struct/union tags in a BaseType. -/
+def resolveBaseTypeTag (tagDefs : TagDefs) (bt : BaseType) : BaseType :=
+  match bt with
+  | .struct_ tag => .struct_ (resolveTag tagDefs tag)
+  | other => other
+
+/-! ## Pointer Arithmetic Elaboration
+
+CN's compile.ml (mk_binop, lines 447-463) converts pointer + integer to arrayShift
+at elaboration time, before type checking. CN's Loc type carries the pointee Ctype
+(`Loc of Sctypes.t option`), but our BaseType.loc does not. We recover the pointee
+type from the ResolveContext's paramCTypes or from nested arrayShift terms.
+-/
+
+/-- Extract pointee Ctype from a C type (Pointer(T) → some T). -/
+def getPointeeCtype (ct : Ctype) : Option Ctype :=
+  match ct.ty with
+  | .pointer _ pointeeTy => some { ty := pointeeTy }
+  | _ => none
+
+/-- Try to determine the pointee Ctype for a resolved pointer-typed AnnotTerm.
+    - If it's a symbol reference: look up in paramCTypes, extract pointee
+    - If it's an arrayShift: the element type is already known
+    Corresponds to: CN's IT.bt returning Loc(Some ct)
+-/
+def tryGetPointeeCtype (ctx : ResolveContext) (t : AnnotTerm) : Option Ctype :=
+  match t with
+  | .mk (.sym s) _ _ =>
+    -- Look up the symbol's C type from parameter info
+    match s.name with
+    | some name =>
+      ctx.paramCTypes.find? (fun (n, _) => n == name) |>.bind fun (_, ct) =>
+        getPointeeCtype ct
+    | none => none
+  | .mk (.arrayShift _ ct _) _ _ =>
+    -- Nested pointer arithmetic: element type is preserved
+    some ct
+  | _ => none
 
 /-! ## CN Builtin Functions
 
@@ -188,11 +283,13 @@ def requestOutputBaseType (req : Request) (fallback : BaseType) : BaseType :=
   match req with
   | .p pred =>
     match pred.name with
-    | .owned ct _ => ctypeToOutputBaseType ct
+    | .owned (some ct) _ => ctypeToOutputBaseType ct
+    | .owned none _ => fallback  -- Type should have been inferred; use fallback
     | .pname _ => fallback  -- User-defined predicates keep their declared type
   | .q qpred =>
     match qpred.name with
-    | .owned ct _ => ctypeToOutputBaseType ct
+    | .owned (some ct) _ => ctypeToOutputBaseType ct
+    | .owned none _ => fallback  -- Type should have been inferred; use fallback
     | .pname _ => fallback
 
 /-! ## Symbol Resolution
@@ -283,6 +380,11 @@ For binary operations: infer left operand, check right operand against left's ty
 inductive ResolveError where
   | symbolNotFound (name : String)
   | integerTooLarge (n : Int)
+  /-- Pointer arithmetic on expression with unknown pointee type.
+      Corresponds to: CN's Loc(None) case which would also fail. -/
+  | unknownPointeeType (context : String)
+  /-- General error for type checking failures during resolution -/
+  | other (msg : String)
   deriving Repr, Inhabited
 
 abbrev ResolveResult α := Except ResolveError α
@@ -305,7 +407,8 @@ partial def resolveTerm (ctx : ResolveContext) (t : Term)
       match pickIntegerEncodingType n with
       | some (.bits sign width) => return .const (.bits sign width n)
       | _ => throw (.integerTooLarge n)  -- CN fails here
-    | _, _ => return .const c
+    | .z n, some bt => throw (.other s!"integer literal {n} with non-Bits expected type {repr bt}")
+    | _, _ => return .const c  -- Non-integer constants (bool, unit, ctype, null) pass through unchanged
   | .sym s =>
     match resolveSym ctx s with
     | some resolved => return .sym resolved
@@ -329,7 +432,7 @@ partial def resolveTerm (ctx : ResolveContext) (t : Term)
   | .nthTuple n tup => return .nthTuple n (← resolveAnnotTerm ctx tup none)
   | .struct_ tag members =>
     let members' ← members.mapM fun (id, t) => do return (id, ← resolveAnnotTerm ctx t none)
-    return .struct_ tag members'
+    return .struct_ (resolveTag ctx.tagDefs tag) members'
   | .structMember obj member => return .structMember (← resolveAnnotTerm ctx obj none) member
   | .structUpdate obj member value => return .structUpdate (← resolveAnnotTerm ctx obj none) member (← resolveAnnotTerm ctx value none)
   | .record members =>
@@ -340,7 +443,7 @@ partial def resolveTerm (ctx : ResolveContext) (t : Term)
   | .constructor constr args =>
     let args' ← args.mapM fun (id, t) => do return (id, ← resolveAnnotTerm ctx t none)
     return .constructor constr args'
-  | .memberShift ptr tag member => return .memberShift (← resolveAnnotTerm ctx ptr none) tag member
+  | .memberShift ptr tag member => return .memberShift (← resolveAnnotTerm ctx ptr none) (resolveTag ctx.tagDefs tag) member
   | .arrayShift base ct idx => return .arrayShift (← resolveAnnotTerm ctx base none) ct (← resolveAnnotTerm ctx idx none)
   | .copyAllocId addr loc => return .copyAllocId (← resolveAnnotTerm ctx addr none) (← resolveAnnotTerm ctx loc none)
   | .hasAllocId ptr => return .hasAllocId (← resolveAnnotTerm ctx ptr none)
@@ -418,11 +521,43 @@ partial def resolveAnnotTerm (ctx : ResolveContext) (at_ : AnnotTerm)
     -- This is asymmetric and matches CN exactly.
     let l' ← resolveAnnotTerm ctx l none  -- INFER left
     let r' ← resolveAnnotTerm ctx r (some l'.bt)  -- CHECK right against left's type
-    -- Compute result type from operator
-    let resultBt := match op with
-      | .eq | .lt | .le | .and_ | .or_ | .implies => .bool
-      | _ => l'.bt  -- Arithmetic ops: result type matches left operand
-    return .mk (.binop op l' r') resultBt loc
+    -- Pointer arithmetic elaboration (CN's compile.ml:447-463, mk_binop):
+    -- When left operand is a pointer and op is add/sub, convert to arrayShift.
+    -- CN does this because Loc carries the pointee type (Loc of Sctypes.t option).
+    -- We recover it from paramCTypes or nested arrayShift terms.
+    match op, l'.bt with
+    | .add, .loc =>
+      match tryGetPointeeCtype ctx l' with
+      | some ct =>
+        -- Cast index to uintptr type (CN invariant: arrayShift index must be uintptr)
+        -- Corresponds to: cast_ Memory.uintptr_bt vt2 loc in check.ml:681
+        let uintptrBt : BaseType := .bits .unsigned 64
+        let castIdx := match r'.bt with
+          | .bits .unsigned 64 => r'  -- Already uintptr: no-op
+          | _ => AnnotTerm.mk (.cast uintptrBt r') uintptrBt loc
+        return .mk (.arrayShift l' ct castIdx) .loc loc
+      | none =>
+        throw (.unknownPointeeType "pointer + integer: cannot determine element type")
+    | .sub, .loc =>
+      match tryGetPointeeCtype ctx l' with
+      | some ct =>
+        -- ptr - int: arrayShift with negated index
+        -- Corresponds to: compile.ml sub_ (int_lit_ 0) idx
+        let uintptrBt : BaseType := .bits .unsigned 64
+        let castIdx := match r'.bt with
+          | .bits .unsigned 64 => r'
+          | _ => AnnotTerm.mk (.cast uintptrBt r') uintptrBt loc
+        let zeroLit := AnnotTerm.mk (.const (.bits .unsigned 64 0)) uintptrBt loc
+        let negIdx := AnnotTerm.mk (.binop .sub zeroLit castIdx) uintptrBt loc
+        return .mk (.arrayShift l' ct negIdx) .loc loc
+      | none =>
+        throw (.unknownPointeeType "pointer - integer: cannot determine element type")
+    | _, _ =>
+      -- Normal (non-pointer) binary operation
+      let resultBt := match op with
+        | .eq | .lt | .le | .and_ | .or_ | .implies => .bool
+        | _ => l'.bt  -- Arithmetic ops: result type matches left operand
+      return .mk (.binop op l' r') resultBt loc
   | .mk (.unop op arg) _bt loc =>
     -- For unary ops, thread expected type to operand
     let arg' ← resolveAnnotTerm ctx arg expectedBt
@@ -450,33 +585,85 @@ partial def resolveAnnotTerm (ctx : ResolveContext) (at_ : AnnotTerm)
         | some resolved => return .mk (.apply resolved []) _bt loc
         | none => throw (.symbolNotFound name)
     | _, _ =>
-      -- Non-builtin function call: resolve symbol and args normally
-      match resolveSym ctx fn with
-      | some resolved =>
-        let args' ← args.mapM (resolveAnnotTerm ctx · none)
-        return .mk (.apply resolved args') _bt loc
-      | none => throw (.symbolNotFound (fn.name.getD "?"))
+      -- Check for multi-arg builtin functions
+      -- Corresponds to: CN's builtins.ml builtin_fun_defs
+      let args' ← args.mapM (resolveAnnotTerm ctx · none)
+      match fn.name with
+      | some "ptr_eq" =>
+        -- ptr_eq(p, q) => EQ(p, q) : Bool
+        -- Corresponds to: ptr_eq_def in cn/lib/builtins.ml line 126-127
+        match args' with
+        | [p, q] => return .mk (.binop .eq p q) .bool loc
+        | _ => throw (.other s!"ptr_eq requires exactly 2 arguments, got {args'.length}")
+      | some "addr_eq" =>
+        -- addr_eq(p, q) => EQ(addr(p), addr(q)) : Bool
+        -- Corresponds to: addr_eq_def in cn/lib/builtins.ml lines 139-145
+        -- TODO: need addr_ index term constructor
+        match args' with
+        | [p, q] => return .mk (.binop .eq p q) .bool loc
+        | _ => throw (.other s!"addr_eq requires exactly 2 arguments, got {args'.length}")
+      | some "is_null" =>
+        -- is_null(p) => EQ(p, NULL) : Bool
+        -- Corresponds to: is_null_def in cn/lib/builtins.ml lines 114-116
+        match args' with
+        | [p] => return .mk (.binop .eq p (.mk (.const .null) .loc loc)) .bool loc
+        | _ => throw (.other s!"is_null requires exactly 1 argument, got {args'.length}")
+      | _ =>
+        -- Non-builtin function call: resolve symbol and args normally
+        match resolveSym ctx fn with
+        | some resolved =>
+          return .mk (.apply resolved args') _bt loc
+        | none => throw (.symbolNotFound (fn.name.getD "?"))
+  | .mk (.structMember obj member) _bt loc =>
+    -- CN wellTyped.ml:695-706: infer obj type, extract struct tag, look up field type
+    let obj' ← resolveAnnotTerm ctx obj none
+    let fieldBt ← match obj'.bt with
+      | .struct_ tag =>
+        match ctx.tagDefs.find? fun (t, _) => t.name == tag.name && t.id == tag.id with
+        | some (_, (_, .struct_ fields _)) =>
+          match fields.find? fun f => f.name == member with
+          | some field => pure (ctypeToOutputBaseType field.ty)
+          | none => throw (.other s!"struct {tag.name.getD "?"} has no field '{member.name}'")
+        | some (_, (_, .union_ _)) =>
+          throw (.other s!"structMember on union tag {tag.name.getD "?"}: unions not supported")
+        | none => throw (.other s!"struct tag {tag.name.getD "?"} not found in tagDefs")
+      | bt => throw (.other s!"structMember on non-struct type: {repr bt}")
+    return .mk (.structMember obj' member) fieldBt loc
   | .mk t bt loc =>
     -- For other terms, resolve recursively with expected type, preserve original type
     let t' ← resolveTerm ctx t expectedBt
-    return .mk t' bt loc
+    return .mk t' (resolveBaseTypeTag ctx.tagDefs bt) loc
 
 end
 
 /-! ## Resource Resolution -/
 
-/-- Resolve symbols in a Predicate -/
+/-- Resolve symbols in a Predicate.
+    Also resolves struct/union tags in the resource name (Owned<struct T> → proper tag ID).
+    Corresponds to: CN's Cabs_to_ail resolving struct names in resource types -/
 def resolvePredicate (ctx : ResolveContext) (p : Predicate) : ResolveResult Predicate := do
   let pointer' ← resolveAnnotTerm ctx p.pointer
   let iargs' ← p.iargs.mapM (resolveAnnotTerm ctx)
-  return { p with pointer := pointer', iargs := iargs' }
+  let name' := resolveResourceNameTag ctx.tagDefs p.name
+  -- Infer resource type if missing (CN allows Owned(p) without <type>).
+  -- The type is inferred from the pointer's C type: if p : T*, then Owned(p) = Owned<T>(p).
+  -- Corresponds to: CN's desugaring in core_to_mucore.ml which resolves Owned types
+  let name'' ← match name' with
+    | .owned none init =>
+      match tryGetPointeeCtype ctx pointer' with
+      | some ct => pure (.owned (some (resolveCtypeTag ctx.tagDefs ct)) init)
+      | none => throw (.other "cannot infer resource type: pointer has unknown pointee type (use explicit Owned<type> syntax)")
+    | _ => pure name'
+  return { p with name := name'', pointer := pointer', iargs := iargs' }
 
-/-- Resolve symbols in a QPredicate -/
+/-- Resolve symbols in a QPredicate.
+    Also resolves struct/union tags in the resource name. -/
 def resolveQPredicate (ctx : ResolveContext) (qp : QPredicate) : ResolveResult QPredicate := do
   let pointer' ← resolveAnnotTerm ctx qp.pointer
   let permission' ← resolveAnnotTerm ctx qp.permission
   let iargs' ← qp.iargs.mapM (resolveAnnotTerm ctx)
-  return { qp with pointer := pointer', permission := permission', iargs := iargs' }
+  let name' := resolveResourceNameTag ctx.tagDefs qp.name
+  return { qp with name := name', pointer := pointer', permission := permission', iargs := iargs' }
 
 /-- Resolve symbols in a Request -/
 def resolveRequest (ctx : ResolveContext) (req : Request) : ResolveResult Request := do
@@ -573,12 +760,16 @@ def resolveFunctionSpec
     (params : List (Sym × BaseType))
     (returnType : BaseType := .unit)
     (nextFreshId : Nat := 1000)
+    (paramCTypes : List (String × Ctype) := [])
+    (tagDefs : TagDefs := [])
     : ResolveResult FunctionSpec := do
   -- Build initial context with parameters INCLUDING TYPES
   let paramCtx : ResolveContext := {
     nameToSymType := params.filterMap fun (sym, bt) =>
       sym.name.map fun name => (name, sym, bt)
     nextFreshId := nextFreshId
+    paramCTypes := paramCTypes
+    tagDefs := tagDefs
   }
 
   -- Create fresh return symbol with return type and add to context
