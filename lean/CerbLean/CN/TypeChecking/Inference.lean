@@ -14,7 +14,7 @@
   When a struct resource is requested, it is repacked from field resources via
   Pack.packing_ft (pack.ml:52-92).
 
-  Audited: 2026-02-08 against cn/lib/resourceInference.ml + cn/lib/pack.ml
+  Audited: 2026-02-14 against cn/lib/resourceInference.ml + cn/lib/pack.ml
 -/
 
 import CerbLean.CN.TypeChecking.Monad
@@ -136,6 +136,10 @@ def unpackStructResource (r : Resource) : TypingM (Option (List Resource)) := do
         | some (.struct_ fields _) =>
           -- Unpack: create one field resource per struct member
           -- Corresponds to: pack.ml lines 113-124 (member_or_padding = Some case)
+          -- DIVERGES-FROM-CN: CN's unpack_owned (pack.ml:113-124) also produces
+          -- padding resources (Owned<char[N]>(Uninit) at padding offsets). We only
+          -- produce member resources. Internally consistent since tryRepackStruct
+          -- also skips padding during repacking.
           let fieldResources := fields.filterMap fun (field : FieldDef) =>
             let fieldPtr : IndexTerm := AnnotTerm.mk
               (.memberShift pred.pointer tag field.name) .loc pred.pointer.loc
@@ -152,11 +156,14 @@ def unpackStructResource (r : Resource) : TypingM (Option (List Resource)) := do
         | some (.union_ _) =>
           -- CN does not support unions (check.ml:200: error "todo: union types")
           TypingM.fail (.other s!"union types are not supported (tag: {tag.name.getD "?"})")
-        | none => return none
+        | none =>
+          -- DIVERGES-FROM-CN: CN's get_struct_members would fail here.
+          -- We return none (can't unpack), surfacing as "missing resource" upstream.
+          return none
       | .union_ tag =>
         -- CN does not support unions (check.ml:200, sctypes.ml:192-198)
         TypingM.fail (.other s!"union types are not supported (tag: {tag.name.getD "?"})")
-      | _ => return none  -- Not a struct/union type
+      | _ => return none  -- Not a struct/union type, no unpacking needed
     | .owned none _ => TypingM.fail (.other "unpackStructResource: unresolved resource type (should have been inferred during resolution)")
     | .pname _ => return none  -- Not Owned
   | .q _ => return none  -- Not a predicate resource
@@ -258,6 +265,8 @@ When a struct resource is requested but not found directly (because it was unpac
 we repack by requesting each field individually and combining them into a struct value.
 -/
 
+mutual
+
 /-- Try to repack individual field resources into a struct resource.
     Given a request for `Owned<struct tag>(init)(p)`, looks up the struct definition,
     requests each field resource individually, and combines into a struct value.
@@ -268,7 +277,7 @@ we repack by requesting each field individually and combining them into a struct
     Returns `none` if:
     - The request is not for Owned<struct>
     - Any field resource is missing -/
-def tryRepackStruct (requested : Predicate) : TypingM (Option (Predicate × Output)) := do
+partial def tryRepackStruct (requested : Predicate) : TypingM (Option (Predicate × Output)) := do
   match requested.name with
   | .owned (some ct) initState =>
     match ct.ty with
@@ -281,6 +290,9 @@ def tryRepackStruct (requested : Predicate) : TypingM (Option (Predicate × Outp
       | some (.struct_ fields _) =>
         -- Try to request each field resource
         -- Corresponds to: ftyp_args_request_for_pack processing the LAT from packing_ft
+        -- DIVERGES-FROM-CN: CN's packing_ft (pack.ml:62-91) also requests padding
+        -- resources during struct repacking. We only request member resources,
+        -- consistent with unpackStructResource which also skips padding.
         let mut fieldValues : List (Identifier × IndexTerm) := []
         for field in fields do
           let fieldPtr : IndexTerm := AnnotTerm.mk
@@ -290,14 +302,17 @@ def tryRepackStruct (requested : Predicate) : TypingM (Option (Predicate × Outp
             pointer := fieldPtr
             iargs := []
           }
-          match ← predicateRequestScan fieldPred with
-          | .found _ output =>
+          match ← predicateRequest fieldPred with
+          | some (_, output) =>
             fieldValues := (field.name, output.value) :: fieldValues
-          | .notFound =>
+          | none =>
             -- A field resource is missing: repacking fails.
             -- We must restore any already-consumed field resources.
-            -- For simplicity, we add them back. (In CN, packing is transactional
-            -- via the backtracking in ftyp_args_request_for_pack.)
+            -- CN uses functional backtracking via ftyp_args_request_for_pack;
+            -- we use imperative rollback (re-add consumed resources).
+            -- Note: if a consumed field was itself repacked from sub-resources,
+            -- the rollback re-adds it in packed form (not the original unpacked
+            -- sub-resources). This is safe because rollback leads to failure.
             for (fld, val) in fieldValues do
               -- Find the corresponding field definition to get the type
               match fields.find? (·.name == fld) with
@@ -324,30 +339,29 @@ def tryRepackStruct (requested : Predicate) : TypingM (Option (Predicate × Outp
       | some (.union_ _) =>
         -- CN does not support unions (check.ml:200)
         TypingM.fail (.other s!"union types are not supported (tag: {tag.name.getD "?"})")
-      | none => return none
-    | _ => return none  -- Not a struct type
+      | none =>
+        -- DIVERGES-FROM-CN: CN's get_struct_members would fail here.
+        -- We return none (can't repack), surfacing as "missing resource" upstream.
+        return none
+    | _ => return none  -- Not a struct type, no repacking needed
   | .owned none _ => TypingM.fail (.other "tryRepackStruct: unresolved resource type (should have been inferred during resolution)")
   | .pname _ => return none  -- Only Owned can be repacked
 
-/-! ## Predicate Request
-
-Corresponds to: cn/lib/resourceInference.ml lines 229-250 (predicate_request)
-
-First tries direct scan, then tries "packing" for compound resources.
-When direct scan fails for a struct type, attempts repacking from field resources.
--/
-
 /-- Request a predicate resource from the context.
+    First tries direct scan, then tries "packing" for compound resources.
+    When direct scan fails for a struct type, attempts repacking from field resources.
     Returns the matched predicate and its output value.
 
     Corresponds to: predicate_request in resourceInference.ml lines 229-250 -/
-def predicateRequest (requested : Predicate) : TypingM (Option (Predicate × Output)) := do
+partial def predicateRequest (requested : Predicate) : TypingM (Option (Predicate × Output)) := do
   match ← predicateRequestScan requested with
   | .found pred output => return some (pred, output)
   | .notFound =>
     -- Direct scan failed. Try packing for compound resources.
     -- Corresponds to: Pack.packing_ft call in resourceInference.ml:239
     tryRepackStruct requested
+
+end -- mutual
 
 /-! ## Resource Request
 
