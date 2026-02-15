@@ -1,10 +1,11 @@
 # C-to-Lean Project Makefile
 
-.PHONY: all lean cerberus cerberus-setup clean \
+.PHONY: all lean cerberus cerberus-setup cerberus-coverage cerberus-coverage-setup clean \
         test test-unit test-memory test-cn test-cn-unit \
         test-interp test-interp-full test-interp-ci test-interp-seq \
         test-parser test-pp test-parser-quick test-pp-quick \
         test-genproof test-verified verified-programs test-one \
+        test-coverage \
         ci fuzz init update-cerberus help
 
 # Configuration
@@ -13,6 +14,11 @@ OCAML_VERSION := 5.4.0
 # Use a local opam switch in cerberus/_opam/ for project isolation
 CERBERUS_DIR := $(shell pwd)/cerberus
 OPAM_EXEC := opam exec --switch=$(CERBERUS_DIR) --
+
+# Coverage: separate local switch with OCaml 5.1.1 (bisect_ppx requires < 5.2)
+COVERAGE_OCAML_VERSION := 5.1.1
+COVERAGE_SWITCH_DIR := $(shell pwd)/_opam-coverage
+OPAM_COV_EXEC := opam exec --switch=$(COVERAGE_SWITCH_DIR) --
 
 # Default target
 all: lean
@@ -32,6 +38,10 @@ verified-programs: lean
 # Build Cerberus (requires local opam switch in cerberus/_opam/)
 cerberus:
 	cd cerberus && $(OPAM_EXEC) make cerberus
+
+# Build Cerberus with coverage instrumentation (requires cerberus-coverage-setup)
+cerberus-coverage:
+	cd cerberus && $(OPAM_COV_EXEC) make cerberus-coverage
 
 # ------------------------------------------------------------------------------
 # Setup
@@ -53,6 +63,21 @@ cerberus-setup: init
 	$(OPAM_EXEC) dune exec --root cerberus -- cerberus --runtime=cerberus/_build/install/default --exec cerberus/tests/ci/0001-emptymain.c
 	@echo "Cerberus setup complete!"
 	@echo "Local switch created at: cerberus/_opam/"
+
+# First-time coverage setup: create local switch with OCaml 5.1.1 + bisect_ppx
+cerberus-coverage-setup: init
+	@echo "Creating local coverage switch at $(COVERAGE_SWITCH_DIR) with OCaml $(COVERAGE_OCAML_VERSION)..."
+	mkdir -p $(COVERAGE_SWITCH_DIR)
+	cd $(COVERAGE_SWITCH_DIR) && opam switch create . $(COVERAGE_OCAML_VERSION) --no-install || true
+	@echo "Installing Cerberus dependencies..."
+	opam install --switch=$(COVERAGE_SWITCH_DIR) --deps-only -y ./cerberus/cerberus-lib.opam ./cerberus/cerberus.opam
+	@echo "Installing bisect_ppx..."
+	opam install --switch=$(COVERAGE_SWITCH_DIR) -y bisect_ppx
+	@echo "Building Cerberus with coverage instrumentation..."
+	cd cerberus && $(OPAM_COV_EXEC) make cerberus-coverage
+	@echo "Coverage setup complete!"
+	@echo "Local switch: $(COVERAGE_SWITCH_DIR)/_opam/"
+	@echo "Run 'make test-coverage' to generate a coverage report."
 
 # ------------------------------------------------------------------------------
 # Clean
@@ -134,6 +159,10 @@ test-interp-ci:
 test-interp-seq:
 	./scripts/test_interp.sh --nolibc --sequentialise --exclude=unseq tests/minimal
 
+# Coverage Tests
+test-coverage: cerberus-coverage
+	./scripts/test_coverage.sh --no-build
+
 # CN Tests
 # test-cn: run integration tests on tests/cn/*.c (requires Cerberus)
 test-cn:
@@ -180,11 +209,13 @@ help:
 	@echo "  make check-deps      Check required dependencies are installed"
 	@echo "  make init            Initialize git submodules"
 	@echo "  make cerberus-setup  Create local OCaml $(OCAML_VERSION) switch and install Cerberus"
+	@echo "  make cerberus-coverage-setup  Create local coverage switch (OCaml $(COVERAGE_OCAML_VERSION) + bisect_ppx)"
 	@echo ""
 	@echo "Build:"
 	@echo "  make                 Build Lean project (default)"
 	@echo "  make verified-programs  Build verified programs (slow)"
 	@echo "  make cerberus        Build Cerberus"
+	@echo "  make cerberus-coverage  Build Cerberus with coverage instrumentation"
 	@echo "  make clean           Clean all build artifacts"
 	@echo ""
 	@echo "Quick Tests:"
@@ -211,6 +242,9 @@ help:
 	@echo "Fuzzing:"
 	@echo "  make fuzz            Run csmith fuzzer (100 tests)"
 	@echo "  make fuzz N=500      Run csmith fuzzer (500 tests)"
+	@echo ""
+	@echo "Coverage:"
+	@echo "  make test-coverage   Run tests and generate Cerberus OCaml coverage report"
 	@echo ""
 	@echo "Maintenance:"
 	@echo "  make update-cerberus   Update Cerberus submodule"

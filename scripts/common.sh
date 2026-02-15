@@ -33,7 +33,7 @@ SCRIPT_DIR="$_CALLER_DIR"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CERBERUS_DIR="$PROJECT_ROOT/cerberus"
 LEAN_DIR="$PROJECT_ROOT/lean"
-CERBERUS="$PROJECT_ROOT/scripts/cerberus"
+CERBERUS="${CERBERUS:-$PROJECT_ROOT/scripts/cerberus}"
 unset _CALLER_DIR
 
 # ---------------------------------------------------------------------------
