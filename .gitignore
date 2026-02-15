@@ -22,3 +22,7 @@ logs/
 platform.info
 tests/csmith/fuzz_results/
 tmp/
+
+# Coverage
+_coverage/
+_opam-coverage/
