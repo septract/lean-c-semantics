@@ -16,7 +16,7 @@
 #   --ci              Also run Cerberus CI suite (cerberus/tests/ci)
 #   -h, --help        Show this help message
 #
-# Default test dirs: tests/minimal tests/debug tests/float
+# Default test dirs: tests/minimal tests/debug tests/float tests/coverage
 
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 set -euo pipefail
@@ -54,7 +54,7 @@ Options:
   --ci              Also run Cerberus CI suite (cerberus/tests/ci)
   -h, --help        Show this help message
 
-Default test dirs: tests/minimal tests/debug tests/float
+Default test dirs: tests/minimal tests/debug tests/float tests/coverage
 EOF
     exit 0
 }
@@ -83,6 +83,9 @@ if [[ ${#TEST_DIRS[@]} -eq 0 ]]; then
         TEST_DIRS+=("$CERBERUS_DIR/tests/ci")
     fi
 fi
+
+# Coverage tests are always included (run directly through Cerberus, not test_interp.sh)
+COVERAGE_TEST_DIR="$PROJECT_ROOT/tests/coverage"
 
 # ---------------------------------------------------------------------------
 # Prerequisites
@@ -154,6 +157,40 @@ WRAPPER
         echo "  Running: $test_dir"
         "$PROJECT_ROOT/scripts/test_interp.sh" --nolibc "$test_dir" || true
     done
+
+    # -----------------------------------------------------------------------
+    # Run coverage-specific tests directly through the instrumented Cerberus
+    # binary (no Lean interpreter involved). This exercises Cerberus code
+    # paths that our existing test suites may not reach.
+    # -----------------------------------------------------------------------
+    if [[ -d "$COVERAGE_TEST_DIR" ]]; then
+        echo ""
+        echo "  Running coverage tests (direct Cerberus execution)..."
+        COV_PASS=0
+        COV_FAIL=0
+        COV_TOTAL=0
+
+        for c_file in $(find "$COVERAGE_TEST_DIR" -name '*.c' | sort); do
+            COV_TOTAL=$((COV_TOTAL + 1))
+            rel_path="${c_file#$PROJECT_ROOT/}"
+
+            # Determine if this test needs libc (either in libc/ dir or .libc.c suffix)
+            if [[ "$c_file" == */libc/* ]] || [[ "$c_file" == *.libc.c ]]; then
+                nolibc_flag=""
+            else
+                nolibc_flag="--nolibc"
+            fi
+
+            if $CERBERUS --exec --batch $nolibc_flag "$c_file" &>/dev/null; then
+                COV_PASS=$((COV_PASS + 1))
+            else
+                # Failures are OK — UB tests, crashes, etc. still generate coverage
+                COV_FAIL=$((COV_FAIL + 1))
+            fi
+        done
+
+        echo "    Coverage tests: $COV_TOTAL total, $COV_PASS passed, $COV_FAIL failed/UB"
+    fi
 
     COV_COUNT=$(ls -1 "$COVERAGE_DIR"/bisect*.coverage 2>/dev/null | wc -l | tr -d ' ')
     echo "  Collected $COV_COUNT coverage files"
