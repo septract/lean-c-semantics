@@ -452,7 +452,7 @@ def alignDown (addr : Nat) (align : Nat) : Nat :=
         let z' = sub z (if less q zero then negate m else m)
     - This subtracts size, then aligns down to alignment boundary -/
 def allocateImpl (name : String) (size : Nat) (ty : Option Ctype)
-    (align : Nat) (readonly : ReadonlyStatus) (init : Option MemValue) : ConcreteMemM PointerValue := do
+    (align : Nat) (readonly : ReadonlyStatus) (init : Option MemValue) (isDynamic : Bool := false) : ConcreteMemM PointerValue := do
   let env ← read
   let st ← get
 
@@ -476,11 +476,13 @@ def allocateImpl (name : String) (size : Nat) (ty : Option Ctype)
   }
 
   -- Update state
+  -- Corresponds to: impl_mem.ml:1430 — allocate_region adds to dynamic_addrs
   set {
     st with
     nextAllocId := allocId + 1
     lastAddress := alignedAddr
     allocations := st.allocations.insert allocId alloc
+    dynamicAddrs := if isDynamic then alignedAddr :: st.dynamicAddrs else st.dynamicAddrs
   }
 
   -- Initialize memory if provided
@@ -717,7 +719,7 @@ def storeImpl (ty : Ctype) (isLocking : Bool) (ptr : PointerValue) (val : MemVal
 
     -- Check read-only
     match alloc.isReadonly with
-    | .readonly _ => throw .readonlyWrite
+    | .readonly kind => throw (.readonlyWrite kind)
     | .writable => pure ()
 
     let size ← liftLayout (sizeof env ty)
@@ -882,9 +884,9 @@ def diffPtrvalImpl (elemTy : Ctype) (p1 p2 : PointerValue) : ConcreteMemM Intege
     match p1.prov, p2.prov with
     | .some id1, .some id2 =>
       if id1 != id2 then
-        -- Different allocations — Cerberus fails with MerrPtrdiff
+        -- Different allocations — UB048 disjoint array pointers subtraction
         -- Corresponds to: impl_mem.ml:1954-2063
-        throw .ptrdiff
+        throw .ptrdiffDisjoint
       else
         let elemSize ← liftLayout (sizeof env elemTy)
         if elemSize == 0 then
@@ -1102,7 +1104,7 @@ def reallocImpl (align : IntegerValue) (ptr : PointerValue) (newSize : IntegerVa
   -- Handle NULL pointer case (acts like malloc)
   match ptr.base with
   | .null _ =>
-    allocateImpl "realloc" size none align.val.toNat .writable none
+    allocateImpl "realloc" size none align.val.toNat .writable none (isDynamic := true)
 
   | .concrete _ oldAddr =>
     -- Get old allocation
@@ -1110,7 +1112,7 @@ def reallocImpl (align : IntegerValue) (ptr : PointerValue) (newSize : IntegerVa
     let oldSize := alloc.size
 
     -- Allocate new region
-    let newPtr ← allocateImpl "realloc" size alloc.ty align.val.toNat .writable none
+    let newPtr ← allocateImpl "realloc" size alloc.ty align.val.toNat .writable none (isDynamic := true)
 
     -- Copy old data (preserves provenance from source bytes)
     let copySize := min oldSize size
@@ -1131,11 +1133,9 @@ def reallocImpl (align : IntegerValue) (ptr : PointerValue) (newSize : IntegerVa
     throw (.free .nonMatching)
 
 /-- Validate pointers for relational comparison (lt, gt, le, ge).
-    Corresponds to: impl_mem.ml:1886-1951 (strict pointer relationals)
-    Note: Always uses strict mode (SW_strict_pointer_relationals). Cerberus's --exec
-    default may be permissive, which would just compare addresses without checking
-    allocation provenance. If differential testing shows mismatches, a non-strict
-    fallback path may need to be added.
+    Corresponds to: impl_mem.ml:1886-1951
+    Uses permissive mode (matching Cerberus --exec default): cross-allocation
+    comparison is allowed, addresses are compared directly.
     Returns the two concrete addresses if comparison is valid. -/
 private def validateRelationalPtrs (p1 p2 : PointerValue) : ConcreteMemM (Nat × Nat) := do
   match p1.base, p2.base with
@@ -1144,13 +1144,9 @@ private def validateRelationalPtrs (p1 p2 : PointerValue) : ConcreteMemM (Nat ×
     -- Corresponds to: impl_mem.ml:1891-1893
     throw .ptrComparison
   | .concrete _ a1, .concrete _ a2 =>
-    -- Check same allocation
-    -- Corresponds to: impl_mem.ml:1915-1935
-    match p1.prov, p2.prov with
-    | .some id1, .some id2 =>
-      if id1 != id2 then throw .ptrComparison
-      pure (a1, a2)
-    | _, _ => throw .ptrComparison
+    -- Permissive mode: allow comparison across allocations, just compare addresses
+    -- Corresponds to: impl_mem.ml:1915-1935 (non-strict path)
+    pure (a1, a2)
   | _, _ => throw .ptrComparison
 
 /-! ## MemoryOps Instance
@@ -1174,7 +1170,7 @@ instance : MemoryOps ConcreteMemM where
   allocateRegion name size align := do
     let sz := size.val.toNat
     let al := align.val.toNat
-    allocateImpl name sz none al .writable none
+    allocateImpl name sz none al .writable none (isDynamic := true)
 
   load := loadImpl
   store := storeImpl
