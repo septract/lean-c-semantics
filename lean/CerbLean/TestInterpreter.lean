@@ -25,8 +25,8 @@ def memErrorToUBCode : MemError → String
   | .access .outOfBoundPtr _ => "UB_CERB002a_out_of_bound_load"
   | .access .noProvPtr _ => "UB043_indirection_invalid_value"
   | .access .atomicMemberof _ => "UB042_access_atomic_structUnion_member"
-  | .free .nonMatching => "UB_CERB002c_out_of_bound_free"
-  | .free .deadAllocation => "UB_CERB002c_out_of_bound_free"  -- double free
+  | .free .nonMatching => "UB179a_non_matching_allocation_free"
+  | .free .deadAllocation => "UB179b_dead_allocation_free"
   | .free .outOfBound => "UB_CERB002c_out_of_bound_free"
   | .memcpy .overlap => "UB_memcpy_overlap"
   | .memcpy .nonObject => "UB_memcpy_non_object"
@@ -43,6 +43,7 @@ def memErrorToUBCode : MemError → String
   | .ptrArithOverflow => "UB046_array_pointer_outside"
   | .alignmentError _ _ => "UB025_misaligned_pointer_conversion"
   | .ptrdiff => "UB050_pointers_subtraction_not_representable"
+  | .ptrdiffDisjoint => "UB048_disjoint_array_pointers_subtraction"
   | .intFromPtr => "UB024_out_of_range_pointer_to_integer_conversion"
   | .arrayShift => "UB046_array_pointer_outside"
   | .ptrComparison => "UB053_pointer_comparison"

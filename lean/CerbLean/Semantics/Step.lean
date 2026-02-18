@@ -305,7 +305,7 @@ Each case matches the corresponding case in Cerberus's core_reduction.lem.
     Deviations:
     - No PEconstrained handling (for bounded model checking)
     - No core_extern handling (external symbol remapping)
-    - Missing GCC builtins: generic_ffs, ctz, bswap16/32/64 -/
+    - No I/O builtins (puts, printf, etc.) -/
 def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym LabeledConts)
     : InterpM StepResult := do
   let arena := st.arena
@@ -597,24 +597,133 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
       | .error err => throw err
     | .impl ic =>
       match ic with
-      | .other "errno" =>
-        -- Return errno pointer
-        -- Corresponds to: core_reduction.lem:959-968
-        match pes with
-        | [] =>
-          let errnoPtr ← InterpM.getErrnoPtr
-          let resultVal := Value.loaded (.specified (.pointer errnoPtr))
-          let resultExpr := mkValueExpr [] resultVal
-          pure (.continue_ { st with arena := resultExpr })
-        | _ => throw (.illformedProgram "wrong arguments for __builtin_errno")
-      | .other "exit" =>
-        -- exit(n) terminates with the given value
-        -- Corresponds to: core_reduction.lem:988-996
-        match pes with
-        | [exitCodeExpr] =>
-          let exitVal ← evalPexpr defaultPexprFuel st.env exitCodeExpr
-          pure (.done exitVal)
-        | _ => throw (.illformedProgram "exit: wrong number of arguments")
+      | .other name_ =>
+        -- Strip "builtin_" prefix if present (JSON encodes BuiltinFunction "X" as "builtin_X")
+        let name := if name_.startsWith "builtin_" then name_.drop 8 else name_
+        match name with
+        | "errno" =>
+          -- Return errno pointer
+          -- Corresponds to: core_reduction.lem:959-968
+          match pes with
+          | [] =>
+            let errnoPtr ← InterpM.getErrnoPtr
+            let resultVal := Value.loaded (.specified (.pointer errnoPtr))
+            let resultExpr := mkValueExpr [] resultVal
+            pure (.continue_ { st with arena := resultExpr })
+          | _ => throw (.illformedProgram "wrong arguments for __builtin_errno")
+        | "exit" =>
+          -- exit(n) terminates with the given value
+          -- Corresponds to: core_reduction.lem:988-996
+          match pes with
+          | [exitCodeExpr] =>
+            let exitVal ← evalPexpr defaultPexprFuel st.env exitCodeExpr
+            pure (.done exitVal)
+          | _ => throw (.illformedProgram "exit: wrong number of arguments")
+        | "generic_ffs" =>
+          -- Find first set bit (1-indexed), 0 if input is 0
+          -- Corresponds to: core_reduction.lem:993-1006, ocaml_gcc_builtins.ml:41-45
+          match pes with
+          | [pe] =>
+            let cval ← evalPexpr defaultPexprFuel st.env pe
+            match cval with
+            | .object (.integer iv) =>
+              -- ffs(n) = 0 if n == 0, else 1 + count_trailing_zeros(n)
+              let result : Int := if iv.val == 0 then 0
+                else
+                  let un := iv.val.toNat
+                  let rec countTrailingZeros (v : Nat) (acc : Nat) (fuel : Nat) : Nat :=
+                    match fuel with
+                    | 0 => acc
+                    | fuel' + 1 =>
+                      if v &&& 1 != 0 then acc
+                      else countTrailingZeros (v >>> 1) (acc + 1) fuel'
+                  1 + countTrailingZeros un 0 64
+              let resultVal := Value.loaded (.specified (.integer (integerIval result)))
+              let resultExpr := mkValueExpr [] resultVal
+              pure (.continue_ { st with arena := resultExpr })
+            | _ => throw (.illformedProgram "generic_ffs: expected integer argument")
+          | _ => throw (.illformedProgram "generic_ffs: wrong number of arguments")
+        | "ctz" =>
+          -- Count trailing zeros (undefined for 0, but Cerberus returns 64)
+          -- Corresponds to: core_reduction.lem:1008-1022, ocaml_gcc_builtins.ml:3-11
+          match pes with
+          | [pe] =>
+            let cval ← evalPexpr defaultPexprFuel st.env pe
+            match cval with
+            | .object (.integer iv) =>
+              let n := iv.val.toNat
+              let rec countTrailingZerosCtz (v : Nat) (acc : Nat) (fuel : Nat) : Nat :=
+                match fuel with
+                | 0 => acc
+                | fuel' + 1 =>
+                  if v == 0 then acc
+                  else if v &&& 1 != 0 then acc
+                  else countTrailingZerosCtz (v >>> 1) (acc + 1) fuel'
+              let result : Int := countTrailingZerosCtz n 0 64
+              let resultVal := Value.loaded (.specified (.integer (integerIval result)))
+              let resultExpr := mkValueExpr [] resultVal
+              pure (.continue_ { st with arena := resultExpr })
+            | _ => throw (.illformedProgram "ctz: expected integer argument")
+          | _ => throw (.illformedProgram "ctz: wrong number of arguments")
+        | "bswap16" =>
+          -- Byte swap 16-bit value
+          -- Corresponds to: core_reduction.lem:1024-1038, ocaml_gcc_builtins.ml:13-18
+          match pes with
+          | [pe] =>
+            let cval ← evalPexpr defaultPexprFuel st.env pe
+            match cval with
+            | .object (.integer iv) =>
+              let n := iv.val.toNat
+              let result : Int := ((n &&& 0xFF00) >>> 8) ||| ((n &&& 0xFF) <<< 8)
+              let resultVal := Value.loaded (.specified (.integer (integerIval result)))
+              let resultExpr := mkValueExpr [] resultVal
+              pure (.continue_ { st with arena := resultExpr })
+            | _ => throw (.illformedProgram "bswap16: expected integer argument")
+          | _ => throw (.illformedProgram "bswap16: wrong number of arguments")
+        | "bswap32" =>
+          -- Byte swap 32-bit value
+          -- Corresponds to: core_reduction.lem:1039-1053, ocaml_gcc_builtins.ml:20-27
+          match pes with
+          | [pe] =>
+            let cval ← evalPexpr defaultPexprFuel st.env pe
+            match cval with
+            | .object (.integer iv) =>
+              let n := iv.val.toNat
+              let result : Int :=
+                ((n &&& 0x000000FF) <<< 24) |||
+                ((n &&& 0x0000FF00) <<< 8) |||
+                ((n &&& 0x00FF0000) >>> 8) |||
+                ((n &&& 0xFF000000) >>> 24)
+              let resultVal := Value.loaded (.specified (.integer (integerIval result)))
+              let resultExpr := mkValueExpr [] resultVal
+              pure (.continue_ { st with arena := resultExpr })
+            | _ => throw (.illformedProgram "bswap32: expected integer argument")
+          | _ => throw (.illformedProgram "bswap32: wrong number of arguments")
+        | "bswap64" =>
+          -- Byte swap 64-bit value
+          -- Corresponds to: core_reduction.lem:1054-1065, ocaml_gcc_builtins.ml:29-39
+          match pes with
+          | [pe] =>
+            let cval ← evalPexpr defaultPexprFuel st.env pe
+            match cval with
+            | .object (.integer iv) =>
+              let n := iv.val.toNat
+              let result : Int :=
+                ((n &&& 0x00000000000000FF) <<< 56) |||
+                ((n &&& 0x000000000000FF00) <<< 40) |||
+                ((n &&& 0x0000000000FF0000) <<< 24) |||
+                ((n &&& 0x00000000FF000000) <<< 8) |||
+                ((n &&& 0x000000FF00000000) >>> 8) |||
+                ((n &&& 0x0000FF0000000000) >>> 24) |||
+                ((n &&& 0x00FF000000000000) >>> 40) |||
+                ((n &&& 0xFF00000000000000) >>> 56)
+              let resultVal := Value.loaded (.specified (.integer (integerIval result)))
+              let resultExpr := mkValueExpr [] resultVal
+              pure (.continue_ { st with arena := resultExpr })
+            | _ => throw (.illformedProgram "bswap64: expected integer argument")
+          | _ => throw (.illformedProgram "bswap64: wrong number of arguments")
+        | _ =>
+          throw (.notImplemented s!"builtin function '{name_}' not implemented (requires driver layer)")
       | _ =>
         let msg := match ic with
           | .other name => s!"builtin function '{name}' not implemented (requires driver layer)"
@@ -735,10 +844,15 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
           let typeEnv ← InterpM.getTypeEnv
           let size ← liftLayout (sizeof typeEnv ty)
           let prefixName := prefix_.val
+          -- Derive readonly kind from prefix (impl_mem.ml:1704-1710 select_ro_kind)
+          let roKind := match prefixName with
+            | "PrefStringLiteral" => ReadonlyKind.stringLiteral
+            | "PrefTemporaryLifetime" => ReadonlyKind.temporaryLifetime
+            | _ => ReadonlyKind.constQualified
           -- Convert Core value to MemValue
           match memValueFromValue ty initVal with
           | some mval =>
-            let ptr ← InterpM.liftMem (allocateImpl prefixName size (some ty) alignIv.val.toNat (.readonly .constQualified) (some mval))
+            let ptr ← InterpM.liftMem (allocateImpl prefixName size (some ty) alignIv.val.toNat (.readonly roKind) (some mval))
             let resultVal := Value.object (.pointer ptr)
             pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
           | none =>
@@ -748,13 +862,14 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
 
       -- Alloc: allocate raw memory region (malloc-style)
       -- Corresponds to: core_run.lem:409-449 (Alloc case)
+      -- Dynamic allocation: adds to dynamicAddrs (impl_mem.ml:1430)
       | .alloc alignPe sizePe prefix_ =>
         let alignVal ← evalPexpr defaultPexprFuel st.env alignPe
         let sizeVal ← evalPexpr defaultPexprFuel st.env sizePe
         match alignVal, sizeVal with
         | .object (.integer alignIv), .object (.integer sizeIv) =>
           let prefixName := prefix_.val
-          let ptr ← InterpM.liftMem (allocateImpl prefixName sizeIv.val.toNat none alignIv.val.toNat .writable none)
+          let ptr ← InterpM.liftMem (allocateImpl prefixName sizeIv.val.toNat none alignIv.val.toNat .writable none (isDynamic := true))
           let resultVal := Value.object (.pointer ptr)
           pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
         | _, _ =>
@@ -1031,9 +1146,14 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
         let typeEnv ← InterpM.getTypeEnv
         let size ← liftLayout (sizeof typeEnv ty)
         let prefixName := prefix_.val
+        -- Derive readonly kind from prefix (impl_mem.ml:1704-1710 select_ro_kind)
+        let roKind := match prefixName with
+          | "PrefStringLiteral" => ReadonlyKind.stringLiteral
+          | "PrefTemporaryLifetime" => ReadonlyKind.temporaryLifetime
+          | _ => ReadonlyKind.constQualified
         match memValueFromValue ty initVal with
         | some mval =>
-          let ptr ← InterpM.liftMem (allocateImpl prefixName size (some ty) alignIv.val.toNat (.readonly .constQualified) (some mval))
+          let ptr ← InterpM.liftMem (allocateImpl prefixName size (some ty) alignIv.val.toNat (.readonly roKind) (some mval))
           let resultVal := Value.object (.pointer ptr)
           pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
         | none =>
@@ -1042,13 +1162,14 @@ def step (st : ThreadState) (file : File) (allLabeledConts : HashMap Sym Labeled
         throw (.typeError "createReadonly (excluded): expected integer alignment and ctype size")
 
     -- Alloc inside Eexcluded: execute but no footprint (allocation, not memory access)
+    -- Dynamic allocation: adds to dynamicAddrs (impl_mem.ml:1430)
     | .alloc alignPe sizePe prefix_ =>
       let alignVal ← evalPexpr defaultPexprFuel st.env alignPe
       let sizeVal ← evalPexpr defaultPexprFuel st.env sizePe
       match alignVal, sizeVal with
       | .object (.integer alignIv), .object (.integer sizeIv) =>
         let prefixName := prefix_.val
-        let ptr ← InterpM.liftMem (allocateImpl prefixName sizeIv.val.toNat none alignIv.val.toNat .writable none)
+        let ptr ← InterpM.liftMem (allocateImpl prefixName sizeIv.val.toNat none alignIv.val.toNat .writable none (isDynamic := true))
         let resultVal := Value.object (.pointer ptr)
         pure (.continue_ { st with arena := mkValueExpr arenaAnnots resultVal })
       | _, _ =>

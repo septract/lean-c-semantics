@@ -242,6 +242,8 @@ MATCH=0
 MISMATCH=0
 UB_MATCH=0
 UB_CODE_DIFF=0
+UNSUPPORTED_EXPECTED=0
+UNSUPPORTED_UNEXPECTED=0
 
 echo ""
 echo "Running interpreter comparison..."
@@ -253,6 +255,12 @@ total_to_test=${#TEST_FILES[@]}
 for c_file in "${TEST_FILES[@]}"; do
     filename=$(basename "$c_file" .c)
     file_num=$((file_num + 1))
+
+    # Check if this is an unsupported test (expected to fail)
+    expect_unsupported=false
+    if [[ "$c_file" == *.unsupported.c ]]; then
+        expect_unsupported=true
+    fi
 
     # Run Cerberus in batch mode to get return value (not shell exit code)
     cerberus_shell_exit=0
@@ -267,7 +275,7 @@ for c_file in "${TEST_FILES[@]}"; do
     cerberus_has_ub=false
     cerberus_ret=""
 
-    if echo "$cerberus_output" | grep -q "undefined behaviour"; then
+    if [[ "$cerberus_output" == *"undefined behaviour"* ]]; then
         cerberus_has_ub=true
     fi
 
@@ -278,16 +286,20 @@ for c_file in "${TEST_FILES[@]}"; do
     fi
 
     # Extract return value from batch output
+    # NOTE: Use [[ == *pattern* ]] for boolean checks instead of echo | grep -q,
+    # because large outputs (e.g. exhaustive mode with many executions) cause
+    # SIGPIPE/broken-pipe when grep -q exits early, and with pipefail this makes
+    # the check return non-zero even when the pattern IS present.
     cerberus_ub_code=""
-    if echo "$cerberus_output" | grep -q 'Undefined {'; then
+    if [[ "$cerberus_output" == *'Undefined {'* ]]; then
         cerberus_has_ub=true
         cerberus_ub_code=$(echo "$cerberus_output" | grep -o 'ub: "[^"]*"' | head -1 | sed 's/ub: "\([^"]*\)"/\1/')
         cerberus_ret="UB"
-    elif echo "$cerberus_output" | grep -q 'value: "Specified'; then
+    elif [[ "$cerberus_output" == *'value: "Specified'* ]]; then
         cerberus_ret=$(echo "$cerberus_output" | grep -o 'value: "Specified([^)]*)"' | head -1 | sed 's/value: "Specified(\([^)]*\))"/\1/')
-    elif echo "$cerberus_output" | grep -q 'value: "Unspecified'; then
+    elif [[ "$cerberus_output" == *'value: "Unspecified'* ]]; then
         cerberus_ret=$(echo "$cerberus_output" | grep -o 'value: "[^"]*"' | head -1 | sed 's/value: "\([^"]*\)"/\1/')
-    elif echo "$cerberus_output" | grep -q 'Error {'; then
+    elif [[ "$cerberus_output" == *'Error {'* ]]; then
         CERBERUS_FAIL=$((CERBERUS_FAIL + 1))
         error_msg=$(echo "$cerberus_output" | grep -o 'msg: "[^"]*"' | head -1 | sed 's/msg: "\([^"]*\)"/\1/')
         echo "[$file_num/$total_to_test] CERB_SKIP $filename (error: $error_msg)"
@@ -317,8 +329,13 @@ for c_file in "${TEST_FILES[@]}"; do
 
     # Check for timeout (exit code 124)
     if [[ $lean_exit -eq 124 ]]; then
-        LEAN_TIMEOUT_COUNT=$((LEAN_TIMEOUT_COUNT + 1))
-        echo "[$file_num/$total_to_test] TIMEOUT $filename (Lean >${TIMEOUT_SECS}s)"
+        if $expect_unsupported; then
+            UNSUPPORTED_EXPECTED=$((UNSUPPORTED_EXPECTED + 1))
+            echo "[$file_num/$total_to_test] UNSUPPORTED $filename (timeout, expected)"
+        else
+            LEAN_TIMEOUT_COUNT=$((LEAN_TIMEOUT_COUNT + 1))
+            echo "[$file_num/$total_to_test] TIMEOUT $filename (Lean >${TIMEOUT_SECS}s)"
+        fi
         continue
     fi
 
@@ -326,27 +343,37 @@ for c_file in "${TEST_FILES[@]}"; do
     lean_ret=""
     lean_has_ub=false
     lean_ub_code=""
-    if echo "$lean_output" | grep -q '^Undefined {'; then
+    if [[ "$lean_output" == *'Undefined {'* ]]; then
         lean_has_ub=true
         lean_ub_code=$(echo "$lean_output" | grep -o 'ub: "[^"]*"' | sed 's/ub: "\([^"]*\)"/\1/')
         lean_ret="UB"
-    elif echo "$lean_output" | grep -q '^Defined {'; then
-        if echo "$lean_output" | grep -q 'value: "Specified'; then
+    elif [[ "$lean_output" == *'Defined {'* ]]; then
+        if [[ "$lean_output" == *'value: "Specified'* ]]; then
             lean_ret=$(echo "$lean_output" | grep -o 'value: "Specified([^)]*)"' | sed 's/value: "Specified(\([^)]*\))"/\1/')
-        elif echo "$lean_output" | grep -q 'value: "Unspecified'; then
+        elif [[ "$lean_output" == *'value: "Unspecified'* ]]; then
             lean_ret=$(echo "$lean_output" | grep -o 'value: "[^"]*"' | sed 's/value: "\([^"]*\)"/\1/')
         else
             lean_ret=$(echo "$lean_output" | grep -o 'value: "[^"]*"' | sed 's/value: "\([^"]*\)"/\1/')
         fi
-    elif echo "$lean_output" | grep -q '^Error {'; then
+    elif [[ "$lean_output" == *'Error {'* ]]; then
         error_msg=$(echo "$lean_output" | grep -o 'msg: "[^"]*"' | sed 's/msg: "\([^"]*\)"/\1/')
         lean_ret="ERROR"
-        LEAN_FAIL=$((LEAN_FAIL + 1))
-        echo "[$file_num/$total_to_test] FAIL $filename: $error_msg"
+        if $expect_unsupported; then
+            UNSUPPORTED_EXPECTED=$((UNSUPPORTED_EXPECTED + 1))
+            echo "[$file_num/$total_to_test] UNSUPPORTED $filename: $error_msg"
+        else
+            LEAN_FAIL=$((LEAN_FAIL + 1))
+            echo "[$file_num/$total_to_test] FAIL $filename: $error_msg"
+        fi
         continue
     else
-        LEAN_FAIL=$((LEAN_FAIL + 1))
-        echo "[$file_num/$total_to_test] FAIL $filename: unexpected output: $lean_output"
+        if $expect_unsupported; then
+            UNSUPPORTED_EXPECTED=$((UNSUPPORTED_EXPECTED + 1))
+            echo "[$file_num/$total_to_test] UNSUPPORTED $filename: unexpected output"
+        else
+            LEAN_FAIL=$((LEAN_FAIL + 1))
+            echo "[$file_num/$total_to_test] FAIL $filename: unexpected output: $lean_output"
+        fi
         continue
     fi
 
@@ -365,12 +392,21 @@ for c_file in "${TEST_FILES[@]}"; do
 
     # One detected UB but not the other — mismatch
     if $lean_has_ub || $cerberus_has_ub; then
-        LEAN_OK=$((LEAN_OK + 1))
-        MISMATCH=$((MISMATCH + 1))
-        if $lean_has_ub; then
-            echo "[$file_num/$total_to_test] DIFF $filename: Lean=UB($lean_ub_code) Cerberus=$cerberus_ret"
+        if $expect_unsupported; then
+            UNSUPPORTED_EXPECTED=$((UNSUPPORTED_EXPECTED + 1))
+            if $lean_has_ub; then
+                echo "[$file_num/$total_to_test] UNSUPPORTED $filename: Lean=UB($lean_ub_code) Cerberus=$cerberus_ret"
+            else
+                echo "[$file_num/$total_to_test] UNSUPPORTED $filename: Lean=$lean_ret Cerberus=UB($cerberus_ub_code)"
+            fi
         else
-            echo "[$file_num/$total_to_test] DIFF $filename: Lean=$lean_ret Cerberus=UB($cerberus_ub_code)"
+            LEAN_OK=$((LEAN_OK + 1))
+            MISMATCH=$((MISMATCH + 1))
+            if $lean_has_ub; then
+                echo "[$file_num/$total_to_test] DIFF $filename: Lean=UB($lean_ub_code) Cerberus=$cerberus_ret"
+            else
+                echo "[$file_num/$total_to_test] DIFF $filename: Lean=$lean_ret Cerberus=UB($cerberus_ub_code)"
+            fi
         fi
         continue
     fi
@@ -379,11 +415,21 @@ for c_file in "${TEST_FILES[@]}"; do
 
     # Compare results
     if [[ "$lean_ret" == "$cerberus_ret" ]]; then
-        MATCH=$((MATCH + 1))
-        echo "[$file_num/$total_to_test] MATCH $filename: $lean_ret"
+        if $expect_unsupported; then
+            UNSUPPORTED_UNEXPECTED=$((UNSUPPORTED_UNEXPECTED + 1))
+            echo "[$file_num/$total_to_test] UNSUPPORTED_PASS $filename: $lean_ret (expected failure but passed!)"
+        else
+            MATCH=$((MATCH + 1))
+            echo "[$file_num/$total_to_test] MATCH $filename: $lean_ret"
+        fi
     else
-        MISMATCH=$((MISMATCH + 1))
-        echo "[$file_num/$total_to_test] MISMATCH $filename: Lean=$lean_ret Cerberus=$cerberus_ret"
+        if $expect_unsupported; then
+            UNSUPPORTED_EXPECTED=$((UNSUPPORTED_EXPECTED + 1))
+            echo "[$file_num/$total_to_test] UNSUPPORTED $filename: Lean=$lean_ret Cerberus=$cerberus_ret"
+        else
+            MISMATCH=$((MISMATCH + 1))
+            echo "[$file_num/$total_to_test] MISMATCH $filename: Lean=$lean_ret Cerberus=$cerberus_ret"
+        fi
     fi
 done
 
@@ -409,6 +455,15 @@ if [[ $UB_CODE_DIFF -gt 0 ]]; then
 fi
 echo "  Mismatch:   $MISMATCH"
 echo ""
+
+if [[ $UNSUPPORTED_EXPECTED -gt 0 ]] || [[ $UNSUPPORTED_UNEXPECTED -gt 0 ]]; then
+    echo "Unsupported (*.unsupported.c):"
+    echo "  Expected:   $UNSUPPORTED_EXPECTED (failed as expected)"
+    if [[ $UNSUPPORTED_UNEXPECTED -gt 0 ]]; then
+        echo "  Unexpected: $UNSUPPORTED_UNEXPECTED (passed — consider removing .unsupported suffix)"
+    fi
+    echo ""
+fi
 
 TOTAL_MATCH=$((MATCH + UB_MATCH + UB_CODE_DIFF))
 TOTAL_COMPARE=$((TOTAL_MATCH + MISMATCH))

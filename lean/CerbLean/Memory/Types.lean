@@ -329,9 +329,12 @@ inductive MemError where
   | ptrArithOverflow
   /-- Invalid alignment -/
   | alignmentError (required : Nat) (actual : Nat)
-  /-- Pointer difference error.
+  /-- Pointer difference error (non-representable result).
       Corresponds to: MerrPtrdiff -/
   | ptrdiff
+  /-- Pointer difference of disjoint allocations.
+      Corresponds to: MerrPtrdiff (different allocations case) -/
+  | ptrdiffDisjoint
   /-- Pointer to integer conversion out of range.
       Corresponds to: MerrIntFromPtr -/
   | intFromPtr
@@ -372,6 +375,7 @@ instance : ToString MemError where
     | .ptrArithOverflow => "pointer arithmetic overflow"
     | .alignmentError req actual => s!"alignment error: required {req}, got {actual}"
     | .ptrdiff => "pointer difference error"
+    | .ptrdiffDisjoint => "pointer difference of disjoint allocations"
     | .intFromPtr => "pointer to integer conversion: value out of range"
     | .arrayShift => "array shift error"
     | .ptrComparison => "pointer comparison error"
