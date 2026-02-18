@@ -48,12 +48,14 @@ cn-types/
 │   ├── test_cn.sh     # Run CN verification tests
 │   ├── test_genproof.sh # Test proof generation pipeline
 │   ├── strip_core_json.py # Strip Core JSON to minimal dependencies (for smaller proofs)
+│   ├── test_coverage.sh # Generate Cerberus OCaml code coverage reports
 │   ├── fuzz_csmith.sh # Fuzz testing with csmith
 │   ├── creduce_interestingness.sh # For minimizing failing tests with creduce
 │   └── docker_entrypoint.sh # Docker container entrypoint
 ├── tests/             # C test files for differential testing
 │   ├── minimal/       # Core test suite (NNN-description.c, 93 tests)
 │   ├── debug/         # Debug/investigation tests (category-NN-description.c, 86 tests)
+│   ├── coverage/      # Cerberus code coverage tests (category-NNN-description.c, 199 tests)
 │   ├── cn/            # CN verification tests (28 tests)
 │   └── csmith/        # Csmith fuzz testing infrastructure
 ├── .github/workflows/ # CI/CD workflows
@@ -342,6 +344,23 @@ The test script outputs files to a temp directory. To investigate a specific mis
 ```
 Do NOT use `diff` directly - it doesn't normalize whitespace. Always use the `--compare` flag with the Lean tool.
 
+**Cerberus OCaml Code Coverage** (`scripts/test_coverage.sh`):
+Measures which parts of Cerberus's OCaml code are exercised by our test suites using bisect_ppx instrumentation.
+```bash
+# One-time setup
+make cerberus-coverage-setup
+
+# Run coverage analysis (builds instrumented Cerberus, runs tests, generates report)
+./scripts/test_coverage.sh
+
+# Skip build step (reuse previous instrumented build)
+./scripts/test_coverage.sh --no-build
+
+# Also include Cerberus CI suite
+./scripts/test_coverage.sh --ci
+```
+Generates HTML report at `_coverage/index.html` and terminal summary. See `docs/2026-02-14_CERBERUS_COVERAGE.md` for full details on the instrumentation setup.
+
 **Csmith Fuzz Testing** (`scripts/fuzz_csmith.sh`):
 Generates random C programs with csmith and compares Cerberus vs our interpreter.
 ```bash
@@ -456,6 +475,16 @@ See `scripts/test_interp.sh` for the exact skip logic.
 - `tests/debug/`: Debug/investigation tests: `category-NN-description.c`
   - Examples: `conv-01-neg-to-unsigned.c`, `ptr-03-no-decr.c`, `struct-01-init.c`
   - Categories group related tests (conv, ptr, rec, struct, libc, etc.)
+- `tests/coverage/`: Cerberus code coverage tests: `category-NNN-description.c`
+  - 199 tests across 21 categories targeting specific Cerberus code paths
+  - Categories: arith3, builtin, compound, conv, ctrl, ctrl2, ctrl3, eval2, expr, io, libc, mem, mem3, misc, ptr, ptr2, ptr3, store2, struct, union3, varargs
+  - Each test targets a specific Cerberus function/branch (referenced in comments)
+  - Run with: `./scripts/test_interp.sh tests/coverage -v`
+
+**Special file suffixes:**
+- `.undef.c` — tests for undefined behavior detection
+- `.libc.c` — requires libc (skipped with `--nolibc`)
+- `.unsupported.c` — expected to fail due to unimplemented features (e.g., `printf`/`puts` requiring the driver I/O layer). The test runner reports these as `UNSUPPORTED` rather than `FAIL`, and they don't trigger a non-zero exit code. If an unsupported test unexpectedly passes, it's flagged as `UNSUPPORTED_PASS`.
 
 **Debugging strategy:**
 When investigating a bug or unexpected behavior:
