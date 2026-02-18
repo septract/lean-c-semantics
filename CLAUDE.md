@@ -1,7 +1,5 @@
 # Lean C Semantics
 
-> **⚠️ CRITICAL: Read "ABSOLUTE RULE: Fail, Never Guess" in Development Notes before writing any code. Never add fall-throughs. Never guess. Never approximate. Failure is always better than incorrect output.**
-
 ## Overview
 A Lean 4 implementation of C semantics via Cerberus. Cerberus compiles C to its Core intermediate representation; this project parses and executes Core in Lean, enabling formal reasoning about C programs.
 
@@ -19,59 +17,33 @@ C source → Cerberus → Core IR (JSON) → Lean Parser → Lean AST → Lean I
 
 ## Project Structure
 ```
-cn-types/
 ├── cerberus/          # Git submodule - Cerberus C semantics tool (fork with JSON export)
 ├── docs/              # Documentation (YYYY-MM-DD_title.md format)
-│   └── 2025-12-24_DETAILED_PLAN.md   # Full implementation roadmap
-├── lean/              # Lean 4 project
-│   └── CerbLean/
-│       ├── Core/      # Core AST types (Sym, Expr, File, etc.)
-│       ├── CN/        # CN separation logic type system
-│       │   ├── Types/ # CN types (base types, index terms, resources, specs)
-│       │   ├── TypeChecking/ # Type checker (monad, inference, check)
-│       │   ├── Parser.lean   # CN spec parser (from magic annotations)
-│       │   ├── Verification/ # CN verification driver
-│       │   └── Semantics/    # CN semantics
-│       ├── Parser.lean      # JSON parser (100% success on test suite)
-│       ├── PrettyPrint.lean # Pretty-printer matching Cerberus output
-│       ├── Memory/    # Memory model (concrete with allocation-ID provenance)
-│       ├── Semantics/ # Core interpreter
-│       ├── Verification/    # Verified C programs (see Program Verification section)
-│       │   └── Programs/    # Individual verified programs
-│       ├── GenProof.lean    # Generates proof skeleton files from Core JSON
-│       ├── Test/      # Unit tests (Memory, Parser smoke tests)
-│       └── Test*.lean # Test CLI entry points
-├── scripts/           # Development scripts
-│   ├── test_parser.sh # Run parser against Cerberus test suite
-│   ├── test_pp.sh     # Run pretty-printer comparison tests
-│   ├── test_interp.sh # Run interpreter differential testing
-│   ├── test_cn.sh     # Run CN verification tests
-│   ├── test_genproof.sh # Test proof generation pipeline
-│   ├── strip_core_json.py # Strip Core JSON to minimal dependencies (for smaller proofs)
-│   ├── test_coverage.sh # Generate Cerberus OCaml code coverage reports
-│   ├── fuzz_csmith.sh # Fuzz testing with csmith
-│   ├── creduce_interestingness.sh # For minimizing failing tests with creduce
-│   └── docker_entrypoint.sh # Docker container entrypoint
+├── lean/CerbLean/     # Lean 4 project
+│   ├── Core/          # Core AST types (Sym, Expr, File, etc.)
+│   ├── CN/            # CN separation logic type system (Types/, TypeChecking/, Verification/, Semantics/)
+│   ├── Parser.lean    # JSON parser
+│   ├── PrettyPrint.lean # Pretty-printer matching Cerberus output
+│   ├── Memory/        # Memory model (concrete with allocation-ID provenance)
+│   ├── Semantics/     # Core interpreter
+│   ├── Verification/  # Verified C programs with proofs
+│   ├── GenProof.lean  # Generates proof skeleton files from Core JSON
+│   └── Test/          # Unit tests + Test*.lean CLI entry points
+├── scripts/           # Development scripts (all support --help)
 ├── tests/             # C test files for differential testing
-│   ├── minimal/       # Core test suite (NNN-description.c, 93 tests)
-│   ├── debug/         # Debug/investigation tests (category-NN-description.c, 86 tests)
-│   ├── coverage/      # Cerberus code coverage tests (category-NNN-description.c, 199 tests)
-│   ├── cn/            # CN verification tests (28 tests)
+│   ├── minimal/       # Core test suite (NNN-description.c)
+│   ├── debug/         # Debug/investigation tests (category-NN-description.c)
+│   ├── coverage/      # Cerberus code coverage tests (category-NNN-description.c)
+│   ├── cn/            # CN verification tests
 │   └── csmith/        # Csmith fuzz testing infrastructure
-├── .github/workflows/ # CI/CD workflows
-│   ├── ci.yml         # Build and test on push/PR
-│   └── docker.yml     # Build and push Docker image
 ├── Dockerfile         # Multi-stage build for Cerberus + Lean
-├── .dockerignore      # Files excluded from Docker build context
 ├── CLAUDE.md          # This file
 └── TODO.md            # Current tasks
 ```
 
 ## Key Design Decisions
 
-> **⚠️ BEFORE WRITING ANY CODE**: Read "ABSOLUTE RULE: Fail, Never Guess" in Development Notes. This is the most important rule in this codebase. Never add fall-through cases. Never guess. Never approximate. Failure is always better than being incorrect.
-
-### 0. CRITICAL: Interpreter Must Match Cerberus EXACTLY
+### CRITICAL: Interpreter Must Match Cerberus EXACTLY
 
 **The Lean interpreter MUST mirror Cerberus semantics EXACTLY.**
 
@@ -81,15 +53,10 @@ cn-types/
 - When in doubt, copy Cerberus's approach exactly
 - Document correspondence with comments linking to Cerberus source (file:lines)
 
-This is not about writing "good Lean code" - it's about creating a verifiable translation that can be audited for correctness against the Cerberus reference implementation.
+See `docs/2025-12-31_INTERPRETER_REFACTOR.md` for the audit checklist.
+See `docs/2026-01-01_MEMORY_AUDIT.md` for the memory model correspondence mapping.
 
-**⚠️ CRITICAL**: See "ABSOLUTE RULE: Fail, Never Guess" in Development Notes. When implementing interpreter functionality, you MUST fail on unrecognized cases - NEVER add fall-through defaults. If Cerberus would error, we MUST error.
-
-See `docs/2025-12-31_INTERPRETER_REFACTOR.md` for the audit checklist and correspondence documentation requirements.
-
-See `docs/2026-01-01_MEMORY_AUDIT.md` for the memory model audit plan and Cerberus correspondence mapping.
-
-### 0.1 CRITICAL: CN Implementation Must Match CN EXACTLY
+### CRITICAL: CN Implementation Must Match CN EXACTLY
 
 **The Lean CN type system and type checker MUST mirror the CN implementation EXACTLY.**
 
@@ -97,73 +64,13 @@ See `docs/2026-01-01_MEMORY_AUDIT.md` for the memory model audit plan and Cerber
 - Type checking functions must match CN's OCaml implementation - no "improvements" or alternative designs
 - Each type and function must be auditable against the corresponding CN code
 - Document correspondence with comments linking to CN source (file:lines)
-- This allows us to reuse CN's theory and proofs
+- Every function should have: module-level comment, docstring linking to CN function, "Audited: YYYY-MM-DD" note
 
-**⚠️ CRITICAL**: See "ABSOLUTE RULE: Fail, Never Guess" in Development Notes. When implementing CN type checking, you MUST fail on unrecognized cases - NEVER add fall-through defaults or "simplifications" that guess types. If CN would reject something, we MUST reject it. If CN would fail, we MUST fail.
+Key CN source files: `cn/lib/baseTypes.ml`, `indexTerms.ml`, `check.ml`, `typing.ml`, `wellTyped.ml`, `resourceInference.ml`, `core_to_mucore.ml`, `compile.ml`. CN repo: https://github.com/rems-project/cn (clone to `tmp/cn/` if needed).
 
-**Audit Comment Style** (same as Cerberus audit comments):
-```lean
-/-
-  CN Pure Expression Checking
-  Corresponds to: cn/lib/check.ml (check_pexpr parts)
+### Other Design Choices
 
-  Converts Core pure expressions (Pexpr) to CN index terms (IndexTerm).
-
-  Audited: 2026-01-20 against cn/lib/check.ml
--/
-
-/-- Check a pure expression and convert to an IndexTerm.
-    Corresponds to: check_pexpr in cn/lib/check.ml -/
-partial def checkPexpr (pe : APexpr) : TypingM IndexTerm := do
-  ...
-```
-
-Every function implementing CN functionality should have:
-1. A module-level comment explaining what it corresponds to in CN
-2. A docstring linking to the specific CN function/location
-3. An "Audited: YYYY-MM-DD" note when verified against CN source
-
-Key CN source files for reference:
-| File | Purpose |
-|------|---------|
-| `cn/lib/baseTypes.ml` | CN base types |
-| `cn/lib/indexTerms.ml` | Index term representation |
-| `cn/lib/argumentTypes.ml` | Function spec structure |
-| `cn/lib/logicalReturnTypes.ml` | Postcondition structure |
-| `cn/lib/logicalConstraints.ml` | Constraint representation |
-| `cn/lib/resource.ml` | Ownership predicates |
-| `cn/lib/request.ml` | Resource requests |
-| `cn/lib/check.ml` | Main type checker |
-| `cn/lib/typing.ml` | Typing monad |
-| `cn/lib/wellTyped.ml` | Well-typedness checking |
-| `cn/lib/resourceInference.ml` | Resource inference |
-| `cn/lib/core_to_mucore.ml` | Core to muCore transformation |
-| `cn/lib/compile.ml` | Compilation/translation |
-
-**CN Repository**: The CN source is available at https://github.com/rems-project/cn. It may already be checked out in `tmp/cn/`. If not, clone it there:
-```bash
-mkdir -p tmp && cd tmp && git clone --depth 1 https://github.com/rems-project/cn.git
-```
-
-### 1. Manual Translation (not Lem/Ott backends)
-We manually translate Cerberus Core semantics to Lean rather than creating automated backends because:
-- Allows idiomatic Lean 4 code
-- Decoupled from Cerberus toolchain
-- Lem-to-Coq experience suggests poor fit for proof assistants
-
-### 2. JSON Export from Cerberus
-We modify Cerberus to export Core IR as JSON rather than parsing pretty-printed text:
-- Cleaner, unambiguous parsing
-- Structured data easier to work with
-
-### 3. Concrete Memory Model
-Memory operations use a concrete memory model with allocation-ID provenance, matching Cerberus's default `impl_mem.ml`. The model tracks allocation IDs, bounds, liveness, and read-only status. PNVI/CHERI models are out of scope.
-
-### 4. Sequential Execution with Unsequenced Race Detection
-The interpreter handles sequential Core with full support for unsequenced expressions:
-- `Eunseq` expressions fully supported with race detection via neg action transformation
-- No `core_sequentialise` pass required (though available as `--sequentialise` flag)
-- Parallel semantics (`Epar`, `Ewait`) remain out of scope
+Manual Lean translation (not Lem/Ott backends) of Cerberus Core semantics, using JSON export from Cerberus. Concrete memory model with allocation-ID provenance matching `impl_mem.ml`. Sequential execution with `Eunseq` race detection via neg action transformation; parallel semantics (`Epar`, `Ewait`) out of scope.
 
 ## Cerberus Reference
 
@@ -178,8 +85,6 @@ Always refer to **`core_reduction.lem`** for:
 
 The driver (`driver.lem`) uses `core_reduction.lem`, NOT `core_run.lem`.
 
-(Confirmed by Cerberus developers, January 2026)
-
 ### Key Files
 | File | Description |
 |------|-------------|
@@ -191,84 +96,44 @@ The driver (`driver.lem`) uses `core_reduction.lem`, NOT `core_run.lem`.
 | `cerberus/frontend/model/core_sequentialise.lem` | Concurrency elimination |
 | `cerberus/memory/concrete/impl_mem.ml` | Concrete memory model (~3015 lines) |
 
-### Core AST Types (from core.ott)
-- `core_object_type`: integer, floating, pointer, array, struct, union
-- `core_base_type`: unit, boolean, ctype, list, tuple, object, loaded
-- `binop`: arithmetic and logical operators
-- `value`: Core values
-- `generic_pexpr`: Pure expressions
-- `generic_expr`: Effectful expressions (memory operations)
-- `generic_file`: Complete Core program
-
 ### Known Cerberus Issues
 
-**Non-determinism**: Cerberus exhibits non-deterministic behavior on certain tests. The same test may succeed on one run and fail on another with errors like "calling an unknown procedure". This has been observed on tests like pr34099.c and pr43629.c. **TODO**: Investigate the source of this non-determinism in the future.
+**Non-determinism**: Cerberus exhibits non-deterministic behavior on certain tests (e.g., pr34099.c, pr43629.c). The same test may succeed or fail between runs.
 
-**Unsequenced race detection**: We now support `Eunseq` expressions and detect unsequenced races following `core_reduction.lem`. The neg action transformation creates `unseq` structures that accumulate memory footprints, and race detection happens at `Eunseq` completion via `one_step_unseq_aux`. Tests in `cerberus/tests/ci/030*-unseq_race*.c` should detect UB035.
+**Unsequenced race detection**: Fully supported via `core_reduction.lem`. Tests in `cerberus/tests/ci/030*-unseq_race*.c` should detect UB035.
 
 ### Cerberus Setup
 
-**IMPORTANT**: Cerberus requires OCaml 5.4.0. The version is configured in the Makefile via `OCAML_VERSION`.
+**IMPORTANT**: Cerberus requires OCaml 5.4.0 (configured in Makefile via `OCAML_VERSION`).
 
-First-time setup:
 ```bash
-make cerberus-setup
-```
-This creates a **local opam switch** in `cerberus/_opam/`, installs dependencies, and builds Cerberus locally.
-
-**Benefits of local switches:**
-- Each checkout can have its own isolated OCaml environment
-- Multiple development versions can coexist without conflicts
-- The switch is scoped to this project directory
-
-Verify it works:
-```bash
-./scripts/cerberus --exec cerberus/tests/ci/0001-emptymain.c
+make cerberus-setup    # First-time: creates local opam switch, installs deps, builds
+./scripts/cerberus --exec cerberus/tests/ci/0001-emptymain.c  # Verify
 ```
 
-### Updating Cerberus After Local Changes
-
-If you modify Cerberus source code (in `cerberus/`), rebuild:
+After modifying Cerberus source:
 ```bash
-make cerberus
+make cerberus          # Runs lem + dune build
 ```
-This runs `lem` (to update OCaml sources) and `dune build`.
 
 ### Running Cerberus
 
-Use the wrapper script `scripts/cerberus` (which uses the local opam switch):
+Use the wrapper script `scripts/cerberus` (uses local opam switch):
 ```bash
-# Pretty-print Core to stdout
-./scripts/cerberus --pp=core input.c
-
-# Pretty-print Core in compact mode (single line, for diffing)
-./scripts/cerberus --pp=core --pp_core_compact input.c
-
-# Export Core as JSON (for Lean parser)
-./scripts/cerberus --json_core_out=output.json input.c
-
-# Execute C program
-./scripts/cerberus --exec input.c
-
-# Execute with batch output (for differential testing)
-./scripts/cerberus --exec --batch input.c
-
-# Get help
-./scripts/cerberus --help
+./scripts/cerberus --pp=core input.c                    # Pretty-print Core
+./scripts/cerberus --pp=core --pp_core_compact input.c  # Compact mode (for diffing)
+./scripts/cerberus --json_core_out=output.json input.c  # Export Core as JSON
+./scripts/cerberus --exec input.c                       # Execute C program
+./scripts/cerberus --exec --batch input.c               # Batch output (differential testing)
 ```
 
 ## Validation
 
-### Test Suite
-Cerberus has 5500+ test files in `cerberus/tests/`:
-- `tests/ci/*.c` - Main CI tests
-- `*.undef.c` - Expected undefined behavior
-- `*.syntax-only.c` - Parse-only tests
+Cerberus has 5500+ test files in `cerberus/tests/`: `tests/ci/*.c` (main CI tests), `*.undef.c` (expected UB), `*.syntax-only.c` (parse-only).
 
 ### Test Scripts
 
 **Parser Test** (`scripts/test_parser.sh`):
-Tests that the Lean JSON parser can successfully parse Cerberus JSON output.
 ```bash
 ./scripts/test_parser.sh --quick    # Test first 100 files
 ./scripts/test_parser.sh            # Full test suite (~5500 files)
@@ -276,30 +141,24 @@ Tests that the Lean JSON parser can successfully parse Cerberus JSON output.
 ```
 
 **Pretty-Printer Test** (`scripts/test_pp.sh`):
-Compares Lean pretty-printer output against Cerberus pretty-printer output.
 ```bash
 ./scripts/test_pp.sh --max 100      # Test first 100 files
 ./scripts/test_pp.sh --max 100 -v   # Verbose mode (show each file)
 ./scripts/test_pp.sh                # Full test (all CI files)
 ```
-The script generates JSON from Cerberus, runs the Lean pretty-printer, compares with Cerberus compact output, and reports match rate. Output files are saved to a temp directory for investigation.
 
-Current status:
-- **CI tests**: 100% match rate (121/121 files)
-- **Full test suite (5501 files)**: 99% match rate (1809/1817 files)
-
-See `docs/2025-12-26_PP_DISCREPANCIES.md` for remaining issues (NULL type parsing for complex types - deferred pending Cerberus-side fix).
+**Investigating PP Mismatches**: Do NOT use `diff` - it doesn't normalize whitespace. Use the `--compare` flag:
+```bash
+./lean/.lake/build/bin/cerblean_pp /path/to/OUTPUT_DIR/filename.json --compare /path/to/OUTPUT_DIR/filename.cerberus.core
+```
 
 **Memory Model Tests** (`make test-memory`):
-Unit tests for the memory model implementation.
 ```bash
 make test-memory                           # Run memory model unit tests
 cd lean && .lake/build/bin/cerblean_memtest # Run directly
 ```
-Tests include: layout (sizeof/alignof), allocation, store/load roundtrip, null dereference detection, use-after-free detection, double-free detection, out-of-bounds detection, read-only protection, pointer arithmetic.
 
 **CN Verification Tests** (`make test-cn`):
-Tests for the CN separation logic type system implementation.
 ```bash
 make test-cn                              # Run integration tests on tests/cn/
 make test-cn-unit                         # Run unit tests only (fast, no Cerberus)
@@ -308,186 +167,56 @@ make test-cn-unit                         # Run unit tests only (fast, no Cerber
 ./scripts/test_cn.sh --unit               # Run unit tests only
 ```
 
-Test files in `tests/cn/` follow these conventions:
-- `NNN-description.c` - Tests expected to pass
-- `NNN-description.fail.c` - Tests expected to fail (e.g., double-free, use-after-free)
-- `NNN-description.smt-fail.c` - Tests expected to fail at the SMT level (postcondition violations)
-
-The `.fail.c` and `.smt-fail.c` suffixes indicate the test should fail verification. The test infrastructure automatically passes `--expect-fail` to the test runner for these files.
-
-Example test structure:
-```c
-// tests/cn/001-simple-owned.c
-int read(int *p)
-/*@ requires take v = Owned<signed int>(p);
-    ensures take v2 = Owned<signed int>(p);
-            v == v2;
-            return == v; @*/
-{ return *p; }
-```
-
-See `docs/2026-01-20_CN_TYPECHECKING_AUDIT.md` for known issues and implementation status.
-
-**Investigating Pretty-Printer Mismatches**:
-The test script outputs files to a temp directory. To investigate a specific mismatch:
-```bash
-# Run tests and note the output directory
-./scripts/test_pp.sh --max 250
-
-# Use the Lean comparison tool directly (normalizes whitespace, strips section comments)
-./lean/.lake/build/bin/cerblean_pp /path/to/OUTPUT_DIR/filename.json --compare /path/to/OUTPUT_DIR/filename.cerberus.core
-
-# Example output showing the first difference:
-# First difference at position 458:
-#   Lean:     'store('signed int', a_530,'
-#   Cerberus: 'store_lock('signed int', a'
-```
-Do NOT use `diff` directly - it doesn't normalize whitespace. Always use the `--compare` flag with the Lean tool.
+CN test file conventions: `NNN-description.c` (pass), `NNN-description.fail.c` (expected fail), `NNN-description.smt-fail.c` (SMT-level fail). The `.fail.c` and `.smt-fail.c` suffixes auto-pass `--expect-fail`.
 
 **Cerberus OCaml Code Coverage** (`scripts/test_coverage.sh`):
-Measures which parts of Cerberus's OCaml code are exercised by our test suites using bisect_ppx instrumentation.
 ```bash
-# One-time setup
-make cerberus-coverage-setup
-
-# Run coverage analysis (builds instrumented Cerberus, runs tests, generates report)
-./scripts/test_coverage.sh
-
-# Skip build step (reuse previous instrumented build)
-./scripts/test_coverage.sh --no-build
-
-# Also include Cerberus CI suite
-./scripts/test_coverage.sh --ci
+make cerberus-coverage-setup              # One-time setup
+./scripts/test_coverage.sh               # Build instrumented Cerberus, run tests, generate report
+./scripts/test_coverage.sh --no-build    # Reuse previous instrumented build
+./scripts/test_coverage.sh --ci          # Also include Cerberus CI suite
 ```
-Generates HTML report at `_coverage/index.html` and terminal summary. See `docs/2026-02-14_CERBERUS_COVERAGE.md` for full details on the instrumentation setup.
+Generates HTML report at `_coverage/index.html`. See `docs/2026-02-14_CERBERUS_COVERAGE.md` for details.
 
 **Csmith Fuzz Testing** (`scripts/fuzz_csmith.sh`):
-Generates random C programs with csmith and compares Cerberus vs our interpreter.
 ```bash
-# Generate and test 100 random programs (default)
-./scripts/fuzz_csmith.sh
+./scripts/fuzz_csmith.sh                  # Generate and test 100 random programs
+./scripts/fuzz_csmith.sh 500              # Test N random programs
+./scripts/fuzz_csmith.sh 100 tests/csmith/my_results  # Specify output directory
+./scripts/gen_csmith.sh 12345 tests/csmith/debug.c    # Single test for debugging
+```
+**IMPORTANT**: Any difference from Cerberus (FAIL, MISMATCH, DIFF) is a BUG.
 
-# Generate and test N random programs
-./scripts/fuzz_csmith.sh 500
-
-# Specify output directory
-./scripts/fuzz_csmith.sh 100 tests/csmith/my_results
+**creduce** (`scripts/creduce_interestingness.sh`): Minimizes failing tests to smallest reproducer.
+```bash
+creduce ./scripts/creduce_interestingness.sh test.c
 ```
 
-The script:
-1. Generates random csmith tests with `--no-argc --no-bitfields`
-2. Replaces csmith.h with our `csmith_cerberus.h` (uses exit() instead of printf)
-3. Runs `test_interp.sh` on all generated tests
-4. Saves bugs to `bugs/` subdirectory, timeouts to `timeouts/`
-
-Output categories in `fuzz_log.txt`:
-- **MATCH**: Both interpreters return the same value (good!)
-- **FAIL**: **BUG** - Lean interpreter error when Cerberus succeeded
-- **MISMATCH**: **BUG** - Different concrete values between interpreters
-- **DIFF**: **BUG** - One detected UB, the other didn't
-- **TIMEOUT**: Lean took too long (may need more fuel)
-
-**IMPORTANT**: Any difference from Cerberus (FAIL, MISMATCH, DIFF) is a BUG! The script exits with code 1 if any bugs are found.
-
-Generate a single csmith test for debugging:
-```bash
-./scripts/gen_csmith.sh 12345 tests/csmith/debug.c
-./scripts/test_interp.sh tests/csmith/debug.c
-```
-
-**Known csmith limitations**:
-- Many csmith tests fail Cerberus compilation due to pointer type strictness
-- Tests using unions may show DIFF (Unspecified vs concrete) - we don't track active union member
-- Large tests may exhaust interpreter fuel (TIMEOUT, not necessarily a bug)
-
-**Using creduce to minimize failing tests** (`scripts/creduce_interestingness.sh`):
-When you find a complex failing test (from csmith or elsewhere), use creduce to automatically minimize it to the smallest reproducer:
+### Differential Testing (`scripts/test_interp.sh`)
 
 ```bash
-# 1. Copy the failing test to /tmp
-cp path/to/failing_test.c /tmp/test.c
-
-# 2. Verify the interestingness test works on your file
-cd /tmp
-/path/to/project/scripts/creduce_interestingness.sh test.c
-echo $?  # Should print 0 if the bug reproduces
-
-# 3. Run creduce to minimize
-creduce /path/to/project/scripts/creduce_interestingness.sh test.c
-
-# 4. The minimized test is now in test.c - save it to tests/debug/
-cp test.c /path/to/project/tests/debug/category-NN-description.c
+./scripts/test_interp.sh tests/debug                   # Test debug suite
+./scripts/test_interp.sh tests/coverage -v             # Test coverage suite
+./scripts/test_interp.sh cerberus/tests --nolibc -v    # Full Cerberus suite
 ```
 
-The interestingness script (`scripts/creduce_interestingness.sh`):
-- Returns 0 (interesting) if: Cerberus succeeds but Lean reports an error
-- Returns 1 (not interesting) otherwise
-- Has built-in 10-second timeouts to handle infinite loops creduce might create
+`--nolibc` is much faster (2MB vs 200MB JSON per test) but many tests require libc. Full suite is expensive (1-2 hours) - only run when user explicitly requests it.
 
-Customize the script for different bug patterns:
-- Change the grep pattern to match different error types
-- Modify success conditions (e.g., mismatch instead of error)
-
-Example: minimizing a "out of bounds" bug:
-```bash
-# The default script looks for "out of bounds" errors
-# Edit the script to match your specific error if needed:
-if echo "$LEAN_OUT" | grep -q "your error pattern"; then
-    exit 0  # Interesting
-fi
-```
-
-### Differential Testing
-Compare Lean interpreter output against Cerberus:
-1. Run Cerberus on C file, get Core + execution result
-2. Parse Core in Lean
-3. Execute in Lean interpreter
-4. Compare results (return value, UB detection)
-
-Current status: 100% match rate on minimal and debug test suites.
-
-**Generating a full test log:**
-```bash
-./scripts/test_interp.sh cerberus/tests --nolibc -v 2>&1 | tee logs/interp-full-$(date +%Y%m%d-%H%M%S).log
-```
-
-**Note:** Using `--nolibc` is much faster (2MB vs 200MB JSON per test) but many Cerberus tests will fail at the Cerberus stage because they require libc functions. This is expected - we're measuring match rate on tests that both interpreters can run.
-
-**WARNING:** This is expensive (1-2 hours) and should only be run when the user explicitly requests it.
-
-Note: The script automatically skips certain directories and file types:
-- `*.syntax-only.c` - Parse-only tests (not executable)
-- `*.exhaust.c` - Exhaustive interleaving tests
-- `bmc/` - Bounded model checking tests (requires `--bmc` mode)
-- `cheri-ci/` - CHERI memory model tests
-- `csmith/` - Csmith tests (use `fuzz_csmith.sh` instead)
-- `pnvi_testsuite/` - PNVI provenance tests
-
-See `scripts/test_interp.sh` for the exact skip logic.
+Auto-skipped: `*.syntax-only.c`, `*.exhaust.c`, `bmc/`, `cheri-ci/`, `csmith/`, `pnvi_testsuite/`.
 
 ### Test Files (`tests/`)
 
 **Naming conventions:**
-- `tests/minimal/`: Core test suite with numbered files: `NNN-description.c`
-  - Examples: `001-return-literal.c`, `068-div-by-zero.undef.c`
-  - Files with `.undef.c` suffix test undefined behavior detection
-  - Files with `.libc.c` suffix require libc (skipped with `--nolibc`)
-- `tests/debug/`: Debug/investigation tests: `category-NN-description.c`
-  - Examples: `conv-01-neg-to-unsigned.c`, `ptr-03-no-decr.c`, `struct-01-init.c`
-  - Categories group related tests (conv, ptr, rec, struct, libc, etc.)
-- `tests/coverage/`: Cerberus code coverage tests: `category-NNN-description.c`
-  - 199 tests across 21 categories targeting specific Cerberus code paths
-  - Categories: arith3, builtin, compound, conv, ctrl, ctrl2, ctrl3, eval2, expr, io, libc, mem, mem3, misc, ptr, ptr2, ptr3, store2, struct, union3, varargs
-  - Each test targets a specific Cerberus function/branch (referenced in comments)
-  - Run with: `./scripts/test_interp.sh tests/coverage -v`
+- `tests/minimal/`: `NNN-description.c` (e.g., `001-return-literal.c`, `068-div-by-zero.undef.c`)
+- `tests/debug/`: `category-NN-description.c` (e.g., `conv-01-neg-to-unsigned.c`, `ptr-03-no-decr.c`)
+- `tests/coverage/`: `category-NNN-description.c` - targets specific Cerberus code paths
 
 **Special file suffixes:**
 - `.undef.c` — tests for undefined behavior detection
 - `.libc.c` — requires libc (skipped with `--nolibc`)
-- `.unsupported.c` — expected to fail due to unimplemented features (e.g., `printf`/`puts` requiring the driver I/O layer). The test runner reports these as `UNSUPPORTED` rather than `FAIL`, and they don't trigger a non-zero exit code. If an unsupported test unexpectedly passes, it's flagged as `UNSUPPORTED_PASS`.
+- `.unsupported.c` — expected to fail due to unimplemented features. Reported as `UNSUPPORTED` (not `FAIL`), doesn't trigger non-zero exit. If unexpectedly passes: `UNSUPPORTED_PASS`.
 
 **Debugging strategy:**
-When investigating a bug or unexpected behavior:
 1. Create a minimal reproducer in `tests/debug/` with an appropriate category prefix
 2. Run `./scripts/test_interp.sh tests/debug` to compare against Cerberus
 3. Debug tests should be committed for future regression testing
@@ -495,9 +224,7 @@ When investigating a bug or unexpected behavior:
 
 ## Program Verification
 
-The project supports proving properties of C programs directly in Lean using the interpreter semantics. Programs are embedded as Lean definitions (Core AST), and properties like UB-freedom and return values can be proven using `native_decide`.
-
-### Verification Pipeline
+Proves properties of C programs in Lean using interpreter semantics. Programs are embedded as Core AST definitions; UB-freedom and return values proven via `native_decide`.
 
 ```
 C source → Cerberus → Core JSON → strip_core_json.py → GenProof → Lean file with proof stubs
@@ -505,146 +232,50 @@ C source → Cerberus → Core JSON → strip_core_json.py → GenProof → Lean
                                                         Fill proofs (native_decide or Aristotle)
 ```
 
-### Directory Structure
+```bash
+make test-genproof                                                          # CI test
+./scripts/test_genproof.sh tests/minimal/001-return-literal.c               # Quick test
+./scripts/test_genproof.sh tests/minimal/001-return-literal.c --production  # Generate to Verification/Programs/
+python3 scripts/strip_core_json.py input.json output.json                   # Strip unused functions
+python3 scripts/strip_core_json.py --aggressive input.json output.json      # Also strip locations
+```
 
-- `CerbLean/Verification/Programs/` - Verified C programs with proofs
-  - `MinimalReturn.lean` - Hand-constructed program returning 42
-  - `CountingLoop.lean` - Loop counting 0→3 with save/run pattern
-  - `ReturnLiteral.lean` - Auto-generated from C, proven by Aristotle
+**Limitations**: `native_decide` only works for concrete programs (no inputs). Large programs may time out.
 
-### Proof Patterns
-
-**UB-Freedom Proof** (no undefined behavior):
+**Aristotle-Generated Proofs**: [Aristotle](https://aristotle.harmonic.fun) can auto-generate Lean 4 proofs. Always add attribution comments:
 ```lean
-/-- Helper for native_decide -/
-theorem program_noError_bool : (runMain program).error.isNone = true := by
-  native_decide
-
-/-- The program completes without undefined behavior -/
-theorem program_noError : (runMain program).error = none := by
-  have := @program_noError_bool
-  cases h : (runMain program).error <;> simp_all
+theorem my_theorem : P := by
+  -- Proof generated by Aristotle (project: cf869c1a-...)
 ```
-
-**Return Value Existence**:
-```lean
-theorem program_returns_expected :
-    ∃ v, (runMain program).returnValue = some v := by
-  have h_code : (runMain program).returnValue.isSome := by native_decide
-  exact Option.isSome_iff_exists.mp h_code
-```
-
-### Generating Proof Files
-
-**Using test_genproof.sh**:
-```bash
-# Test the full pipeline (temp directory, auto-cleanup)
-./scripts/test_genproof.sh tests/minimal/001-return-literal.c
-
-# Generate production file to Verification/Programs/
-./scripts/test_genproof.sh tests/minimal/001-return-literal.c --production
-
-# Options:
-#   --nolibc       Use --nolibc with Cerberus (smaller JSON)
-#   --no-strip     Skip JSON stripping step
-#   --aggressive   Use aggressive stripping
-#   --keep         Keep intermediate files
-#   --production   Output to Verification/Programs/ with proper naming
-#   -v, --verbose  Show verbose output
-```
-
-**Using GenProof directly**:
-```bash
-# Generate JSON from C
-./scripts/cerberus --json_core_out=program.json tests/minimal/001-return-literal.c
-
-# Optionally strip to reduce size
-python3 scripts/strip_core_json.py program.json program_stripped.json
-
-# Generate Lean proof file
-./lean/.lake/build/bin/cerblean_genproof program_stripped.json lean/CerbLean/Verification/Programs/MyProgram.lean
-```
-
-The GenProof tool automatically generates proper namespaces from paths containing "CerbLean/" (e.g., `CerbLean.Verification.Programs.MyProgram`).
-
-### JSON Stripping
-
-The `strip_core_json.py` script removes unused stdlib functions and impl definitions from Core JSON, dramatically reducing file size and proof complexity.
-
-```bash
-# Basic stripping (removes unused functions)
-python3 scripts/strip_core_json.py input.json output.json
-
-# Aggressive stripping (also removes location info, descriptions)
-python3 scripts/strip_core_json.py --aggressive input.json output.json
-
-# Show what was removed
-python3 scripts/strip_core_json.py -v input.json output.json
-```
-
-**Size reduction example:**
-- Original JSON (with libc): ~200MB
-- After stripping: ~40KB (for simple programs)
-- With `--nolibc`: ~2MB → ~20KB
-
-The stripper performs dependency analysis to keep only functions reachable from `main`, making the resulting Lean AST much more manageable for `native_decide` proofs.
-
-### Limitations
-
-- **`native_decide` only works for concrete programs**: Programs with no inputs can be fully evaluated at compile time. Programs with parameters or preconditions require symbolic reasoning.
-- **Proof complexity**: Large programs may cause `native_decide` to time out or run out of memory.
-- **Aristotle integration**: For complex proofs, the Aristotle theorem prover can fill `sorry` statements automatically.
-
-### Testing the Pipeline
-
-```bash
-# CI test: verify genproof pipeline works
-make test-genproof
-
-# Quick test on a single file
-./scripts/test_genproof.sh tests/minimal/001-return-literal.c --nolibc -v
-```
+MCP server: https://github.com/septract/lean-aristotle-mcp
 
 ## Development Notes
 
-### ⚠️ MOST IMPORTANT RULE IN THIS FILE ⚠️
-
-### ABSOLUTE RULE: Fail, Never Guess
+### ⚠️ ABSOLUTE RULE: Fail, Never Guess
 
 **It is ALWAYS better to fail than to be incorrect. NEVER approximate. NEVER guess. NEVER add fall-through cases. This is the single most important rule in this codebase.**
 
-This applies to EVERYTHING: parser, interpreter, type checker, memory model, all code in this project. No exceptions. No "reasonable" shortcuts.
+This applies to EVERYTHING: parser, interpreter, type checker, memory model. No exceptions.
 
-**The rule is simple**: If the code doesn't know the correct answer, it MUST fail. Returning a wrong answer - even one that "might work" or "seems reasonable" - is absolutely forbidden.
+**The rule is simple**: If the code doesn't know the correct answer, it MUST fail. Returning a wrong answer - even one that "might work" - is absolutely forbidden.
 
 ```lean
 -- ❌ FORBIDDEN: fall-through / catch-all cases
 | _ => someValue
 | _, _ => defaultResult
-| _ => pure anything
 
 -- ❌ FORBIDDEN: guessing when information is missing
 | none => assumedDefault
-| [] => likelyValue
 
 -- ❌ FORBIDDEN: .getD with default values (VERY COMMON VIOLATION)
-pe.ty.map convertType |>.getD .unit   -- NO! This silently defaults to unit
+pe.ty.map convertType |>.getD .unit   -- NO! Silently defaults to unit
 option.getD defaultValue              -- NO! Propagate the none instead
-
--- ❌ FORBIDDEN: "reasonable" approximations
--- "most types are probably int" → NO
--- "this is usually true" → NO
--- "we can assume X" → NO
--- "let's simplify by defaulting to Y" → NO
 ```
 
-**Particularly dangerous pattern - `.getD`**: The pattern `something.getD defaultValue` looks like reasonable Option handling but is actually silently swallowing missing information. If you don't have the value, FAIL - don't substitute a default. This pattern has caused 15+ violations in a single audit.
-
-**Particularly dangerous default - `.unit`**: Using `.unit` as a default type is especially insidious because it's a valid type that doesn't look obviously wrong. Code like `|>.getD .unit` or `| _ => .unit` compiles fine and may even pass some tests, but it silently corrupts type information. The same applies to using `Int` as a default SMT sort, `true`/`false` as default booleans, or `[]` as a default list.
+**Dangerous patterns**: `.getD` silently swallows missing information (caused 15+ violations in one audit). Using `.unit` as a default type is especially insidious - it compiles fine but corrupts type information. Same for `Int` as default SMT sort, `true`/`false` as default booleans, `[]` as default lists.
 
 The ONLY acceptable behavior when the correct answer is unknown:
 ```lean
--- ✓ Fail explicitly
 | _ => throw "unhandled case: ..."
 | _ => .error "unexpected: ..."
 | _ => throw "not yet implemented: ..."  -- for incomplete implementations
@@ -652,238 +283,93 @@ The ONLY acceptable behavior when the correct answer is unknown:
 | _ => panic! "impossible case" -- if truly impossible
 ```
 
-**This also applies to incomplete implementations**: Our implementation may not cover everything CN or Cerberus does yet. When you encounter a case we haven't implemented, you MUST fail explicitly - not guess, not approximate, not "handle it for now." Unimplemented functionality must error with a clear message like `throw "not yet implemented: X"`. This ensures we know exactly what's missing rather than having hidden gaps that silently produce wrong results.
+**Incomplete implementations** MUST fail explicitly with `throw "not yet implemented: X"`, not guess.
 
-**Why this matters**: This project implements formal semantics. A wrong answer that happens to work sometimes is **infinitely worse** than a clear failure. Wrong answers:
-- Hide bugs (tests pass but behavior is incorrect)
-- Are nearly impossible to debug (no error points to the problem)
-- Compound silently (one wrong guess feeds into another)
-- Undermine the entire purpose of formal verification
+**Why this matters**: This project implements formal semantics. Wrong answers hide bugs, are nearly impossible to debug, compound silently, and undermine the entire purpose of formal verification. A failure is immediately visible and fixable; an incorrect result can hide for months.
 
-A failure is immediately visible, debuggable, and fixable. An incorrect result can hide for months.
+**If you find yourself writing `| _ =>` that returns a value (not an error), STOP.** See `docs/2026-02-01_CN_ANTIPATTERN_AUDIT.md` for 48 violations found in one audit.
 
-**Common rationalizations that are ALL WRONG**:
-- "This handles edge cases gracefully" → Incorrect output is not graceful
-- "This simplifies the code" → Correctness over brevity, always
-- "This case probably can't happen" → Then fail if it does
-- "This is a reasonable default" → There are no reasonable defaults
-- "The user/caller probably meant X" → If ambiguous, fail
-- "We can refine this later" → No, fail now, fix properly later
-- "This makes the code more robust" → Silent incorrectness is not robustness
-- "This is just a fallback" → Fallbacks that guess are forbidden
-- "I'll handle this for now until it's implemented" → No, throw "not yet implemented"
-- "This covers the gap in our implementation" → Gaps must error, not guess
+#### Never Silently Swallow Errors
 
-**Red flag phrases in comments** - If you write any of these, you are about to violate the rule:
-- `-- For simplicity` → You're about to simplify away correctness
-- `-- For now` → You're about to add a temporary hack that guesses
-- `-- Simplified` → You're about to lose precision
-- `-- Fallback` → You're about to guess when you don't know
-- `-- Pragmatic` / `-- Approximation` → You're about to be wrong
-- `-- Sound for verification` → You're about to silently pick one case
-- `-- Default to X` → You're about to guess X
-- `-- TODO` with non-failing code → You're leaving a hidden gap
-- `-- CN would fail here` with non-failing code → You MUST fail too!
-
-**If you find yourself writing `| _ =>` or `| _, _ =>` that returns a value (not an error), STOP. You are about to violate the most important rule in this codebase.**
-
-**See also**: `docs/2026-02-01_CN_ANTIPATTERN_AUDIT.md` documents 48 violations of this rule found in a single audit. Learn from these mistakes.
-
----
-
-### ABSOLUTE RULE: NEVER Silently Swallow Errors
-
-**(This is a specific instance of "Fail, Never Guess" above - read that section first.)**
-
-**NEVER EVER catch an error and silently substitute a default value. NEVER. UNDER ANY CIRCUMSTANCES. This applies to the ENTIRE project - parser, interpreter, memory model, everything.**
-
-This is absolutely forbidden:
+Never catch an error and substitute a default value:
 ```lean
--- FORBIDDEN - NEVER DO THIS
+-- FORBIDDEN
 | .error _ => .ok Loc.unknown
 | .error _ => .ok defaultValue
 | .error _ => pure []
-match parse x with | .error _ => someDefault | .ok v => v
 ```
 
-The ONLY acceptable use of error catching is for local control flow where you have an alternative strategy that still propagates errors:
+The ONLY acceptable error catching is trying alternative strategies that still propagate errors:
 ```lean
--- OK: trying alternative strategies, error still propagates
 match parseFormatA x with
 | .ok v => .ok v
-| .error _ => parseFormatB x  -- still returns Except, error propagates
+| .error _ => parseFormatB x  -- still returns Except
 ```
 
-If something fails, the error MUST propagate. Period. No exceptions. No "reasonable defaults." No "it's just a location, it doesn't matter." No "this field is optional so we'll just use empty." NOTHING.
+We discovered the parser was completely broken for structured locations but all tests passed because errors silently became `Loc.unknown`.
 
-Silent error swallowing hides bugs. We discovered the parser was completely broken for structured locations but all tests passed because errors silently became `Loc.unknown`. This is unacceptable.
+---
 
 ### CRITICAL: Never Undo Changes Without Permission
-**NEVER revert, undo, or `git checkout` any changes without explicit user confirmation.** Even if you think a change caused a problem, ASK FIRST before reverting. The user may have made intentional changes you're not aware of.
+**NEVER revert, undo, or `git checkout` any changes without explicit user confirmation.**
 
 ### CRITICAL: Never Commit Without Running Tests
-**NEVER commit changes without first running `make test`.** This ensures the build succeeds and all tests pass. A commit that breaks tests is unacceptable.
+**NEVER commit changes without first running `make test`.**
 
 ### ABSOLUTE RULE: NEVER Modify Tests to Achieve a Pass
 
-**(This is related to "Fail, Never Guess" - modifying tests to pass is another form of hiding incorrectness.)**
+**NEVER modify, weaken, or remove a test to make it pass.** Fix the implementation instead.
 
-**NEVER modify, weaken, or remove a test in order to make it pass. NEVER. UNDER ANY CIRCUMSTANCES.**
-
-Tests are targets that define expected behavior. If a test fails:
-- Fix the implementation to make the test pass
-- Do NOT change the test to match broken implementation
-- Do NOT mark a test as "trusted" or "expected fail" just to avoid fixing the real issue
-- Do NOT delete a test because it's inconvenient
-
-The ONLY acceptable reasons to modify a test are:
+The ONLY acceptable reasons to modify a test:
 1. The test itself has a bug (wrong expected behavior)
 2. Requirements have genuinely changed (confirmed by user)
 3. Adding MORE coverage to an existing test
 
-If you're tempted to weaken a test, STOP and fix the actual problem instead.
-
 ### ABSOLUTE RULE: Backwards Compatibility is an Anti-Goal
 
-**Backwards compatibility with previous versions of our own code is an ANTI-GOAL. We NEVER want to preserve previous behavior if it does not match Cerberus or CN. It does not matter if this breaks tests.**
-
-The ONLY source of truth is Cerberus and CN. If our implementation diverges from Cerberus/CN, the implementation is WRONG and must be fixed, even if:
-- It breaks existing tests (fix the tests to match Cerberus/CN)
-- It changes observable behavior (the old behavior was wrong)
-- It invalidates previous proofs (they were proving the wrong thing)
-- It requires large-scale refactoring (correctness is non-negotiable)
-
-**Do NOT**:
-- Preserve a bug because "it's what we've always done"
-- Keep incorrect behavior because fixing it would break things
-- Add compatibility shims between old and new behavior
-- Hesitate to change tests when Cerberus/CN says they were wrong
-
-**When you discover our implementation doesn't match Cerberus/CN**: Fix it immediately. Update tests to reflect the correct behavior. There is no "deprecation period" for incorrect semantics.
+**Backwards compatibility with previous versions of our own code is an ANTI-GOAL.** The ONLY source of truth is Cerberus and CN. If our implementation diverges, it is WRONG and must be fixed, even if it breaks tests, changes behavior, or invalidates proofs. Fix it immediately. There is no "deprecation period" for incorrect semantics.
 
 ### Always Use Build Targets for Testing
-**Always use Makefile targets** (e.g., `make test`, `make test-cn`) rather than invoking test binaries directly. Build targets ensure proper dependencies are built first and use the correct invocation.
-
-### Aristotle-Generated Proofs
-[Aristotle](https://aristotle.harmonic.fun) is a proof AI that can automatically generate Lean 4 proofs. When using Aristotle to generate proofs, always add a comment at the start of the proof block indicating:
-1. That the proof was generated by Aristotle
-2. The project ID for traceability
-
-Example:
-```lean
-theorem my_theorem : P := by
-  -- Proof generated by Aristotle (project: cf869c1a-b686-4f52-8389-f70b841a907c)
-  induction x with
-  | ... => ...
-```
-
-This allows us to trace proofs back to their source and regenerate them if needed.
-
-MCP server for Claude Code integration: https://github.com/septract/lean-aristotle-mcp
+**Always use Makefile targets** (`make test`, `make test-cn`, etc.) rather than invoking test binaries directly.
 
 ### Shell Commands
-**IMPORTANT**: Do NOT use `sed`, `awk`, `tr`, or similar shell string manipulation tools for ad-hoc text processing. These commands are error-prone and often fail silently or produce unexpected results across different platforms.
-
-**CRITICAL**: NEVER use `sed -n 'X,Yp'` or similar to read file contents. ALWAYS use the Read tool to read files. The Read tool is reliable and works consistently.
-
-If string manipulation is needed:
-- Write a proper Lean program to do the transformation
-- Or wrap the shell commands in a well-designed, tested shell script in `scripts/`
-
-Always run long-running commands in the background, and work on other tasks. Do not wait for a task unless it is blocking further progress.
+Do NOT use `sed`, `awk`, `tr` for ad-hoc text processing. NEVER use `sed -n 'X,Yp'` to read files - use the Read tool. Run long-running commands in the background.
 
 ### Git Commits and the Sandbox
 
-The sandbox prevents creating temp files in most locations, which breaks heredoc syntax (`$(cat <<'EOF' ... EOF)`). **Use regular double-quoted strings for commit messages** (with escaped inner quotes if needed), not heredocs.
+**Use regular double-quoted strings for commit messages**, not heredocs (sandbox breaks `$(cat <<'EOF')`).
 
-For submodule commits: always `cd` into the submodule directory, commit there, **push the submodule first**, then `cd` back to the parent repo and commit/push the submodule reference update.
+For submodule commits: `cd` into submodule, commit, **push submodule first**, then commit/push parent reference.
 
 ### Building
 
-Use the top-level Makefile:
 ```bash
 make lean             # Build Lean project
-make cerberus         # Build Cerberus (requires opam environment)
+make cerberus         # Build Cerberus (NOT 'dune build' - avoids z3/coq deps)
 make clean            # Clean all build artifacts
-
-# Testing (no Cerberus required)
-make test-unit        # Run all unit tests (parser smoke + memory)
-make test-memory      # Run memory model unit tests only
-
-# Testing (requires Cerberus)
+make test-unit        # Unit tests (no Cerberus required)
+make test-memory      # Memory model unit tests only
 make test             # Quick tests: unit + 100 parser + 100 PP files
-make test-parser-full # Full parser test suite (~5500 files, ~12 min)
+make test-parser-full # Full parser test (~5500 files, ~12 min)
 make test-pp-full     # Full pretty-printer test (all CI files)
-```
-
-See `docs/2025-12-31_TESTING.md` for full testing documentation.
-
-Or build individually:
-```bash
-# Cerberus - use 'make cerberus', NOT 'dune build' (avoids z3/coq deps)
-cd cerberus && make cerberus
-
-# Lean
-cd lean && lake build
 ```
 
 ### Docker
 
-A Docker image is available that bundles Cerberus and the Lean interpreter.
-
-**Using the published image:**
 ```bash
-# Pull from GitHub Container Registry
 docker pull ghcr.io/septract/lean-c-semantics:main
-
-# Run on a C file (mount current directory)
-docker run --rm -v "$(pwd):$(pwd)" -w "$(pwd)" ghcr.io/septract/lean-c-semantics:main program.c
-
-# Recommended: create an alias for convenience
 alias cerblean='docker run --rm -v "$(pwd):$(pwd)" -w "$(pwd)" ghcr.io/septract/lean-c-semantics:main'
-cerblean program.c
-```
-
-**Container options:**
-```bash
 cerblean program.c              # Execute with Lean interpreter
-cerblean --batch program.c      # Machine-readable output (for scripts)
-cerblean --cerberus program.c   # Run Cerberus only (for comparison)
+cerblean --batch program.c      # Machine-readable output
+cerblean --cerberus program.c   # Run Cerberus only
 cerblean --json program.c       # Output Core IR as JSON
-cerblean --nolibc program.c     # Skip libc (faster, but limited)
-cerblean --help                 # Show all options
+cerblean --nolibc program.c     # Skip libc (faster)
+docker build -t cerblean .      # Build locally
 ```
-
-**Building locally:**
-```bash
-docker build -t cerblean .
-docker run --rm -v "$(pwd):$(pwd)" -w "$(pwd)" cerblean program.c
-```
-
-**Layer caching:** The Dockerfile is optimized for incremental rebuilds:
-- Lean toolchain download is cached unless `lean-toolchain` changes
-- Cerberus opam dependencies are cached unless `*.opam` files change
-- Source changes only trigger rebuilds, not dependency re-downloads
-
-**CI/CD:** The `.github/workflows/docker.yml` workflow:
-- Builds and pushes to GHCR on pushes to `main`
-- Creates versioned tags on `v*` releases (e.g., `v0.1.0` → `:0.1.0`, `:0.1`)
-- PRs only build (no push) to validate the Dockerfile
 
 ## Documentation
 
-**Note:** Documentation may be out of date. The date prefix indicates when the document was created - consider this when reading older docs as the codebase may have evolved since then.
-
-### Naming Convention
-All documentation files in `docs/` should use date-prefixed names:
-```
-YYYY-MM-DD_title.md
-```
-Examples:
-- `2026-01-16_TODO_AUDIT.md`
-- `2026-01-02_FULL_TEST_RESULTS.md`
-
-This ensures documents are chronologically ordered and clearly dated.
+Docs may be out of date - the date prefix indicates creation date. All docs use `YYYY-MM-DD_title.md` format.
 
 ## References
 - [Cerberus Project](https://github.com/rems-project/cerberus)
