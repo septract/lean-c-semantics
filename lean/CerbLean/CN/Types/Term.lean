@@ -331,26 +331,110 @@ Following CN convention, IndexTerms.t is the annotated term type.
     Corresponds to: IndexTerms.t in indexTerms.ml line 11 -/
 abbrev IndexTerm := AnnotTerm
 
+/-! ## Free Variable Collection
+
+Collect free variable symbol IDs from terms.
+Corresponds to: IT.free_vars in cn/lib/indexTerms.ml
+-/
+
+mutual
+
+/-- Collect free variable symbol IDs from a term.
+    Corresponds to: IT.free_vars in indexTerms.ml -/
+partial def Term.freeVarIds (t : Term) : List Nat :=
+  match t with
+  | .const _ => []
+  | .sym s => [s.id]
+  | .unop _ arg => arg.freeVarIds
+  | .binop _ l r => l.freeVarIds ++ r.freeVarIds
+  | .ite c t e => c.freeVarIds ++ t.freeVarIds ++ e.freeVarIds
+  | .eachI _ (s, _) _ body =>
+    body.freeVarIds.filter (· != s.id)
+  | .tuple elems => elems.flatMap (·.freeVarIds)
+  | .nthTuple _ tup => tup.freeVarIds
+  | .struct_ _ members => members.flatMap fun (_, t) => t.freeVarIds
+  | .structMember obj _ => obj.freeVarIds
+  | .structUpdate obj _ value => obj.freeVarIds ++ value.freeVarIds
+  | .record members => members.flatMap fun (_, t) => t.freeVarIds
+  | .recordMember obj _ => obj.freeVarIds
+  | .recordUpdate obj _ value => obj.freeVarIds ++ value.freeVarIds
+  | .constructor _ args => args.flatMap fun (_, t) => t.freeVarIds
+  | .memberShift ptr _ _ => ptr.freeVarIds
+  | .arrayShift base _ idx => base.freeVarIds ++ idx.freeVarIds
+  | .copyAllocId addr loc => addr.freeVarIds ++ loc.freeVarIds
+  | .hasAllocId ptr => ptr.freeVarIds
+  | .sizeOf _ => []
+  | .offsetOf _ _ => []
+  | .nil _ => []
+  | .cons head tail => head.freeVarIds ++ tail.freeVarIds
+  | .head list => list.freeVarIds
+  | .tail list => list.freeVarIds
+  | .representable _ value => value.freeVarIds
+  | .good _ value => value.freeVarIds
+  | .aligned ptr align => ptr.freeVarIds ++ align.freeVarIds
+  | .wrapI _ value => value.freeVarIds
+  | .mapConst _ value => value.freeVarIds
+  | .mapSet m k v => m.freeVarIds ++ k.freeVarIds ++ v.freeVarIds
+  | .mapGet m k => m.freeVarIds ++ k.freeVarIds
+  | .mapDef (s, _) body =>
+    body.freeVarIds.filter (· != s.id)
+  | .apply _ args => args.flatMap (·.freeVarIds)
+  | .let_ var binding body =>
+    binding.freeVarIds ++ body.freeVarIds.filter (· != var.id)
+  | .match_ scrutinee cases =>
+    scrutinee.freeVarIds ++ cases.flatMap fun (_, t) => t.freeVarIds
+  | .cast _ value => value.freeVarIds
+  | .cnNone _ => []
+  | .cnSome value => value.freeVarIds
+  | .isSome opt => opt.freeVarIds
+  | .getOpt opt => opt.freeVarIds
+
+/-- Collect free variable symbol IDs from an annotated term.
+    Corresponds to: IT.free_vars on annot in indexTerms.ml -/
+partial def AnnotTerm.freeVarIds (at_ : AnnotTerm) : List Nat :=
+  match at_ with
+  | .mk t _ _ => t.freeVarIds
+
+end
+
 /-! ## Term Substitution
 
 Substitution replaces occurrences of a symbol with a term.
 Corresponds to: IT.subst and IT.make_subst in cn/lib/indexTerms.ml
 
 Audited: 2026-01-27 against cn/lib/indexTerms.ml
+Updated: 2026-02-18 — added alpha-renaming for binding forms
 -/
 
 /-- Substitution: maps symbols to replacement terms.
-    Corresponds to: Subst.t in indexTerms.ml -/
+    Corresponds to: Subst.t in indexTerms.ml
+    The `relevant` field contains all symbol IDs that appear in the substitution
+    (domain symbol IDs ∪ free variable IDs of range terms), used for
+    capture-avoidance during alpha-renaming.
+    Corresponds to: Subst.relevant in cn/lib/subst.ml -/
 structure Subst where
   /-- Mapping from symbol IDs to replacement terms -/
   mapping : List (Nat × IndexTerm)
+  /-- All relevant symbol IDs (domain ∪ free vars of range terms).
+      Corresponds to: Subst.relevant in cn/lib/subst.ml lines 17-23 -/
+  relevant : List Nat
   deriving Inhabited
 
 namespace Subst
 
+/-- Compute the relevant symbol IDs for a substitution mapping.
+    Corresponds to: Subst.make in cn/lib/subst.ml lines 16-23 -/
+private def computeRelevant (mapping : List (Nat × IndexTerm)) : List Nat :=
+  mapping.flatMap fun (id, term) => id :: term.freeVarIds
+
 /-- Create a substitution from a single symbol → term mapping -/
 def single (s : Sym) (t : IndexTerm) : Subst :=
-  { mapping := [(s.id, t)] }
+  let mapping := [(s.id, t)]
+  { mapping, relevant := computeRelevant mapping }
+
+/-- Create a substitution from a list of (symbol ID, term) pairs -/
+def fromMapping (mapping : List (Nat × IndexTerm)) : Subst :=
+  { mapping, relevant := computeRelevant mapping }
 
 /-- Look up a symbol in the substitution -/
 def lookup (subst : Subst) (s : Sym) : Option IndexTerm :=
@@ -358,7 +442,55 @@ def lookup (subst : Subst) (s : Sym) : Option IndexTerm :=
 
 end Subst
 
+/-! ## Alpha-Renaming
+
+Capture-avoiding substitution requires alpha-renaming bound variables
+that conflict with the substitution.
+Corresponds to: IT.suitably_alpha_rename in cn/lib/indexTerms.ml lines 351-355
+-/
+
+/-- Create a fresh symbol based on an existing one, with an ID not in the given set.
+    Corresponds to: Sym.fresh_same in cn/lib/sym.ml line 50 -/
+private def freshSymFor (s : Sym) (relevantIds : List Nat) : Sym :=
+  let maxId := relevantIds.foldl (fun acc id => max acc id) s.id
+  { s with id := maxId + 1 }
+
+/-- Create a rename-only substitution: replaces `from` with `to_` (as a variable).
+    Corresponds to: IT.make_rename in cn/lib/indexTerms.ml line 271 -/
+private def makeRename (from_ to_ : Sym) (loc : Loc) (bt : BaseType) : Subst :=
+  Subst.single from_ (AnnotTerm.mk (.sym to_) bt loc)
+
 mutual
+
+/-- Alpha-rename a bound variable if it conflicts with the substitution.
+    Returns (possibly-renamed symbol, possibly-renamed body).
+    Corresponds to: IT.suitably_alpha_rename in indexTerms.ml lines 351-355 -/
+partial def suitablyAlphaRename (relevant : List Nat) (s : Sym) (body : AnnotTerm)
+    : Sym × AnnotTerm :=
+  if relevant.contains s.id then
+    -- Bound variable conflicts with substitution — alpha-rename
+    -- Corresponds to: IT.alpha_rename in indexTerms.ml lines 346-348
+    let s' := freshSymFor s relevant
+    let renameSubst := makeRename s s' body.loc body.bt
+    (s', body.subst renameSubst)
+  else
+    (s, body)
+
+/-- Alpha-rename pattern-bound variables that conflict with the substitution.
+    Corresponds to: IT.suitably_alpha_rename_pattern in indexTerms.ml lines 363-378 -/
+partial def suitablyAlphaRenamePattern (relevant : List Nat) (pat : Pattern) (body : AnnotTerm)
+    : Pattern × AnnotTerm :=
+  match pat with
+  | .mk (.sym s) bt loc =>
+    let (s', body') := suitablyAlphaRename relevant s body
+    (.mk (.sym s') bt loc, body')
+  | .mk .wild _ _ => (pat, body)
+  | .mk (.constructor constr args) bt loc =>
+    let (body', args') := args.foldl (fun (body, acc) (id, pat') =>
+      let (pat'', body') := suitablyAlphaRenamePattern relevant pat' body
+      (body', acc ++ [(id, pat'')])
+    ) (body, [])
+    (.mk (.constructor constr args') bt loc, body')
 
 /-- Substitute in a term.
     Corresponds to: IT.subst in indexTerms.ml -/
@@ -372,7 +504,10 @@ partial def Term.subst (σ : Subst) (t : Term) : Term :=
   | .unop op arg => .unop op (arg.subst σ)
   | .binop op l r => .binop op (l.subst σ) (r.subst σ)
   | .ite c t e => .ite (c.subst σ) (t.subst σ) (e.subst σ)
-  | .eachI lo v hi body => .eachI lo v hi (body.subst σ)
+  | .eachI lo (s, sBt) hi body =>
+    -- Corresponds to: indexTerms.ml lines 295-297
+    let (s', body') := suitablyAlphaRename σ.relevant s body
+    .eachI lo (s', sBt) hi (body'.subst σ)
   | .tuple elems => .tuple (elems.map (·.subst σ))
   | .nthTuple n tup => .nthTuple n (tup.subst σ)
   | .struct_ tag members => .struct_ tag (members.map fun (id, t) => (id, t.subst σ))
@@ -399,10 +534,20 @@ partial def Term.subst (σ : Subst) (t : Term) : Term :=
   | .mapConst keyTy value => .mapConst keyTy (value.subst σ)
   | .mapSet m k v => .mapSet (m.subst σ) (k.subst σ) (v.subst σ)
   | .mapGet m k => .mapGet (m.subst σ) (k.subst σ)
-  | .mapDef var body => .mapDef var (body.subst σ)
+  | .mapDef (s, abt) body =>
+    -- Corresponds to: indexTerms.ml lines 326-328
+    let (s', body') := suitablyAlphaRename σ.relevant s body
+    .mapDef (s', abt) (body'.subst σ)
   | .apply fn args => .apply fn (args.map (·.subst σ))
-  | .let_ var binding body => .let_ var (binding.subst σ) (body.subst σ)
-  | .match_ scrutinee cases => .match_ (scrutinee.subst σ) (cases.map fun (p, t) => (p, t.subst σ))
+  | .let_ var binding body =>
+    -- Corresponds to: indexTerms.ml lines 330-332
+    let (var', body') := suitablyAlphaRename σ.relevant var body
+    .let_ var' (binding.subst σ) (body'.subst σ)
+  | .match_ scrutinee cases =>
+    -- Corresponds to: indexTerms.ml lines 333-336
+    .match_ (scrutinee.subst σ) (cases.map fun (p, t) =>
+      let (p', t') := suitablyAlphaRenamePattern σ.relevant p t
+      (p', t'.subst σ))
   | .cast targetTy value => .cast targetTy (value.subst σ)
   | .cnNone bt => .cnNone bt
   | .cnSome value => .cnSome (value.subst σ)

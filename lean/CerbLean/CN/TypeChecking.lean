@@ -31,6 +31,8 @@
 -/
 
 import CerbLean.CN.TypeChecking.Context
+import CerbLean.CN.TypeChecking.Simplify
+import CerbLean.CN.TypeChecking.DerivedConstraints
 import CerbLean.CN.TypeChecking.Monad
 import CerbLean.CN.TypeChecking.Inference
 import CerbLean.CN.TypeChecking.Pexpr

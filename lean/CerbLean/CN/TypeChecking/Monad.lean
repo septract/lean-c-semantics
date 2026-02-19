@@ -16,6 +16,8 @@
 -/
 
 import CerbLean.CN.TypeChecking.Context
+import CerbLean.CN.TypeChecking.Simplify
+import CerbLean.CN.TypeChecking.DerivedConstraints
 import CerbLean.CN.Types
 import CerbLean.CN.Verification.Obligation
 import CerbLean.CN.Verification.SmtLib
@@ -377,6 +379,9 @@ inductive Provable where
 
     Corresponds to: Solver.provable in solver.ml:1367-1404 -/
 def provable (lc : LogicalConstraint) : TypingM Provable := do
+  -- Simplify constraint before checking (CN does this in solver.ml via simplify)
+  -- CN ref: solver.ml:1375-1376 (simplify before provable query)
+  let lc := Simplify.simplifyConstraint lc
   -- Quick syntactic checks (CN does these too)
   match lc with
   | .t t =>
@@ -487,10 +492,21 @@ def lookupTag (tag : Sym) : TypingM (Option TagDef) := do
   let s ← getState
   return s.tagDefs.find? (·.1 == tag) |>.map (·.2.2)
 
-/-- Add a resource
-    Corresponds to: add_r in typing.ml -/
+/-- Add a resource with derived constraints (pointer_facts).
+    Corresponds to: add_r in typing.ml + pointer_facts in resource.ml:67-71.
+    When a resource is added, CN derives logical constraints:
+    - Single-resource: hasAllocId, address range no-overflow
+    - Pairwise: non-overlap with all existing Owned resources (SEPARATION)
+    Audited: 2026-02-18 -/
 def addR (r : Resource) : TypingM Unit := do
+  let ctx ← getContext
+  let existingResources := ctx.resources
   modifyContext (Context.addR r)
+  -- Derive and add pointer_facts constraints
+  -- CN ref: typing.ml:415-427 (add_r calls pointer_facts then add_cs)
+  let derivedLcs := DerivedConstraints.deriveConstraints r existingResources
+  for lc in derivedLcs do
+    addC lc
 
 /-- Get all resources
     Corresponds to: all_resources in typing.ml -/
