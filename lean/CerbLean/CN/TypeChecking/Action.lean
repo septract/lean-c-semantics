@@ -258,10 +258,19 @@ def handleKill (kind : KillKind) (ptrPe : APexpr) (loc : Core.Loc)
       -- Resource consumed successfully
       return mkUnitTerm loc
     | none =>
-      -- No resource found - this is an error.
-      -- CN requires the resource to exist for kill actions.
-      -- Attempting to kill non-existent memory is a verification failure.
-      TypingM.fail (.other s!"Kill: no Owned resource found for pointer (possible double-free or use-after-free)")
+      -- No resource found.
+      -- Fallback: if this is a kill of a parameter stack slot (lazy muCore),
+      -- silently succeed. CN's muCore doesn't include param slot kills in the
+      -- callee — the caller manages them. This fallback only fires when no
+      -- Owned resource exists, avoiding false positives.
+      match ptr.term with
+      | .sym s =>
+        if ← TypingM.isParamStackSlot s.id then
+          return mkUnitTerm loc
+        else
+          TypingM.fail (.other s!"Kill: no Owned resource found for pointer (possible double-free or use-after-free)")
+      | _ =>
+        TypingM.fail (.other s!"Kill: no Owned resource found for pointer (possible double-free or use-after-free)")
 
 /-- Handle store action: write to memory.
     Consumes Owned<T>(Uninit) or Owned<T>(Init), produces Owned<T>(Init) with the stored value.
@@ -357,9 +366,24 @@ def handleStore (_locking : Bool) (tyPe : APexpr) (ptrPe : APexpr) (valPe : APex
         addResourceWithUnfold resource
       return mkUnitTerm loc
     | none =>
-      -- No matching resource found
-      let ctx ← TypingM.getContext
-      TypingM.fail (.missingResource (.p uninitPred) ctx)
+      -- No matching resource found.
+      -- Fallback: if this is a store to a parameter stack slot (lazy muCore),
+      -- update the param value instead. CN's muCore eliminates these stores;
+      -- our lazy approach handles them here when no Owned resource exists.
+      -- This correctly avoids false positives: stores through pointer parameters
+      -- (e.g., *p = x) always find Owned resources from the spec first.
+      match ptr.term with
+      | .sym s =>
+        if ← TypingM.isParamStackSlot s.id then
+          if !storeIsUnspecified then
+            TypingM.addParamValue s.id val
+          return mkUnitTerm loc
+        else
+          let ctx ← TypingM.getContext
+          TypingM.fail (.missingResource (.p uninitPred) ctx)
+      | _ =>
+        let ctx ← TypingM.getContext
+        TypingM.fail (.missingResource (.p uninitPred) ctx)
 
 /-- Handle load action: read from memory.
     Consumes Owned<T>(Init), produces it back, returns the loaded value.
@@ -513,9 +537,72 @@ def checkAction (pact : Paction) : TypingM IndexTerm := do
   | .compareExchangeWeak _ty _ptr _expected _desired _successOrd _failOrd =>
     TypingM.fail (.other s!"CompareExchangeWeak not yet supported at {repr loc}")
 
-  -- Sequential RMW (for BMC)
-  | .seqRmw _isUpdate _ty _ptr _sym _val =>
-    TypingM.fail (.other s!"SeqRMW not yet supported at {repr loc}")
+  -- Sequential RMW: atomic load + compute + store (pre/post-increment)
+  -- isUpdate=true: return NEW value (pre-increment ++i)
+  -- isUpdate=false: return OLD value (post-increment i++)
+  -- Corresponds to: core_reduction.lem:1214-1276
+  -- DIVERGES-FROM-CN: CN's core_to_mucore doesn't support SeqRMW (assert_error).
+  -- We implement it as load + eval + store since it's needed for C pre/post-increment.
+  -- Audited: 2026-02-19
+  | .seqRmw isUpdate tyPe ptrPe sym valPe =>
+    -- Step 1: Extract type and pointer
+    let ct ← extractCtype tyPe loc
+    let ptrRaw ← checkPexpr ptrPe
+    let ptr := simplifyPointerForResource ptrRaw
+
+    -- Check if this is a SeqRMW on a parameter stack slot (lazy muCore transformation).
+    -- In CN's muCore, SeqRMW doesn't exist (assert_error). For parameter slots,
+    -- we handle it by reading/updating the param value map instead of resources.
+    match ptr.term with
+    | .sym s =>
+      if ← TypingM.isParamStackSlot s.id then
+        -- Parameter slot SeqRMW: read old value from param map, compute new, update map
+        match ← TypingM.lookupParamValue s.id with
+        | some oldValue =>
+          -- Bind sym to old value and evaluate update expression
+          TypingM.addAValue sym oldValue loc "seqRmw param loaded value"
+          let newValue ← checkPexpr valPe
+          -- Representability check
+          let repLc := AnnotTerm.mk (.representable ct newValue) .bool loc
+          TypingM.requireConstraint (.t repLc) loc "SeqRMW value not representable in type"
+          -- Update param value
+          TypingM.addParamValue s.id newValue
+          -- Return old or new value
+          if isUpdate then return newValue else return oldValue
+        | none =>
+          TypingM.fail (.other s!"SeqRMW: parameter slot has no value")
+      else pure ()
+    | _ => pure ()
+
+    -- Step 2: Load - consume Owned<T>(Init), get old value
+    let loadPred : Predicate := {
+      name := .owned (some ct) .init
+      pointer := ptr
+      iargs := []
+    }
+    match ← predicateRequest loadPred with
+    | none =>
+      let ctx ← TypingM.getContext
+      TypingM.fail (.missingResource (.p loadPred) ctx)
+    | some (_, output) =>
+      let oldValue := output.value
+
+      -- Step 3: Bind sym to old value and evaluate update expression
+      TypingM.addAValue sym oldValue loc "seqRmw loaded value"
+      let newValue ← checkPexpr valPe
+
+      -- Step 4: Store - produce Owned<T>(Init) with new value
+      -- (The old Owned was consumed by the load above)
+      let repLc := AnnotTerm.mk (.representable ct newValue) .bool loc
+      TypingM.requireConstraint (.t repLc) loc "SeqRMW value not representable in type"
+      let resource := mkOwnedResource ct .init ptr newValue
+      addResourceWithUnfold resource
+
+      -- Step 5: Return old value (post-inc) or new value (pre-inc)
+      if isUpdate then
+        return newValue
+      else
+        return oldValue
 
 /-! ## CPS Version
 

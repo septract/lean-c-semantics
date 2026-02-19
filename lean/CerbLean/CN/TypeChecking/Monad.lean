@@ -587,11 +587,28 @@ def addParamValue (stackSlotId : Nat) (valueTerm : IndexTerm) : TypingM Unit := 
 
 /-- Look up a parameter value by stack slot symbol ID.
     Returns the value term if this is a known parameter stack slot.
+    If the entry is an alias (symbolic reference to another param slot),
+    follows the reference to get the current value. This handles the case
+    where a param value is updated (e.g., via `++i`) but alias entries
+    in the map still hold stale copies of the original symbolic reference.
     Corresponds to: looking up in C_vars and finding Value(sym, bt)
     in cn/lib/compile.ml line 1305 -/
 def lookupParamValue (stackSlotId : Nat) : TypingM (Option IndexTerm) := do
   let s ← getState
-  return s.paramValues.get? stackSlotId
+  match s.paramValues.get? stackSlotId with
+  | some v =>
+    -- If the value is a symbolic reference to a different param slot,
+    -- follow the reference to get the potentially-updated value.
+    -- This handles alias entries that weren't updated when the primary was.
+    match v.term with
+    | .sym refSym =>
+      if refSym.id != stackSlotId then
+        match s.paramValues.get? refSym.id with
+        | some primaryVal => return some primaryVal
+        | none => return some v
+      else return some v
+    | _ => return some v
+  | none => return none
 
 /-- Check if a symbol ID corresponds to a parameter stack slot -/
 def isParamStackSlot (symId : Nat) : TypingM Bool := do
