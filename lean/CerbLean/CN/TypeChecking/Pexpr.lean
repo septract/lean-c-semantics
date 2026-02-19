@@ -945,8 +945,46 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
         let t ← checkPexpr peArg (some resBt)
         return AnnotTerm.mk (.unop .bwCompl t) resBt loc
       | _ => TypingM.fail (.other "ivCOMPL requires exactly 2 arguments (ctype, arg)")
+    | .nil elemCoreBt =>
+      -- Cnil: empty list constructor
+      -- Corresponds to: Cnil in cn/lib/check.ml lines 554-563
+      -- Audited: 2026-02-19
+      -- CN gets item_bt from the expected type (must be List item_bt),
+      -- then checks Core base type annotation against it.
+      -- We derive the element type from expectedBt if available,
+      -- otherwise from the Core-level elemCoreBt annotation.
+      match args with
+      | [] =>
+        let elemBt ← match expectedBt with
+          | some (.list elemBt) => pure elemBt
+          | some other => TypingM.fail (.other s!"Cnil: expected list type, got {repr other}")
+          | none =>
+            -- Fall back to Core type annotation on the Nil constructor
+            match coreBaseTypeToCN elemCoreBt with
+            | some bt => pure bt
+            | none => TypingM.fail (.other s!"Cnil: cannot determine element type from Core annotation {repr elemCoreBt}")
+        return AnnotTerm.mk (.nil elemBt) (.list elemBt) loc
+      | _ => TypingM.fail (.other s!"Cnil: expected 0 arguments, got {args.length}")
+    | .cons =>
+      -- Ccons: list cons constructor
+      -- Corresponds to: Ccons in cn/lib/check.ml lines 571-576
+      -- Audited: 2026-02-19
+      -- CN checks both args, then returns cons_(vt1, vt2) where the
+      -- result type is get_bt vt2 (the tail's type, which is List elemBt).
+      match args with
+      | [headArg, tailArg] =>
+        let peHead : APexpr := ⟨[], none, headArg⟩
+        let peTail : APexpr := ⟨[], none, tailArg⟩
+        -- Check head first, then tail with list type hint
+        let tHead ← checkPexpr peHead
+        let tailExpected := expectedBt.orElse (fun _ => some (.list tHead.bt))
+        let tTail ← checkPexpr peTail tailExpected
+        -- Result type comes from the tail (List elemBt)
+        -- Corresponds to: cons_ (it, it') loc = IT (Cons (it, it'), get_bt it', loc)
+        return AnnotTerm.mk (.cons tHead tTail) tTail.bt loc
+      | _ => TypingM.fail (.other s!"Ccons: expected 2 arguments, got {args.length}")
     | _ =>
-      -- Other constructors (nil, cons, array, etc.) are not supported
+      -- Other constructors (array, etc.) are not supported
       -- Do not create symbolic terms - fail explicitly
       TypingM.fail (.other s!"Unsupported constructor in expression: {repr c}")
 
@@ -1106,6 +1144,31 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
           | _ => TypingM.fail (.other "params_nth: index is not a concrete integer")
         | none => TypingM.fail (.other "params_nth: first argument is not a concrete list")
       | _ => TypingM.fail (.other "params_nth: expected 2 arguments")
+    -- ctype_width: bit width of a C type (size_of_ctype * 8)
+    -- Corresponds to: check.ml lines 851-858 (PEcall "ctype_width")
+    -- Audited: 2026-02-19
+    -- CN evaluates the ctype argument, computes Memory.size_of_ctype * 8,
+    -- and returns as a num_lit_ at the expected bits type.
+    else if fnName == some "ctype_width" then
+      match args with
+      | [ctypeArg] =>
+        let peCt : APexpr := ⟨[], some .ctype, ctypeArg⟩
+        let tCt ← checkPexpr peCt (some .ctype)
+        match tCt.term with
+        | .const (.ctypeConst ct) =>
+          -- CN: Z.of_int (Memory.size_of_ctype ct * 8)
+          -- We use sizeOf to represent the byte size, then multiply by 8
+          -- However, CN evaluates this to a concrete integer. We represent
+          -- the width symbolically using sizeOf since we may not know the
+          -- concrete size at type-check time (e.g., structs).
+          -- Result type: CN uses Memory.size_bt = Bits(Unsigned, 64)
+          let resBt : BaseType := .bits .unsigned 64
+          -- Create: sizeOf(ct) * 8
+          let sizeOfTerm := AnnotTerm.mk (.sizeOf ct) resBt loc
+          let eight := AnnotTerm.mk (.const (.bits .unsigned 64 8)) resBt loc
+          return AnnotTerm.mk (.binop .mul sizeOfTerm eight) resBt loc
+        | _ => TypingM.fail (.other "ctype_width: argument is not a ctype constant")
+      | _ => TypingM.fail (.other s!"ctype_width: expected 1 argument, got {args.length}")
     else
       -- General function call
       let argTerms ← args.mapM fun arg => do
