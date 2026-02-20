@@ -24,6 +24,7 @@
   - Pexpr: pure expression to IndexTerm conversion
   - Action: memory action checking (create, kill, store, load)
   - Expr: effectful expression walking with resource tracking
+  - GhostStatement: CN ghost statement handlers (have, assert, split_case, etc.)
   - Check: top-level function verification
 
   Reference: CN paper "Verifying Systems C Code with Separation-Logic
@@ -38,6 +39,7 @@ import CerbLean.CN.TypeChecking.Inference
 import CerbLean.CN.TypeChecking.Pexpr
 import CerbLean.CN.TypeChecking.Action
 import CerbLean.CN.TypeChecking.Expr
+import CerbLean.CN.TypeChecking.GhostStatement
 import CerbLean.CN.TypeChecking.Check
 import CerbLean.CN.TypeChecking.Resolve
 import CerbLean.CN.TypeChecking.Params

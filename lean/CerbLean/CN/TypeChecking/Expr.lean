@@ -17,7 +17,10 @@
 import CerbLean.CN.TypeChecking.Pexpr
 import CerbLean.CN.TypeChecking.Action
 import CerbLean.CN.TypeChecking.Spine
+import CerbLean.CN.TypeChecking.GhostStatement
+import CerbLean.CN.TypeChecking.Resolve
 import CerbLean.CN.Types.ArgumentTypes
+import CerbLean.CN.Parser
 
 namespace CerbLean.CN.TypeChecking
 
@@ -262,12 +265,65 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
 
   -- Strong sequencing: e1 ; e2 (same as weak for sequential code)
   -- Corresponds to: Esseq case in check.ml lines 2288-2297
+  --
+  -- Ghost statement detection: CN's core_to_mucore.ml:535-593 detects ghost statements
+  -- when Esseq has (1) unit pattern, (2) Epure(Vunit) as e1, (3) cerb::magic annotations.
+  -- The magic attribute text contains the ghost statement (e.g., "cn_have(x == y)").
   | .sseq pat e1 e2 =>
-    checkExpr labels e1 fun v1 => do
-      let bindings ← bindPattern pat v1
-      checkExpr labels e2 fun result => do
-        unbindPattern bindings
-        k result
+    -- Check for ghost statement pattern
+    let magicTexts := e.annots.getCerbMagic
+    let isUnitPat := match pat.pat with | .base none .unit => true | _ => false
+    let isUnitExpr := match e1.expr with
+      | .pure pe => match pe.expr with | .val .unit => true | _ => false
+      | _ => false
+    if isUnitPat && isUnitExpr && !magicTexts.isEmpty then
+      -- Ghost statement: parse and process magic attributes
+      -- CN ref: core_to_mucore.ml:545-589 (cn_statements → Translate.statement)
+      --
+      -- Ghost statement expressions are parsed with placeholder symbols (id=0).
+      -- We resolve them against the current typing context, matching CN's
+      -- compile.ml:689-705 (cn_expr → lookup_computational_or_logical).
+      let ctx ← TypingM.getContext
+      let st ← TypingM.getState
+      -- Convert store map to list for resolve context
+      let storeList := st.storeValues.toList.map fun (id, val) => (id, val)
+      let resolveCtx := Resolve.resolveContextFromTypingContext ctx st.tagDefs st.freshCounter storeList
+      for magicText in magicTexts do
+        match CerbLean.CN.Parser.parseGhostStatements magicText with
+        | .ok stmts =>
+          for stmt in stmts do
+            -- Resolve placeholder symbols in the constraint term, then
+            -- substitute stored values for stack slot references
+            let resolvedConstraint ← match stmt.constraint with
+              | some c =>
+                match Resolve.resolveAnnotTerm resolveCtx c none with
+                | .ok resolved =>
+                  -- Replace stack slot sym references with stored values
+                  -- This is the ghost statement analog of ccall store resolution
+                  pure (some (Resolve.substStoreValues ctx storeList resolved))
+                | .error (.symbolNotFound name) =>
+                  TypingM.fail (.other s!"ghost statement: unresolved symbol '{name}'")
+                | .error (.integerTooLarge n) =>
+                  TypingM.fail (.other s!"ghost statement: integer too large: {n}")
+                | .error (.unknownPointeeType msg) =>
+                  TypingM.fail (.other s!"ghost statement: {msg}")
+                | .error (.other msg) =>
+                  TypingM.fail (.other s!"ghost statement resolution error: {msg}")
+              | none => pure none
+            processGhostStatementByName stmt.kind resolvedConstraint loc
+        | .error _ =>
+          -- If it doesn't parse as a ghost statement, it might be something else
+          -- (e.g., a function spec or loop spec) — skip silently
+          pure ()
+      -- Continue with e2 (ghost statement doesn't bind a value)
+      checkExpr labels e2 k
+    else
+      -- Normal strong sequencing
+      checkExpr labels e1 fun v1 => do
+        let bindings ← bindPattern pat v1
+        checkExpr labels e2 fun result => do
+          unbindPattern bindings
+          k result
 
   -- Let binding: let pat = pe in e2
   -- Corresponds to: Elet case in check.ml lines 2003-2017

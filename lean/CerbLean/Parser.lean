@@ -344,9 +344,32 @@ def parseAnnot (j : Json) : Except String Annot := do
     let n ← getInt j "id"
     .ok (.bmc (.id n.toNat))
   | "Aattrs" =>
-    -- Parse C2X attributes
-    -- For now, store empty attributes since we don't use the content for CN checking
-    .ok (.attrs .empty)
+    -- Parse C2X attributes (including cerb::magic for ghost statements)
+    -- JSON format: { "tag": "Aattrs", "attrs": [ { "ns": {loc,name}|null, "id": {loc,name}, "args": [{loc,text,extra_args}] } ] }
+    -- Corresponds to: json_attribute in cerberus/ocaml_frontend/pprinters/json_core.ml:178-193
+    let attrsArr ← getArr j "attrs"
+    let attrs ← attrsArr.toList.mapM fun attrJ => do
+      let ns ← match getFieldOpt attrJ "ns" with
+        | some nsJ =>
+          match nsJ with
+          | .null => pure none
+          | _ => do let name ← getStr nsJ "name"; pure (some name)
+        | none => pure none
+      let idJ ← getField attrJ "id"
+      let id ← getStr idJ "name"
+      let argsArr ← match getFieldOpt attrJ "args" with
+        | some argsJ => match argsJ.getArr? with
+          | .ok arr => pure arr
+          | .error _ => pure #[]
+        | none => pure #[]
+      let args ← argsArr.toList.mapM fun argJ => do
+        let loc ← match getFieldOpt argJ "loc" with
+          | some locJ => parseLoc locJ
+          | none => pure .unknown
+        let text ← getStr argJ "text"
+        pure { loc := loc, arg := text : AttrArg }
+      pure (Attribute.mk ns id args)
+    .ok (.attrs ⟨attrs⟩)
   | "Atypedef" =>
     let symJ ← getField j "symbol"
     let id ← getInt symJ "id"

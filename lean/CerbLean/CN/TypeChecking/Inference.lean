@@ -14,7 +14,7 @@
   When a struct resource is requested, it is repacked from field resources via
   Pack.packing_ft (pack.ml:52-92).
 
-  Audited: 2026-02-14 against cn/lib/resourceInference.ml + cn/lib/pack.ml
+  Audited: 2026-02-19 against cn/lib/resourceInference.ml + cn/lib/pack.ml
 -/
 
 import CerbLean.CN.TypeChecking.Monad
@@ -25,6 +25,13 @@ namespace CerbLean.CN.TypeChecking
 open CerbLean.Core (Sym Loc Identifier Ctype FieldDef TagDef)
 open CerbLean.CN.Types
 open CerbLean.CN.TypeChecking.Resolve (ctypeToOutputBaseType)
+
+/-- Compare base types for equality using their Repr representation.
+    BaseType does not derive BEq (it's recursive), so we compare via repr.
+    This is used only for QPredicate quantifier type matching.
+    Corresponds to: BaseTypes.equal in CN (baseTypes.ml). -/
+private def baseTypeReprEq (bt1 bt2 : BaseType) : Bool :=
+  toString (repr bt1) == toString (repr bt2)
 
 /-! ## Name Subsumption
 
@@ -168,11 +175,82 @@ def unpackStructResource (r : Resource) : TypingM (Option (List Resource)) := do
     | .pname _ => return none  -- Not Owned
   | .q _ => return none  -- Not a predicate resource
 
-/-- Add a resource to the context, unpacking struct resources.
+/-! ## Array Resource Unpacking
+
+Corresponds to: cn/lib/pack.ml lines 24-39 (unfolded_array) and lines 104-108
+(unpack_owned Array case).
+
+When a resource `Owned<T[N]>(p)` with value `v` is added to the context,
+CN automatically unpacks it into a QPredicate:
+  `each(i; 0 <= i && i < N) { Owned<T>(arrayShift(p, T, i)) }`
+with the output as a map from indices to values.
+-/
+
+/-- Unpack an array resource into a QPredicate.
+    Converts `Owned<array(T, N)>(init)(p)` with value `v` into:
+      `Q { name = Owned<T>(init), pointer = p, q = (i, uintptr_bt),
+           step = T, permission = (0 <= i && i < N) }`
+    with output value `v` (which is a map from indices to element values).
+
+    Corresponds to: unpack_owned in pack.ml lines 104-108 (Array case) +
+                    unfolded_array in pack.ml lines 24-39.
+
+    Returns `none` if the resource is not `Owned<array(T, N)>`.
+    Audited: 2026-02-19 -/
+def unpackArrayResource (r : Resource) : TypingM (Option Resource) := do
+  match r.request with
+  | .p pred =>
+    match pred.name with
+    | .owned (some ct) initState =>
+      match ct.ty with
+      | .array elemTy (some length) =>
+        -- CN ref: pack.ml:24-39 (unfolded_array)
+        -- Create fresh quantifier variable: `i` with uintptr_bt type
+        -- Corresponds to: IT.fresh_named Memory.uintptr_bt "i" loc in pack.ml:26
+        let uintptrBt : BaseType := .bits .unsigned 64
+        let qSym ← TypingM.freshSym "i"
+        let loc := pred.pointer.loc
+        let qVar : IndexTerm := AnnotTerm.mk (.sym qSym) uintptrBt loc
+        -- Build permission: 0 <= i && i < N
+        -- Corresponds to: pack.ml:36-38
+        --   IT.(and_ [le_ (uintptr_int_ 0 loc, q) loc; lt_ (q, uintptr_int_ length loc) loc] loc)
+        let zero : IndexTerm := AnnotTerm.mk (.const (.bits .unsigned 64 0)) uintptrBt loc
+        let len : IndexTerm := AnnotTerm.mk (.const (.bits .unsigned 64 length)) uintptrBt loc
+        let leBound : IndexTerm := AnnotTerm.mk (.binop .le zero qVar) .bool loc
+        let ltBound : IndexTerm := AnnotTerm.mk (.binop .lt qVar len) .bool loc
+        let permission : IndexTerm := AnnotTerm.mk (.binop .and_ leBound ltBound) .bool loc
+        -- Build the element Ctype (strip annotations from inner type)
+        let elemCtype : Ctype := Ctype.mk' elemTy
+        -- Build QPredicate
+        -- Corresponds to: pack.ml:27-39 (Q { name, pointer, q, q_loc, step, iargs, permission })
+        let qpred : QPredicate := {
+          name := .owned (some elemCtype) initState
+          pointer := pred.pointer
+          q := (qSym, uintptrBt)
+          qLoc := loc
+          step := elemCtype
+          permission := permission
+          iargs := []
+        }
+        -- Output value is the original output (a map from indices to element values)
+        -- Corresponds to: pack.ml:108: (unfolded_array ..., O o) — output passed through
+        return some { request := .q qpred, output := r.output }
+      | .array _ none =>
+        -- CN ref: pack.ml:25 — Option.get olength would fail for unsized arrays
+        TypingM.fail (.other "unpackArrayResource: array type has no size (unsized arrays cannot be unpacked)")
+      | _ => return none  -- Not an array type
+    | .owned none _ => TypingM.fail (.other "unpackArrayResource: unresolved resource type (should have been inferred during resolution)")
+    | .pname _ => return none  -- Not Owned
+  | .q _ => return none  -- Already a QPredicate
+
+/-- Add a resource to the context, unpacking struct and array resources.
     Corresponds to: add_r + do_unfold_resources in typing.ml lines 687-694.
 
     For struct resources, replaces `Owned<struct tag>(p)` with individual field
-    resources `Owned<field_type>(memberShift(p, tag, field))`. -/
+    resources `Owned<field_type>(memberShift(p, tag, field))`.
+    For array resources, replaces `Owned<T[N]>(p)` with a QPredicate
+    `each(i; 0<=i && i<N) { Owned<T>(arrayShift(p,T,i)) }`.
+    Audited: 2026-02-19 -/
 partial def addResourceWithUnfold (r : Resource) : TypingM Unit := do
   match ← unpackStructResource r with
   | some fieldResources =>
@@ -182,8 +260,15 @@ partial def addResourceWithUnfold (r : Resource) : TypingM Unit := do
     for fr in fieldResources do
       addResourceWithUnfold fr
   | none =>
-    -- Not a struct resource (or couldn't unpack): add as-is
-    TypingM.addR r
+    -- Not a struct: try array unpacking
+    -- CN ref: pack.ml:108 — unpack_owned Array case produces a single QPredicate
+    match ← unpackArrayResource r with
+    | some qResource =>
+      -- Array was unpacked into a QPredicate: add directly (no further unfold needed)
+      TypingM.addR qResource
+    | none =>
+      -- Not a struct or array resource (or couldn't unpack): add as-is
+      TypingM.addR r
 
 /-! ## Predicate Request Scan
 
@@ -347,9 +432,104 @@ partial def tryRepackStruct (requested : Predicate) : TypingM (Option (Predicate
   | .owned none _ => TypingM.fail (.other "tryRepackStruct: unresolved resource type (should have been inferred during resolution)")
   | .pname _ => return none  -- Only Owned can be repacked
 
+/-- Try to repack a QPredicate into an array resource.
+    Given a request for `Owned<T[N]>(init)(p)`, constructs a QPredicate request
+    and tries to satisfy it from QPredicate resources in the context.
+
+    Corresponds to: packing_ft in pack.ml lines 47-51 (Array case) +
+                    ftyp_args_request_for_pack in resourceInference.ml:378-397.
+
+    Returns `none` if:
+    - The request is not for `Owned<array(T, N)>`
+    - The QPredicate resource cannot be found
+    Audited: 2026-02-19 -/
+partial def tryRepackArray (requested : Predicate) : TypingM (Option (Predicate × Output)) := do
+  match requested.name with
+  | .owned (some ct) initState =>
+    match ct.ty with
+    | .array elemTy (some length) =>
+      -- CN ref: pack.ml:47-51 — packing_ft for Array case
+      -- Build the QPredicate request matching what unpackArrayResource produces
+      let uintptrBt : BaseType := .bits .unsigned 64
+      let qSym ← TypingM.freshSym "i"
+      let loc := requested.pointer.loc
+      let qVar : IndexTerm := AnnotTerm.mk (.sym qSym) uintptrBt loc
+      -- Build permission: 0 <= i && i < N
+      let zero : IndexTerm := AnnotTerm.mk (.const (.bits .unsigned 64 0)) uintptrBt loc
+      let len : IndexTerm := AnnotTerm.mk (.const (.bits .unsigned 64 length)) uintptrBt loc
+      let leBound : IndexTerm := AnnotTerm.mk (.binop .le zero qVar) .bool loc
+      let ltBound : IndexTerm := AnnotTerm.mk (.binop .lt qVar len) .bool loc
+      let permission : IndexTerm := AnnotTerm.mk (.binop .and_ leBound ltBound) .bool loc
+      let elemCtype : Ctype := Ctype.mk' elemTy
+      let qpredReq : QPredicate := {
+        name := .owned (some elemCtype) initState
+        pointer := requested.pointer
+        q := (qSym, uintptrBt)
+        qLoc := loc
+        step := elemCtype
+        permission := permission
+        iargs := []
+      }
+      -- Try to request the QPredicate resource
+      match ← qpredicateRequest qpredReq with
+      | some (_, output) =>
+        -- Construct the array output value from the QPredicate output (a map)
+        -- CN ref: pack.ml:49-50 — o_s fresh named with bt_of_sct ct, then LAT.Resource + LAT.I o
+        return some (requested, output)
+      | none => return none
+    | .array _ none =>
+      TypingM.fail (.other "tryRepackArray: array type has no size (unsized arrays cannot be repacked)")
+    | _ => return none  -- Not an array type
+  | .owned none _ => TypingM.fail (.other "tryRepackArray: unresolved resource type")
+  | .pname _ => return none  -- Only Owned can be repacked
+
+/-- Request a QPredicate resource at a specific index or as a whole.
+    For `each (i; guard) { Owned<T>(arrayShift(p, T, i)) }`:
+    Searches context for matching QPredicate resources.
+
+    Corresponds to: qpredicate_request in resourceInference.ml lines 253-375.
+
+    Note: This is a simplified implementation. CN's full qpredicate_request involves:
+    - Matching Q resources by name, step type, and quantifier base type
+    - Alpha-renaming the found QPredicate to use the requested quantifier variable
+    - Using SMT to check permission intersection (provable/refuted)
+    - Combining multiple partial Q resources via the General.cases_to_map mechanism
+    - Handling movable_indices for extracting individual elements
+
+    Our simplified version handles the common case of a single matching QPredicate
+    that exactly covers the requested permission.
+    Audited: 2026-02-19 -/
+partial def qpredicateRequest (requested : QPredicate) : TypingM (Option (QPredicate × Output)) := do
+  let resources ← TypingM.getResources
+  -- Phase 1: Look for a matching QPredicate in context
+  -- CN ref: resourceInference.ml:260-313 (map_and_fold_resources scanning Q resources)
+  for h : idx in [:resources.length] do
+    let r := resources[idx]
+    match r.request with
+    | .q qp =>
+      -- Check name subsumption and step type equality
+      -- CN ref: resourceInference.ml:270-272
+      if nameSubsumed requested.name qp.name
+        && ctypeEqualIgnoringAnnots requested.step qp.step
+        && baseTypeReprEq requested.q.2 qp.q.2 then
+        -- Check pointer equality syntactically
+        -- CN ref: resourceInference.ml:278 — pmatch = eq_(requested.pointer, p'.pointer)
+        if termSyntacticEq requested.pointer qp.pointer then
+          -- Found a matching QPredicate. Consume it.
+          -- DIVERGES-FROM-CN: CN's full algorithm uses alpha-renaming, permission
+          -- intersection analysis, and partial consumption. We consume the entire
+          -- QPredicate and return its output directly. This is correct when the
+          -- requested permission is exactly equal to or subsumed by the found one.
+          TypingM.removeResourceAt idx
+          return some (qp, r.output)
+    | .p _ => pure ()  -- Not a QPredicate
+  -- No matching QPredicate found
+  return none
+
 /-- Request a predicate resource from the context.
     First tries direct scan, then tries "packing" for compound resources.
     When direct scan fails for a struct type, attempts repacking from field resources.
+    When struct repacking fails for an array type, attempts array repacking.
     Returns the matched predicate and its output value.
 
     Corresponds to: predicate_request in resourceInference.ml lines 229-250 -/
@@ -359,7 +539,12 @@ partial def predicateRequest (requested : Predicate) : TypingM (Option (Predicat
   | .notFound =>
     -- Direct scan failed. Try packing for compound resources.
     -- Corresponds to: Pack.packing_ft call in resourceInference.ml:239
-    tryRepackStruct requested
+    match ← tryRepackStruct requested with
+    | some result => return some result
+    | none =>
+      -- Struct repacking failed. Try array repacking.
+      -- CN ref: pack.ml:47-51 — packing_ft Array case
+      tryRepackArray requested
 
 end -- mutual
 
@@ -370,19 +555,21 @@ Corresponds to: cn/lib/resourceInference.ml lines 400-432 (resource_request)
 
 /-- Request a resource from the context.
     For simple predicates, delegates to predicateRequest.
-    For quantified predicates, would use qpredicate_request (not yet implemented).
+    For quantified predicates, delegates to qpredicateRequest.
 
-    Corresponds to: resource_request in resourceInference.ml lines 400-432 -/
+    Corresponds to: resource_request in resourceInference.ml lines 400-432
+    Audited: 2026-02-19 -/
 def resourceRequest (request : Request) : TypingM (Option (Request × Output)) := do
   match request with
   | .p pred =>
     match ← predicateRequest pred with
     | some (p', output) => return some (.p p', output)
     | none => return none
-  | .q _qpred =>
-    -- Quantified predicates not yet supported
-    -- Would call qpredicate_request
-    return none
+  | .q qpred =>
+    -- CN ref: resourceInference.ml:430-432
+    match ← qpredicateRequest qpred with
+    | some (q', output) => return some (.q q', output)
+    | none => return none
 
 /-! ## Consuming Resources from Specs
 

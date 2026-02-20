@@ -30,6 +30,7 @@
 -/
 
 import CerbLean.CN.Types
+import CerbLean.CN.TypeChecking.Context
 import CerbLean.Core
 import CerbLean.Core.File
 
@@ -786,5 +787,96 @@ def resolveFunctionSpec
            ensures := resolvedPost
            trusted := spec.trusted
          }
+
+/-! ## ResolveContext from Typing State
+
+Build a ResolveContext from the current typing context, for resolving ghost
+statement expressions mid-function. Ghost statements (e.g., `cn_have(sum == x + y)`)
+are parsed with placeholder symbols (id=0). We resolve them by looking up variable
+names in the current computational and logical bindings.
+
+Corresponds to: building the `env` parameter in compile.ml (`add_computational`,
+`add_logical`). Calling `resolveAnnotTerm` with this context corresponds to
+`cn_expr` in compile.ml:689-705 (`CNExpr_var → lookup_computational_or_logical`).
+-/
+
+/-- Look up a stored value for a computational variable.
+    The store map is keyed by the CREATE action's pointer symbol ID, but the
+    computational context has the PATTERN variable (bound to the pointer).
+    We must follow the indirection: pattern var → value (.sym ptrSym) → store[ptrSym.id].
+
+    Corresponds to: CN's C_vars value resolution in compile.ml -/
+private def lookupStoreForBinding
+    (btOrVal : BaseTypeOrValue) (storeValues : List (Nat × AnnotTerm))
+    : Option AnnotTerm :=
+  match btOrVal with
+  | .value it =>
+    -- The value is a pointer term; check if the pointed-to symbol has a stored value
+    match it.term with
+    | .sym s => storeValues.find? (fun (id, _) => id == s.id) |>.map (·.2)
+    | _ => none
+  | .baseType _ => none
+
+def resolveContextFromTypingContext
+    (ctx : Context) (tagDefs : TagDefs) (freshCounter : Nat)
+    (storeValues : List (Nat × AnnotTerm) := [])
+    : ResolveContext :=
+  -- Add computational bindings (C variables: parameters, locals)
+  -- For stack slots with stored values, use the stored value's type.
+  -- The store map is keyed by the CREATE pointer sym ID, but computational
+  -- bindings hold the pattern variable (which contains .value (.sym ptrSym)).
+  -- We follow this indirection to find the stored value.
+  -- Corresponds to: env.computationals in compile.ml + C_vars value resolution
+  let compEntries := ctx.computational.filterMap fun (sym, btOrVal, _) =>
+    sym.name.map fun name =>
+      match lookupStoreForBinding btOrVal storeValues with
+      | some storedVal => (name, sym, storedVal.bt)
+      | none => (name, sym, btOrVal.bt)
+  -- Add logical bindings (ghost variables: resource outputs, let-bindings)
+  -- Corresponds to: env.logicals in compile.ml
+  let logEntries := ctx.logical.filterMap fun (sym, btOrVal, _) =>
+    sym.name.map fun name => (name, sym, btOrVal.bt)
+  { nameToSymType := compEntries ++ logEntries
+    nextFreshId := freshCounter
+    tagDefs := tagDefs }
+
+/-- Substitute stored values for sym references in a resolved AnnotTerm.
+    After name resolution, sym references to stack slot variables resolve to the
+    pattern variable symbol. But the ghost statement needs the _stored value_.
+    This replaces pattern variable sym references with the actual stored values
+    by following the value chain: sym → context value (.sym ptrSym) → store[ptrSym.id].
+
+    This is the ghost statement analog of the store resolution in the ccall
+    handler (Expr.lean:457-462).
+
+    Audited: 2026-02-19 -/
+partial def substStoreValues
+    (ctx : Context) (storeValues : List (Nat × AnnotTerm)) (t : AnnotTerm) : AnnotTerm :=
+  match t with
+  | .mk (.sym s) _bt _loc =>
+    -- Look up the sym in computational context, then follow the value chain
+    match ctx.getA s with
+    | some btOrVal =>
+      match lookupStoreForBinding btOrVal storeValues with
+      | some storedVal => storedVal
+      | none => t
+    | none => t
+  | .mk (.binop op l r) bt loc =>
+    .mk (.binop op (substStoreValues ctx storeValues l) (substStoreValues ctx storeValues r)) bt loc
+  | .mk (.unop op arg) bt loc =>
+    .mk (.unop op (substStoreValues ctx storeValues arg)) bt loc
+  | .mk (.ite c t' e) bt loc =>
+    .mk (.ite (substStoreValues ctx storeValues c) (substStoreValues ctx storeValues t') (substStoreValues ctx storeValues e)) bt loc
+  | .mk (.tuple elems) bt loc =>
+    .mk (.tuple (elems.map (substStoreValues ctx storeValues))) bt loc
+  | .mk (.nthTuple n tup) bt loc =>
+    .mk (.nthTuple n (substStoreValues ctx storeValues tup)) bt loc
+  | .mk (.structMember obj member) bt loc =>
+    .mk (.structMember (substStoreValues ctx storeValues obj) member) bt loc
+  | .mk (.arrayShift base ct idx) bt loc =>
+    .mk (.arrayShift (substStoreValues ctx storeValues base) ct (substStoreValues ctx storeValues idx)) bt loc
+  | .mk (.cast targetBt value) bt loc =>
+    .mk (.cast targetBt (substStoreValues ctx storeValues value)) bt loc
+  | other => other  -- Constants, sizeOf, etc. don't contain sym refs
 
 end CerbLean.CN.TypeChecking.Resolve

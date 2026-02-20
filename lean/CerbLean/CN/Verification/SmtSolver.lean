@@ -91,9 +91,10 @@ def checkObligation
 
     -- Run the query
     let result ← StateT.run (s := state) do
-      -- Emit pointer preamble (declare-datatype + helpers) as raw SMT-LIB2
+      -- Emit solver basics preamble (tuples, lists, options, mem_byte, pointers)
+      -- CN ref: solver.ml:1098-1104 (declare_solver_basics)
       let st ← get
-      st.proc.stdin.putStr pointerPreamble
+      st.proc.stdin.putStr solverBasicsPreamble
       -- Emit struct datatype declarations if TypeEnv is available
       match env with
       | some e => st.proc.stdin.putStr (generateStructPreamble e)

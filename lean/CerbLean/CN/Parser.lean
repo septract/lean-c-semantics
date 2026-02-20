@@ -749,4 +749,44 @@ def parseFunctionSpecOpt (input : String) : Option FunctionSpec :=
   | .ok spec => some spec
   | .error _ => none
 
+/-! ## Ghost Statement Parsing
+
+Parses CN ghost statement text from cerb::magic attributes.
+Format: "cn_have(expr)" or "cn_have(expr);" or "have(expr)" etc.
+
+CN ref: cn/lib/parse.ml:78-79 (cn_statements → C_parser.cn_statements)
+-/
+
+/-- A parsed ghost statement -/
+structure ParsedGhostStatement where
+  kind : String
+  constraint : Option AnnotTerm
+
+/-- Parse a single ghost statement: kind(expr) or kind(expr); -/
+partial def ghostStatement : P ParsedGhostStatement := do
+  ws
+  let kind ← ident
+  -- Some statements have an argument expression, some don't
+  let constraint ← optional (attempt do
+    symbol "("
+    let e ← expr
+    symbol ")"
+    pure e)
+  -- Skip optional trailing semicolons
+  let _ ← optional (symbol ";")
+  pure ⟨kind, constraint⟩
+
+/-- Parse one or more ghost statements from a magic attribute string.
+    CN ref: cn/lib/parse.ml:78-79 -/
+def parseGhostStatements (input : String) : Except String (List ParsedGhostStatement) :=
+  runParser (do
+    let mut stmts := []
+    ws
+    -- Parse statements until we hit EOF (peek? returns none)
+    while (← peek?).isSome do
+      let s ← ghostStatement
+      stmts := stmts ++ [s]
+      ws
+    pure stmts) input
+
 end CerbLean.CN.Parser
