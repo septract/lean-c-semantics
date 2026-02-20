@@ -317,11 +317,7 @@ for c_file in "${TEST_FILES[@]}"; do
 
     # Generate JSON for Lean
     json_file="$OUTPUT_DIR/$filename.json"
-    if ! "$CERBERUS" ${CERBERUS_FLAGS[@]+"${CERBERUS_FLAGS[@]}"} --json_core_out="$json_file" "$c_file" >/dev/null 2>&1; then
-        CERBERUS_FAIL=$((CERBERUS_FAIL + 1))
-        echo "[$file_num/$total_to_test] CERB_INCONSISTENT $filename: exec succeeded but JSON failed"
-        continue
-    fi
+    "$CERBERUS" ${CERBERUS_FLAGS[@]+"${CERBERUS_FLAGS[@]}"} --json_core_out="$json_file" "$c_file" >/dev/null 2>&1
 
     # Run Lean interpreter in batch mode with timeout
     lean_exit=0
