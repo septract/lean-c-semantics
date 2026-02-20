@@ -1,29 +1,33 @@
 # CN Comprehensive Audit & Alignment Plan — Team Execution
 
 **Created**: 2026-02-18
-**Status**: Approved, execution in progress
+**Last updated**: 2026-02-19
+**Status**: Waves 0–2 complete, Wave 3 in progress
 
 ## Context
 
-Our Lean CN implementation (~10,333 lines, 27 files) targets the **predicate-free fragment** of CN's OCaml verification system (~29,500 lines, ~97 files). Current: 75/78 (96%) nolibc tests pass. Goal: close all gaps to match CN's verification capability for built-in `Owned`/`Block` resources, function specs, loop invariants, ghost variables, array ownership, and SMT-based constraint solving.
+Our Lean CN implementation targets the **predicate-free fragment** of CN's OCaml verification system (~29,500 lines, ~97 files). Goal: close all gaps to match CN's verification capability for built-in `Owned`/`Block` resources, function specs, loop invariants, ghost variables, array ownership, and SMT-based constraint solving.
 
 **Excluded**: User-defined predicates, logical functions, lemmas, recursive definitions, Coq export.
 
 **CN source**: `tmp/cn/` (main branch) | **Lean source**: `lean/CerbLean/CN/`
 
-### Current Test Results (2026-02-18)
+### Current Test Results (2026-02-19)
 
 | Suite | Pass | Fail | Total |
 |-------|------|------|-------|
 | Unit tests (parser/typecheck) | 9 | 0 | 9 |
 | Unit tests (obligations) | 7 | 0 | 7 |
 | Unit tests (SMT) | 3 | 0 | 3 |
-| Integration (nolibc) | 75 | 3 | 78 |
+| Integration (nolibc) | 84 | 6 | 90 |
 
-**3 Failing integration tests**:
-- `044-pre-post-increment.c`: Resource tracking bug (Kill after increment)
-- `066-null-to-int.c`: `intFromPtr` memop not implemented
-- `070-increments.c`: `SeqRMW` not supported (interpreter-level)
+**6 Failing integration tests** (down from initial 3 of 78; 12 new tests added):
+- `044-pre-post-increment.c`: Resource tracking bug (Kill after increment in RMW context)
+- `091-array-owned.c`: Missing resource — array QPredicate matching not finding resource
+- `097-ghost-extract.c`: Spec parsing failure (extract syntax not parsed)
+- `098-loop-invariant.c`: `Too many arguments provided` — label spec processing broken
+- `099-global-access.c`: `unbound variable: g` — global variable support not implemented
+- `100-ghost-params.c`: Spec parsing failure (ghost parameter syntax not parsed)
 
 ### Type System Audit Results (2026-02-18)
 
@@ -40,7 +44,7 @@ Minor deviations (acceptable):
 - `Loc` type parameter dropped (matches CN's `BaseTypes.Unit` module)
 - `ResourceName.owned` has `Option Ctype` (pre-resolution)
 - `LCSet` is a List not a Set (duplicates harmless)
-- `LogicalConstraint.subst` skips alpha-renaming (to be fixed)
+- `LogicalConstraint.subst` skips alpha-renaming (marked DIVERGES-FROM-CN)
 
 ---
 
@@ -49,236 +53,278 @@ Minor deviations (acceptable):
 The top-level agent (leader) coordinates work across **3 waves** of parallel work packages. Each package owns specific files to avoid conflicts. Agents within a wave run concurrently.
 
 ```
-Wave 0: Write plan + audit tests (parallel, read-only/test-only)
+Wave 0: Write plan + audit tests (parallel, read-only/test-only)       ✅ DONE
    │
-Wave 1: Foundation fixes (parallel, independent files)
-   │    ├─ WP-A: SMT Encoding (SmtLib.lean, SmtSolver.lean)
-   │    ├─ WP-B: Constraint Simplification (NEW Simplify.lean)
-   │    ├─ WP-C: Derived Constraints (NEW DerivedConstraints.lean + Monad.lean patch)
-   │    ├─ WP-D: Alpha-renaming fix (Constraint.lean, Term.lean)
-   │    └─ WP-E: New test development (tests/cn/)
+Wave 1: Foundation fixes (parallel, independent files)                  ✅ DONE
+   │    ├─ WP-A: SMT Encoding (SmtLib.lean, SmtSolver.lean)            ✅ DONE
+   │    ├─ WP-B: Constraint Simplification (Simplify.lean)             ✅ DONE
+   │    ├─ WP-C: Derived Constraints (DerivedConstraints.lean)         ✅ DONE
+   │    ├─ WP-D: Alpha-renaming fix (Constraint.lean, Term.lean)       ⚠️  DEFERRED
+   │    └─ WP-E: New test development (tests/cn/)                      ✅ DONE
    │
-Wave 2: Core capabilities (parallel, depends on Wave 1)
-   │    ├─ WP-F: Resource Inference expansion (Inference.lean)
-   │    ├─ WP-G: Pointer memops + RMW fix (Expr.lean, Action.lean)
-   │    ├─ WP-H: Pure expression cases (Pexpr.lean)
-   │    ├─ WP-I: Ghost statements (NEW GhostStatement.lean)
-   │    └─ WP-J: Ghost parameters (Parser.lean, Spec.lean, Spine.lean)
+Wave 2: Core capabilities (parallel, depends on Wave 1)                ✅ DONE
+   │    ├─ WP-F: Resource Inference expansion (Inference.lean)          ✅ DONE (partial)
+   │    ├─ WP-G: Pointer memops + RMW fix (Expr.lean, Action.lean)     ✅ DONE (partial)
+   │    ├─ WP-H: Pure expression cases (Pexpr.lean)                    ✅ DONE (partial)
+   │    ├─ WP-I: Ghost statements (GhostStatement.lean)                ✅ DONE
+   │    └─ WP-J: Ghost parameters (Parser.lean, Spec.lean, Spine.lean) ❌ NOT DONE
    │
-Wave 3: Extended features (parallel, depends on Wave 2)
-        ├─ WP-K: Loop invariants (Params.lean, Check.lean Erun path)
-        ├─ WP-L: wellTyped checking (NEW WellTyped.lean)
-        └─ WP-M: Global variables + accesses (Parser.lean, Check.lean)
+Wave 3: Extended features (parallel, depends on Wave 2)                🔄 IN PROGRESS
+        ├─ WP-K: Loop invariants (Params.lean, Check.lean Erun path)   ❌ NOT DONE
+        ├─ WP-L: wellTyped checking (WellTyped.lean)                   ❌ NOT DONE
+        └─ WP-M: Global variables + accesses (Parser.lean, Check.lean) ❌ NOT DONE
 ```
 
 ---
 
-## Wave 0: Plan & Audit (Immediate)
+## Wave 0: Plan & Audit — ✅ COMPLETE
 
-### WP-0A: Write Plan Document
-**Owner**: Leader
-**Task**: Write this plan to `docs/2026-02-18_CN_AUDIT_PLAN.md`
+### WP-0A: Write Plan Document — ✅
+Written to `docs/2026-02-18_CN_AUDIT_PLAN.md`
 
-### WP-0B: Audit Existing Tests for Spurious Passes
-**Owner**: Agent (read-only)
-**Task**: For each of the 75 passing CN tests, verify the pass is genuine by checking:
-1. Does the test exercise the feature it claims to test?
-2. Could it pass with a trivially-broken type checker?
-3. Do the SMT obligations generated look correct?
-**Output**: Report listing any tests that may be passing spuriously
+### WP-0B: Audit Existing Tests for Spurious Passes — ✅
+Report: `docs/2026-02-18_TEST_AUDIT_REPORT.md`
 
----
-
-## Wave 1: Foundation Fixes (Parallel)
-
-All packages in this wave touch **different files** and can run fully concurrently.
-
-### WP-A: SMT Encoding Correctness
-**Files owned**: `CN/Verification/SmtLib.lean`, `CN/Verification/SmtSolver.lean`
-**Depends on**: Nothing
-**Estimated scope**: ~400 lines changed/added
-
-**Tasks** (execute sequentially within this package):
-
-1. **CRITICAL: Fix `*NoSMT` as uninterpreted functions**
-   - `SmtLib.lean:377-401` wrongly translates `mulNoSMT` as `bvmul`
-   - CN ref: `solver.ml:703,710,716,723,730`
-   - Emit `declare-fun mul_uf_<sort> (<sort> <sort>) <sort>` on demand
-   - Map `*NoSMT` terms to applications of these uninterpreted functions
-
-2. **Add missing ADT declarations to solver preamble**
-   - `cn_list<T>` with `cn_nil`/`cn_cons(head,tail)` — CN ref: `solver.ml:58-80`
-   - `cn_option<T>` with `cn_none`/`cn_some(cn_val)` — CN ref: `solver.ml:91-98`
-   - `cn_tuple_N<T1..TN>` for N=2..8 (0 exists already) — CN ref: `solver.ml:58-78`
-   - `mem_byte` with `AiV(alloc_id: option<AllocId>, value: BitVec 8)` — CN ref: `solver.ml:83-87`
-
-3. **Fix MemByte → `mem_byte` ADT sort** (depends on task 2)
-
-4. **Add CType → `Int` encoding via CTypeMap**
-   - CN ref: `solver.ml:113-130, 419`
-
-5. **Fix EachI: unroll to conjunction instead of quantify**
-   - CN ref: `solver.ml:785-796`
-
-6. **Add missing term encodings** (can be done incrementally):
-   - `min`/`max` → `ite` desugaring
-   - `exp` → constant-fold for concrete args
-   - `bwClzNoSMT`/`bwCtzNoSMT` → ite-tree (CN ref: `solver.ml:575-591`)
-   - `bwFfsNoSMT`/`bwFlsNoSMT` → desugar to CTZ/CLZ
-   - `good` → `good_value` helper for int/ptr/struct types
-   - List ops → `cn_list` ADT selectors
-   - Map ops → SMT `Array` (`store`/`select`/`as const`)
-   - Set ops → CVC5 `Set` theory
-   - Option ops → `cn_option` ADT
-   - Multi-element tuple → `cn_tuple_N` selectors
-   - Record → encode as positional tuple
-   - Full `Match` → nested ite/let/is-Con compilation
-   - `representable`/`good` for struct/array → recursive decomposition
-
-### WP-B: Constraint Simplification
-**Files owned**: NEW `CN/TypeChecking/Simplify.lean`
-**Depends on**: Nothing (new file, no conflicts)
-**Estimated scope**: ~300-400 lines new
-
-**Tasks**:
-1. Create `CN/TypeChecking/Simplify.lean` with:
-   - `simplifyTerm : AnnotTerm → AnnotTerm` — recursive term simplifier
-   - `simplifyConstraint : LogicalConstraint → LogicalConstraint`
-2. Implement simplification rules (ordered by impact):
-   - Constant folding (arithmetic identities)
-   - Boolean simplification
-   - Equality simplification (`Eq(x,x)->true`)
-   - Accessor reduction (`StructMember(Struct(...), m) -> field`)
-   - Cast folding
-   - SizeOf evaluation to concrete literal
-   - Struct eta-reduction
-3. **Integration point** (coordinate with leader): Add `simplify` call in `Monad.lean:provable` before solver query.
-
-**CN ref**: `simplify.ml` (~696 lines)
-
-### WP-C: Derived Constraints (pointer_facts)
-**Files owned**: NEW `CN/TypeChecking/DerivedConstraints.lean`
-**Depends on**: Nothing (new file)
-**Estimated scope**: ~150-200 lines new
-
-**Tasks**:
-1. Create `CN/TypeChecking/DerivedConstraints.lean` with:
-   - `derivedLc1 : Resource → List LogicalConstraint` — single-resource facts
-     - For `Owned(ct)(ptr)`: `hasAllocId(ptr)`, `addr(ptr) <= addr(ptr) + sizeof(ct)`
-   - `derivedLc2 : Resource → Resource → List LogicalConstraint` — pair facts
-     - For two `Owned`: `upper(p2) <= addr(p1) || upper(p1) <= addr(p2)` (non-overlap/separation)
-   - `deriveConstraints : Resource → List Resource → List LogicalConstraint`
-2. **Integration point** (coordinate with leader): Patch `Monad.lean:addR` to call `deriveConstraints`.
-
-**CN ref**: `resource.ml:25-71`, `typing.ml:415-427`
-
-### WP-D: Alpha-Renaming Fix
-**Files owned**: `CN/Types/Constraint.lean`, `CN/Types/Term.lean`
-**Depends on**: Nothing
-**Estimated scope**: ~30-50 lines changed
-
-**Tasks**:
-1. Add `Term.freshSym` or `Term.alphaRename` utility to `Term.lean`
-2. Fix `LogicalConstraint.subst` in `Constraint.lean:44-46` to alpha-rename forall-bound variable when it clashes with substitution domain
-**CN ref**: `IT.suitably_alpha_rename`
-
-### WP-E: Test Development
-**Files owned**: `tests/cn/` (new test files only)
-**Depends on**: Nothing (tests written before features land)
-**Estimated scope**: ~20-30 new test files
-
-**Tasks**:
-1. Add tests for each gap being fixed (see test list in Execution Architecture)
-2. Cross-reference CN's test suite in `tmp/cn/tests/` for additional coverage
-3. Mark tests with `.fail.c` / `.smt-fail.c` suffixes appropriately
+Key findings:
+- 5 trivially-passing tests (no annotations or all-trusted)
+- 8 tests with weak postconditions
+- ~33 genuinely non-trivial tests
+- `*NoSMT` bug was in dead code (no impact on existing tests)
 
 ---
 
-## Wave 2: Core Capabilities (Parallel, After Wave 1)
+## Wave 1: Foundation Fixes — ✅ COMPLETE
 
-All packages touch **different files** and can run concurrently.
+Completed in commit `3ce7320` (2026-02-18).
 
-### WP-F: Resource Inference Expansion
-**Files owned**: `CN/TypeChecking/Inference.lean`
-**Depends on**: WP-A (SMT encoding), WP-C (derived constraints)
-**Estimated scope**: ~300 lines changed/added
+### WP-A: SMT Encoding Correctness — ✅ DONE
 
-**Tasks**:
-1. **QPredicate support**: `qpredicateRequest` (CN ref: `resourceInference.ml:253-375`)
-2. **Array unpack**: `unpackArrayResource` (CN ref: `pack.ml:24-39`)
-3. **Array repack**: `tryRepackArray` (CN ref: `pack.ml:47-51`)
-4. **Padding handling**: Extend struct unpack/repack (CN ref: `pack.ml:66-124`)
-5. **check_live_alloc**: Alloc liveness (CN ref: `resourceInference.ml:515-570`)
-6. **Strengthen SMT slow path**: Multiple candidates + solver iargs (CN ref: `resourceInference.ml:175-221`)
-7. **do_unfold_resources fixpoint**: Loop until stable (CN ref: `typing.ml:548-657`)
+**Completed tasks:**
+1. ✅ `*NoSMT` → uninterpreted functions (`mul_uf_<sort>`, `div_uf_<sort>`, etc.) for all base types
+2. ✅ Solver preamble: `cn_tuple_N` (N=0..15), `cn_list`, `cn_option`, `mem_byte`, pointer ADTs
+3. ✅ MemByte → `mem_byte` ADT sort
+4. ✅ `solverBasicsPreamble` replaces `pointerPreamble` in SmtSolver.lean
 
-### WP-G: Pointer Memops + RMW Fix
-**Files owned**: `CN/TypeChecking/Expr.lean`, `CN/TypeChecking/Action.lean`
-**Depends on**: WP-A, WP-F
-**Estimated scope**: ~200-250 lines added
+**Remaining (incremental, low priority):**
+- CType → `Int` encoding via CTypeMap
+- EachI unrolling to conjunction
+- Additional term encodings: min/max, exp, bwClz/bwCtz, good, List/Map/Set/Option ops, Record encoding, full Match compilation, representable/good for struct/array
 
-**Tasks**: PtrEq/PtrNe, PtrLt/Gt/Le/Ge, Ptrdiff, IntFromPtr, PtrFromInt, Copy_alloc_id, Fix test 044
+### WP-B: Constraint Simplification — ✅ DONE
+`Simplify.lean` created (755 lines) with:
+- Recursive term simplifier
+- Constant folding, boolean simplification, equality reduction
+- Accessor reduction (StructMember of Struct → field)
+- Cast folding, SizeOf evaluation
+- Integrated into Monad.lean
 
-### WP-H: Pure Expression Cases
-**Files owned**: `CN/TypeChecking/Pexpr.lean`
-**Depends on**: WP-A
-**Estimated scope**: ~100-150 lines added
+### WP-C: Derived Constraints — ✅ DONE
+`DerivedConstraints.lean` created (180 lines) with:
+- `derivedLc1`: hasAllocId, address bounds for Owned resources
+- `derivedLc2`: non-overlap/separation constraints for pairs
+- Integrated into Monad.lean:addR
 
-**Tasks**: Carray, Cnil/Ccons, ByteFromInt/IntFromByte, ctype_width, PEmemberof
+### WP-D: Alpha-Renaming Fix — ⚠️ DEFERRED
+Not yet implemented. Marked DIVERGES-FROM-CN in:
+- `Inference.lean:519` (qpredicateRequest skips alpha-renaming)
+- `LogicalConstraint.subst` still skips rename on clash
 
-### WP-I: Ghost Statements (Predicate-Free)
-**Files owned**: NEW `CN/TypeChecking/GhostStatement.lean`
-**Depends on**: WP-F
-**Estimated scope**: ~200-250 lines new
+No current test exercises this path. Will become relevant when forall-quantified constraints appear in QPredicate permission expressions.
 
-**Tasks**: `have`, `assert`, `instantiate`, `extract`, `split_case`, `print`
-Fail explicitly for: `pack`/`unpack`/`unfold`/`apply`/`inline`/`to_from_bytes`
-
-### WP-J: Ghost Parameters
-**Files owned**: `CN/Parser.lean`, `CN/Types/Spec.lean`, `CN/TypeChecking/Spine.lean`
-**Depends on**: Nothing structurally
-**Estimated scope**: ~100-150 lines changed
-
-**Tasks**: Extend FunctionSpec, parse ghost params, handle in spine, parse at call sites
+### WP-E: Test Development — ✅ DONE
+12 new test files added (090–100), bringing suite from 78 to 90:
+- `090-nosmt-operations.smt-fail.c` — NoSMT uninterpreted functions
+- `091-array-owned.c` — array ownership (FAILING)
+- `092-separation.c` / `092-separation.fail.c` — pointer non-overlap
+- `093-padding-struct.c` — struct with padding
+- `094-ptr-comparison.c` — pointer equality
+- `095-ptr-to-int.c` — intFromPtr
+- `096-ghost-have.c` — `have` ghost statement (**PASSING** as of 2026-02-19)
+- `097-ghost-extract.c` — `extract` from `each` (FAILING — requires spec parser changes)
+- `098-loop-invariant.c` — while loop with invariant (FAILING)
+- `099-global-access.c` — global variable (FAILING)
+- `100-ghost-params.c` — ghost function parameters (FAILING — requires spec parser)
 
 ---
 
-## Wave 3: Extended Features (Parallel, After Wave 2)
+## Wave 2: Core Capabilities — ✅ COMPLETE (with partial items)
 
-### WP-K: Loop Invariants
-**Files owned**: `CN/TypeChecking/Params.lean`, `CN/TypeChecking/Check.lean`
-**Depends on**: WP-I
-**Tasks**: Parse loop invariants, verify on entry, maintain through body
+Completed across commits `b86e2b2` (2026-02-18), `e950a7c` (2026-02-19), `9da903b` (2026-02-19).
 
-### WP-L: wellTyped Checking
-**Files owned**: NEW `CN/TypeChecking/WellTyped.lean`
-**Depends on**: WP-A
-**Tasks**: ensureBaseType, inferTerm/checkTerm, checkMemValue/checkObjectValue
+### WP-F: Resource Inference Expansion — ✅ DONE (partial)
 
-### WP-M: Global Variables + `accesses`
-**Files owned**: `CN/Parser.lean`, `CN/TypeChecking/Check.lean`
-**Depends on**: Wave 2
-**Tasks**: Parse `accesses` clause, generate implicit Owned for globals
+**Completed:**
+1. ✅ `qpredicateRequest` — simplified version (name/step/pointer matching, full consumption)
+2. ✅ `unpackArrayResource` — `Owned<T[N]>` → QPredicate
+3. ✅ `tryRepackArray` — QPredicate → `Owned<T[N]>`
+4. ✅ `addResourceWithUnfold` extended to chain struct → array unpacking
+
+**Remaining (marked DIVERGES-FROM-CN):**
+- Padding handling in struct unpack/repack (3 DIVERGES-FROM-CN markers)
+- `check_live_alloc` (allocation liveness checking)
+- Multi-candidate SMT slow path in resource matching
+- `do_unfold_resources` fixpoint loop
+- Alpha-renaming in qpredicateRequest
+
+### WP-G: Pointer Memops + RMW Fix — ✅ DONE (partial)
+
+**Completed:**
+- ✅ PtrEq (simplified: skips ambiguous provenance case)
+- ✅ PtrNe (simplified: negated PtrEq)
+- ✅ IntFromPtr (simplified representability check)
+- ✅ SeqRMW type checking with lazy muCore param slot handling
+
+**Remaining (explicit `fail` stubs):**
+- PtrLt, PtrGt, PtrLe, PtrGe — require `check_both_eq_alloc` + `check_live_alloc_bounds`
+- Ptrdiff
+- PtrFromInt
+- CopyAllocId
+- Fix test 044 (Kill resource lifecycle in RMW context)
+
+### WP-H: Pure Expression Cases — ✅ DONE (partial)
+
+**Completed:**
+- ✅ Cnil (empty list constructor)
+- ✅ Ccons (list cons constructor)
+- ✅ ctype_width (bit width computation)
+- ✅ PEmemberof (struct member access — was already present)
+
+**Remaining:**
+- Carray (array constructor)
+- ByteFromInt / IntFromByte
+
+### WP-I: Ghost Statements — ✅ DONE
+
+Fully implemented across `GhostStatement.lean` (350 lines), `Expr.lean`, `Resolve.lean`, `Annot.lean`, `Parser.lean`:
+
+- ✅ Ghost statement detection in Esseq (cerb::magic attribute parsing)
+- ✅ Ghost statement text parsing (CN/Parser.lean)
+- ✅ Symbol resolution against typing context (`resolveContextFromTypingContext`)
+- ✅ Store value substitution for stack slot variables (`substStoreValues`)
+- ✅ `have` handler (addC + requireConstraint)
+- ✅ `assert` handler (requireConstraint only)
+- ✅ `splitCase` handler (addC, simplified vs CN)
+- ✅ `print` handler (no-op)
+- ✅ `instantiate`/`extract` stubs (explicit fail — require QPredicate support)
+- ✅ Predicate-dependent stubs (pack/unpack/unfold/apply/inline/toFromBytes)
+- ✅ Test 096-ghost-have PASSING
+
+### WP-J: Ghost Parameters — ❌ NOT DONE
+
+Ghost parameters (`/*@ ghost int g @*/` in function signatures) are not yet supported:
+- Spine.lean:165 skips ghost args in function type processing
+- Parser.lean does not parse ghost parameter declarations
+- No test coverage (100-ghost-params.c fails at spec parse)
+
+**Blocked by**: Requires spec parser extension + Spine.lean changes
+
+---
+
+## Wave 3: Extended Features — 🔄 IN PROGRESS
+
+### WP-K: Loop Invariants — ❌ NOT DONE
+**Status**: Test 098-loop-invariant.c fails with "Too many arguments provided" — label spec processing is broken
+**Files**: `CN/TypeChecking/Params.lean`, `CN/TypeChecking/Check.lean`
+**Depends on**: WP-I (ghost statement infrastructure)
+
+**Tasks**:
+1. Parse loop invariant annotations from label definitions (cerb::magic on Esave nodes)
+2. Process loop labels like function specs (resources + constraints)
+3. At `Erun`, verify invariant holds on entry
+4. At loop body, assume invariant, verify it's maintained
+**CN ref**: `core_to_mucore.ml:931-1026`
+
+### WP-L: wellTyped Checking — ❌ NOT DONE (deprioritized)
+**Status**: Functionality distributed across Check.lean, Inference.lean, Pexpr.lean
+**Assessment**: Not needed as a separate module. Type checking is embedded in the existing checking pipeline. The remaining gaps (inferTerm, checkTerm for complex terms) can be added incrementally to Pexpr.lean when needed.
+
+**Recommendation**: Remove as standalone WP. Address specific gaps as they surface in test failures.
+
+### WP-M: Global Variables + `accesses` — ❌ NOT DONE
+**Status**: Test 099-global-access.c fails with "unbound variable: g"
+**Files**: `CN/Parser.lean`, `CN/TypeChecking/Check.lean`
+**Depends on**: Wave 2 complete
+
+**Tasks**:
+1. Parse `accesses x` clause in function annotations
+2. Generate implicit `Owned` resource for global variable
+3. Look up global symbol in Core file's global declarations
+**CN ref**: `core_to_mucore.ml:718-723`
+
+---
+
+## Remaining Known Divergences from CN
+
+12 `DIVERGES-FROM-CN` markers across the codebase:
+
+| File | Description | Impact |
+|------|-------------|--------|
+| Inference.lean (×4) | Padding resources skipped in struct unpack/repack | Internally consistent; padding not tracked |
+| Inference.lean (×1) | qpredicateRequest: no alpha-renaming or permission widening | Could mis-match resources with quantifier name collisions |
+| GhostStatement.lean (×2) | split_case: simplified to just addC | Sound but less precise |
+| Expr.lean (×3) | PtrEq/PtrNe simplified, IntFromPtr simplified representability | Skips ambiguous provenance cases |
+| Spine.lean (×2) | gargs_opt handling differs (ghost params not supported) | Blocks ghost parameter tests |
+| Simplify.lean (×2) | SizeOf not constant-folded, cast reduction differs | Minor optimization gap |
+| DerivedConstraints.lean (×1) | Missing VIP allocation bounds | Minor completeness gap |
+| Action.lean (×1) | SeqRMW: CN asserts error, we type-check | Extension beyond CN |
+
+0 `FIXME` markers — all known issues are either fixed or marked as intentional divergences.
 
 ---
 
 ## Leader Integration Points
 
-**After Wave 1**:
-- Patch `Monad.lean:provable` to call `Simplify.simplify` (from WP-B)
-- Patch `Monad.lean:addR` to call `deriveConstraints` (from WP-C)
-- Update module imports in `TypeChecking.lean` aggregator
-- Run `make test-cn` to verify
+**After Wave 1** — ✅ DONE:
+- ✅ Monad.lean patched: `Simplify.simplify` integrated
+- ✅ Monad.lean patched: `deriveConstraints` integrated in `addR`
+- ✅ TypeChecking.lean aggregator updated
+- ✅ Tests verified: 83/90 → progressed to 84/90
 
-**After Wave 2**:
-- Integrate `GhostStatement.lean` into `Expr.lean` Esseq path (from WP-I)
-- Update module imports
-- Run `make test-cn` to verify expanded coverage
+**After Wave 2** — ✅ DONE:
+- ✅ GhostStatement.lean integrated into Expr.lean Esseq path
+- ✅ Symbol resolution + store value substitution working
+- ✅ Module imports updated
+- ✅ Tests verified: 84/90 (96-ghost-have now PASSING)
 
-**After Wave 3**:
-- Final integration and test pass
-- Update `CLAUDE.md` with new capabilities
-- Run full `make test-cn` and verify all expected tests pass
+**After Wave 3** (remaining):
+- Integrate loop invariant processing into Params.lean/Check.lean
+- Add global variable resource generation
+- Final `make test-cn` pass
+- Update CLAUDE.md with new capabilities
+
+---
+
+## Revised Priority (Remaining Work)
+
+**High Impact — Unblocks failing tests:**
+
+| Priority | Task | Test Unblocked | Effort |
+|----------|------|----------------|--------|
+| 1 | **WP-K: Loop invariants** | 098-loop-invariant.c | Medium (label spec parsing + invariant checking) |
+| 2 | **WP-J: Ghost parameters** | 100-ghost-params.c | Medium (spec parser + Spine.lean) |
+| 3 | **WP-M: Global variables** | 099-global-access.c | Small (parser + resource generation) |
+| 4 | **Fix 044 RMW bug** | 044-pre-post-increment.c | Small (Kill lifecycle in RMW) |
+| 5 | **Fix 091 array QPredicate matching** | 091-array-owned.c | Small (debug resource matching) |
+
+**Medium Impact — Correctness improvements:**
+
+| Priority | Task | Description |
+|----------|------|-------------|
+| 6 | WP-D: Alpha-renaming | Fix constraint substitution for forall-bound vars |
+| 7 | PtrLt/Gt/Le/Ge memops | Require allocation liveness checks |
+| 8 | PtrFromInt / Ptrdiff / CopyAllocId | Remaining pointer memops |
+| 9 | Padding in struct unpack/repack | Close 4 DIVERGES-FROM-CN markers |
+| 10 | qpredicateRequest strengthening | Alpha-renaming + permission analysis |
+
+**Low Impact — Incremental SMT completeness:**
+
+| Priority | Task |
+|----------|------|
+| 11 | EachI unrolling, CType encoding |
+| 12 | min/max/exp term encodings |
+| 13 | List/Map/Set/Option SMT ops |
+| 14 | Full Match compilation |
+| 15 | ByteFromInt/IntFromByte, Carray |
 
 ---
 
@@ -296,15 +342,8 @@ Fail explicitly for: `pack`/`unpack`/`unfold`/`apply`/`inline`/`to_from_bytes`
 
 ---
 
-## Execution Priority (If Resource-Constrained)
+## Changelog
 
-1. **WP-A task 1** (NoSMT fix) — Critical correctness bug
-2. **WP-C** (pointer_facts) — Core separation logic
-3. **WP-A tasks 2-6** (SMT encoding) — Foundation for everything
-4. **WP-B** (simplification) — Performance enabler
-5. **WP-F** (resource inference) — Verification power
-6. **WP-G** (pointer memops) — Test coverage
-7. **WP-D** (alpha-renaming) — Correctness fix
-8. **WP-H, WP-I** (pexpr, ghost stmts) — Feature expansion
-9. **WP-J, WP-K** (ghost params, loops) — Common C patterns
-10. **WP-L, WP-M** (wellTyped, globals) — Completeness
+- **2026-02-18**: Initial plan created. Waves 0–1 executed.
+- **2026-02-18**: Wave 2 executed (commits b86e2b2, e950a7c). Test suite expanded from 78 → 90 files.
+- **2026-02-19**: Ghost statement symbol resolution + SMT preamble fix (commit 9da903b). Test 096-ghost-have now passes. Pass rate: 84/90 (93%).

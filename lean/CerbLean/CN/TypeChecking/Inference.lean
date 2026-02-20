@@ -74,6 +74,13 @@ For the fast path, we check syntactic equality of pointers.
 For the slow path, we construct an equality constraint and check provability.
 -/
 
+/-- Extract the integer value from a constant term, if it is an integer constant.
+    Handles both unbounded integers (.z) and fixed-width integers (.bits). -/
+private def constIntValue : Term → Option Int
+  | .const (.z v) => some v
+  | .const (.bits _ _ v) => some v
+  | _ => none
+
 /-- Structural equality check for index terms (fast path).
 
     CN does not have a dedicated syntactic equality function. Instead,
@@ -84,7 +91,11 @@ For the slow path, we construct an equality constraint and check provability.
 
     This function approximates CN's fast-path simplifier behavior for the
     specific case of checking term equality. It handles the structural cases
-    that arise from pointer expressions (memberShift, arrayShift, etc.). -/
+    that arise from pointer expressions (memberShift, arrayShift, etc.).
+
+    Also handles cross-type integer comparison: `z(N)` matches `bits(_, _, N)`
+    when both represent the same mathematical integer. This is needed because
+    Core IR produces unbounded integers while specs produce fixed-width integers. -/
 partial def termSyntacticEq (t1 t2 : IndexTerm) : Bool :=
   match t1.term, t2.term with
   | .sym s1, .sym s2 => s1 == s2  -- Uses BEq Sym (digest + id, matching CN)
@@ -99,11 +110,20 @@ partial def termSyntacticEq (t1 t2 : IndexTerm) : Bool :=
   | .const (.bool b1), .const (.bool b2) => b1 == b2
   | .const .null, .const .null => true
   | .const .unit, .const .unit => true
+  | .cast bt1 inner1, .cast bt2 inner2 =>
+    baseTypeReprEq bt1 bt2 && termSyntacticEq inner1 inner2
   | .binop op1 l1 r1, .binop op2 l2 r2 =>
     op1 == op2 && termSyntacticEq l1 l2 && termSyntacticEq r1 r2
   | .unop op1 arg1, .unop op2 arg2 =>
     op1 == op2 && termSyntacticEq arg1 arg2
-  | _, _ => false
+  | _, _ =>
+    -- Cross-type integer comparison: z(N) == bits(_, _, N) when N is the same
+    -- This handles the common case where Core IR produces unbounded integers (z)
+    -- but specs produce fixed-width integers (bits) for the same mathematical value.
+    -- CN's simplifier normalizes these before comparison; we handle it here.
+    match constIntValue t1.term, constIntValue t2.term with
+    | some v1, some v2 => v1 == v2
+    | _, _ => false
 
 /-! ## Struct Resource Unpacking
 

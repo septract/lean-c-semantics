@@ -1850,6 +1850,65 @@ def parseVisibleObjectsEntry (j : Json) : Except String (Nat × List (Sym × Cty
     .ok (sym, ctype)
   .ok (markerId, objects)
 
+/-- Extract save arg C types from JSON expression tree.
+    Walks the JSON looking for Esave nodes and extracts ctype_pass_by.ctype
+    from each arg. Returns a list of (label_sym_id, [(arg_sym_opt, ctype)]).
+    Used by CN loop invariant infrastructure to build proper label types.
+    Corresponds to: lt field (ctype info) in milicore.ml Mi_Label -/
+partial def extractSaveArgCTypes (j : Json) : List (Nat × List (Option Sym × Ctype)) :=
+  go [] j
+where
+  /-- Try to parse ctype_pass_by from an Esave arg JSON object -/
+  parseArgCType (argJ : Json) : Option (Option Sym × Ctype) :=
+    match getFieldOpt argJ "ctype_pass_by" with
+    | some cpbJ =>
+      match getFieldOpt cpbJ "ctype" with
+      | some ctypeJ =>
+        match parseCtype ctypeJ with
+        | .ok ct =>
+          let symOpt := match getFieldOpt argJ "symbol" with
+            | some symJ => match parseSym symJ with
+              | .ok s => some s
+              | .error _ => none
+            | none => none
+          some (symOpt, ct)
+        | .error _ => none
+      | none => none
+    | none => none
+  /-- Collect all JSON values from a JSON object (for recursion) -/
+  collectObjValues (j : Json) : List Json :=
+    match j with
+    | .obj kvs => kvs.foldl (init := []) fun acc _ v => v :: acc
+    | _ => []
+  /-- Walk JSON tree to find Esave nodes -/
+  go (acc : List (Nat × List (Option Sym × Ctype))) (j : Json) :
+      List (Nat × List (Option Sym × Ctype)) :=
+    match j with
+    | .obj _ =>
+      -- Check if this is an Esave by looking at the "tag" field
+      let isEsave := match j.getObjVal? "tag" with
+        | .ok (.str "Esave") => true
+        | _ => false
+      if isEsave then
+        let entry := match j.getObjVal? "label", j.getObjVal? "args" with
+          | .ok labelJ, .ok (.arr argsArr) =>
+            match parseSym labelJ with
+            | .ok labelSym =>
+              let ctypes := argsArr.toList.filterMap parseArgCType
+              if ctypes.isEmpty then none else some (labelSym.id, ctypes)
+            | .error _ => none
+          | _, _ => none
+        let acc' := match entry with
+          | some e => e :: acc
+          | none => acc
+        -- Also recurse into children (for nested Esaves)
+        (collectObjValues j).foldl go acc'
+      else
+        -- Not an Esave, recurse into children
+        (collectObjValues j).foldl go acc
+    | .arr items => items.foldl go acc
+    | _ => acc
+
 /-- Parse a complete Core File from JSON -/
 def parseFile (j : Json) : Except String File := do
   -- Parse main symbol
@@ -1931,6 +1990,12 @@ def parseFile (j : Json) : Except String File := do
     let arr ← voeJ.getArr?
     arr.toList.mapM parseVisibleObjectsEntry
 
+  -- Extract Esave arg C types for CN loop invariant infrastructure.
+  -- This is a separate pass over the JSON because the expression parser
+  -- doesn't carry ctype_pass_by data. We extract it here and store it
+  -- in File for use by LabelContext.ofLabelDefs.
+  let saveArgCTypes := extractSaveArgCTypes j
+
   .ok {
     main := main
     callingConvention := callingConvention
@@ -1942,6 +2007,7 @@ def parseFile (j : Json) : Except String File := do
     extern := extern
     funinfo := funinfo
     loopAttributes := loopAttributes
+    saveArgCTypes := saveArgCTypes
     visibleObjectsEnv := visibleObjectsEnv
   }
 

@@ -675,7 +675,8 @@ def letClause : P Clause := do
   pure (.letBinding (mkSym name) e)
 
 /-- Keywords that should not be parsed as identifiers in expressions -/
-def cnKeywords : List String := ["requires", "ensures", "take", "let", "trusted", "implies"]
+def cnKeywords : List String := ["requires", "ensures", "take", "let", "trusted", "implies",
+                                  "accesses", "cn_ghost"]
 
 /-- Fail if next token is a keyword (using negative lookahead) -/
 def notKeyword : P Unit := do
@@ -685,6 +686,8 @@ def notKeyword : P Unit := do
   notFollowedBy (keyword "take")
   notFollowedBy (keyword "let")
   notFollowedBy (keyword "trusted")
+  notFollowedBy (keyword "accesses")
+  notFollowedBy (keyword "cn_ghost")
 
 /-- Parse a constraint clause: expr; -/
 def constraintClause : P Clause := do
@@ -700,11 +703,47 @@ def condition : P Clause :=
 
 /-! ## Function Spec Parsers -/
 
-/-- Parse a requires clause -/
-def requiresClause : P (List Clause) := do
+/-- Parse an `accesses` clause: `accesses name1, name2, ...;`
+    Declares global variables that the function accesses.
+    CN ref: c_parser.mly accesses production -/
+def accessesClause : P (List String) := do
+  keyword "accesses"
+  let first ← ident
+  let rest ← many (attempt (symbol "," *> ident))
+  symbol ";"
+  pure (first :: rest.toList)
+
+/-- Parse a single ghost parameter declaration: `type name`
+    CN ref: c_parser.mly cn_ghost production -/
+partial def ghostParamDecl : P (Sym × BaseType) := do
+  let bt ← cnBaseType
+  let name ← ident
+  pure (mkSym name, bt)
+
+/-- Parse a `cn_ghost` clause: `cn_ghost type1 name1, type2 name2;`
+    Declares ghost (logical-only) parameters for the function.
+    CN ref: c_parser.mly cn_ghost production, core_to_mucore.ml ghost handling -/
+partial def ghostParamsClause : P (List (Sym × BaseType)) := do
+  keyword "cn_ghost"
+  let first ← ghostParamDecl
+  let rest ← many (attempt (symbol "," *> ghostParamDecl))
+  symbol ";"
+  pure (first :: rest.toList)
+
+/-- Parse a requires clause, optionally preceded by cn_ghost declarations.
+    The cn_ghost clause appears after the `requires` keyword in CN syntax:
+    ```
+    requires cn_ghost i32 a, i32 b;
+             a + b == total;
+    ```
+    CN ref: c_parser.mly requires + cn_ghost interaction -/
+partial def requiresClause : P (List Clause × List (Sym × BaseType)) := do
   keyword "requires"
+  -- Ghost params can appear right after `requires` keyword
+  let ghostParamsOpt ← optional (attempt ghostParamsClause)
+  let ghostParams := ghostParamsOpt.getD []
   let clauses ← many1 condition
-  pure clauses.toList
+  pure (clauses.toList, ghostParams)
 
 /-- Parse an ensures clause -/
 def ensuresClause : P (List Clause) := do
@@ -719,22 +758,29 @@ def ensuresClause : P (List Clause) := do
     This matches CN's approach in core_to_mucore.ml:1164 where ret_s is
     created before desugaring ensures.
 
-    Audited: 2026-01-27 against cn/lib/core_to_mucore.ml -/
-def functionSpec : P FunctionSpec := do
+    Audited: 2026-02-19 against cn/lib/core_to_mucore.ml -/
+partial def functionSpec : P FunctionSpec := do
   ws
   let trusted ← optional (keyword "trusted" *> symbol ";")
-  let reqBlocks ← many requiresClause
+  -- Parse accesses clauses (can appear before requires)
+  let accBlocks ← many (attempt accessesClause)
+  let reqBlocks ← many (attempt requiresClause)
   let ensBlocks ← many ensuresClause
   ws
+  -- Extract ghost params and clauses from requires blocks
+  let allClauses := reqBlocks.toList.map (·.1) |>.flatten
+  let allGhostParams := reqBlocks.toList.map (·.2) |>.flatten
   -- Create the return symbol. This is the symbol that `return` references
   -- in the postcondition resolve to. Using ID 0 matches mkSym "return".
   -- Corresponds to: register_new_cn_local (Id.make here "return") in CN
   let returnSym : Sym := { id := 0, name := some "return" }
   pure {
     returnSym := returnSym
-    requires := { clauses := reqBlocks.toList.flatten }
+    requires := { clauses := allClauses }
     ensures := { clauses := ensBlocks.toList.flatten }
     trusted := trusted.isSome
+    accesses := accBlocks.toList.flatten
+    ghostParams := allGhostParams
   }
 
 /-! ## Main Entry Points -/
@@ -749,6 +795,35 @@ def parseFunctionSpecOpt (input : String) : Option FunctionSpec :=
   | .ok spec => some spec
   | .error _ => none
 
+/-! ## Loop Invariant Parsing
+
+Parses loop invariant annotations of the form `inv expr1; expr2; expr3;`.
+This is called when processing loop_attributes from CN annotations.
+
+CN ref: c_parser.mly cn_inv production, core_to_mucore.ml loop handling
+-/
+
+/-- Parse a loop invariant: `inv expr1; expr2; ...`
+    Returns a list of constraint expressions (one per semicolon-separated clause).
+    The `inv` keyword has already been consumed by the caller in some contexts;
+    this parser expects the full `inv expr; expr; ...` format.
+
+    CN ref: c_parser.mly cn_inv, core_to_mucore.ml loop invariant handling -/
+partial def parseInvariant (input : String) : Except String (List AnnotTerm) :=
+  runParser (do
+    ws
+    keyword "inv"
+    let mut exprs : List AnnotTerm := []
+    -- Parse constraint expressions separated by semicolons
+    while (← peek?).isSome do
+      -- Don't parse keywords as expressions
+      notKeyword
+      let e ← expr
+      symbol ";"
+      exprs := exprs ++ [e]
+      ws
+    pure exprs) input
+
 /-! ## Ghost Statement Parsing
 
 Parses CN ghost statement text from cerb::magic attributes.
@@ -761,20 +836,42 @@ CN ref: cn/lib/parse.ml:78-79 (cn_statements → C_parser.cn_statements)
 structure ParsedGhostStatement where
   kind : String
   constraint : Option AnnotTerm
+  /-- For focus/instantiate: the resource predicate name -/
+  resourcePred : Option ResourceName := none
+  /-- For focus/instantiate: the index expression -/
+  indexExpr : Option AnnotTerm := none
 
-/-- Parse a single ghost statement: kind(expr) or kind(expr); -/
-partial def ghostStatement : P ParsedGhostStatement := do
+/-- Parse a focus/instantiate ghost statement: `focus Pred<type>, indexExpr;`
+    or `instantiate Pred<type>, indexExpr;`
+    CN ref: check.ml:2204-2246 (instantiate and extract/focus handling) -/
+partial def focusStatement : P ParsedGhostStatement := do
   ws
   let kind ← ident
-  -- Some statements have an argument expression, some don't
-  let constraint ← optional (attempt do
-    symbol "("
-    let e ← expr
-    symbol ")"
-    pure e)
-  -- Skip optional trailing semicolons
+  if kind != "focus" && kind != "instantiate" && kind != "extract" then
+    fail "not a focus/instantiate statement"
+  let pred ← predName
+  symbol ","
+  let indexE ← expr
   let _ ← optional (symbol ";")
-  pure ⟨kind, constraint⟩
+  pure { kind := kind, constraint := none, resourcePred := some pred, indexExpr := some indexE }
+
+/-- Parse a single ghost statement: kind(expr) or kind(expr); or focus Pred, index; -/
+partial def ghostStatement : P ParsedGhostStatement := do
+  ws
+  -- Try focus/instantiate format first (keyword Pred<type>, index;)
+  match ← optional (attempt focusStatement) with
+  | some stmt => pure stmt
+  | none =>
+    let kind ← ident
+    -- Some statements have an argument expression, some don't
+    let constraint ← optional (attempt do
+      symbol "("
+      let e ← expr
+      symbol ")"
+      pure e)
+    -- Skip optional trailing semicolons
+    let _ ← optional (symbol ";")
+    pure { kind := kind, constraint := constraint }
 
 /-- Parse one or more ghost statements from a magic attribute string.
     CN ref: cn/lib/parse.ml:78-79 -/
@@ -788,5 +885,19 @@ def parseGhostStatements (input : String) : Except String (List ParsedGhostState
       stmts := stmts ++ [s]
       ws
     pure stmts) input
+
+/-- Parse call-site ghost arguments from a magic attribute string.
+    Ghost args are comma-separated CN expressions: `3i32, 7i32`
+    CN ref: c_parser.mly ghost argument annotations at call sites -/
+def parseGhostArgs (input : String) : Except String (List AnnotTerm) :=
+  runParser (do
+    ws
+    let first ← expr
+    let mut args := [first]
+    while (← optional (symbol ",")).isSome do
+      let arg ← expr
+      args := args ++ [arg]
+    ws
+    pure args) input
 
 end CerbLean.CN.Parser

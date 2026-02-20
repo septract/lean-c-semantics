@@ -372,6 +372,21 @@ namespace LabelContext
 def get? (ctx : LabelContext) (sym : Sym) : Option LabelEntry :=
   ctx.lookup sym.id
 
+/-- Get the loop ID from a label's annotations if it has an LAloop annotation.
+    Corresponds to: get_label_annot + match LAloop in CN -/
+private def getLoopIdFromAnnots (annots : Core.Annots) : Option Nat :=
+  annots.findSome? fun
+    | .label (.loop id) => some id
+    | _ => none
+
+/-- Get the label kind from a label's annotations.
+    Corresponds to: get_label_annot in annot.lem -/
+private def getLabelKindFromAnnots (annots : Core.Annots) : LabelKind :=
+  match annots.findSome? (fun | .label a => some a | _ => none) with
+  | some (Core.LabelAnnot.return_) => .return_
+  | some (Core.LabelAnnot.loop _) => .loop
+  | _ => .other
+
 /-- Create label context from function spec and label definitions.
     Corresponds to: WProc.label_context in wellTyped.ml line 2474
 
@@ -393,9 +408,12 @@ def get? (ctx : LabelContext) (sym : Sym) : Option LabelEntry :=
     Parameters:
     - spec: Function specification (contains return symbol and postcondition)
     - returnBt: Base type of the return value
-    - labelDefs: Label definitions from muCore transformation -/
+    - labelDefs: Label definitions from muCore transformation
+    - loopLabelTypes: Pre-built label types for loop labels, keyed by label sym ID.
+      Built by the caller (Params.lean) using loop_attributes and saveArgCTypes. -/
 def ofLabelDefs (spec : FunctionSpec) (returnBt : BaseType)
-    (labelDefs : Core.MuCore.LabelDefs) : LabelContext :=
+    (labelDefs : Core.MuCore.LabelDefs)
+    (loopLabelTypes : List (Nat × LT) := []) : LabelContext :=
   labelDefs.filterMap fun (symId, labelDef) =>
     match labelDef with
     | .return_ loc =>
@@ -404,11 +422,28 @@ def ofLabelDefs (spec : FunctionSpec) (returnBt : BaseType)
       let lt := LT.ofFunctionSpec spec returnBt
       some (symId, { lt := lt, kind := .return_, loc := loc })
     | .label info =>
-      -- Regular label: for now, create a simple label type
-      -- Full implementation would derive from label's own type
-      -- TODO: Implement WLabel.typ equivalent for regular labels
-      let lt : LT := .L LAT.terminalValue
-      some (symId, { lt := lt, kind := .other, loc := info.loc })
+      -- Determine label kind from annotations
+      let kind := getLabelKindFromAnnots info.annots
+      match kind with
+      | .loop =>
+        -- Loop label: use pre-built label type if available
+        -- Corresponds to: Loop case in WProc.label_context (wellTyped.ml:2483-2486)
+        match loopLabelTypes.lookup symId with
+        | some lt => some (symId, { lt := lt, kind := .loop, loc := info.loc })
+        | none =>
+          -- Fallback: create label type with correct number of computational args
+          -- but no resource/constraint clauses.
+          -- DIVERGES-FROM-CN: CN's make_label_args also produces Owned resources
+          -- and invariant constraints. We build a minimal type with just args.
+          let lt := info.params.foldr (init := (.L LAT.terminalValue : LT)) fun (sym, _bt) acc =>
+            .computational sym .loc { loc := info.loc, desc := s!"loop var {sym.name.getD ""}" } acc
+          some (symId, { lt := lt, kind := .loop, loc := info.loc })
+      | _ =>
+        -- Non-loop non-return label: create a simple label type with args
+        -- Corresponds to: Non_inlined case in WProc.label_context
+        let lt := info.params.foldr (init := (.L LAT.terminalValue : LT)) fun (sym, _bt) acc =>
+          .computational sym .loc { loc := info.loc, desc := s!"label var {sym.name.getD ""}" } acc
+        some (symId, { lt := lt, kind := .other, loc := info.loc })
 
 end LabelContext
 

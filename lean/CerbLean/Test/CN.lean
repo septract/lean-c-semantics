@@ -347,8 +347,13 @@ def buildFunctionType (spec : FunctionSpec)
   -- clause structure, so we wrap it as a Postcondition for the conversion.
   let preAsPost : Postcondition := { clauses := spec.requires.clauses }
   let lat := LAT.ofPostcondition preAsPost (.I returnType)
+  -- Add ghost params between computational args and LAT
+  -- Ghost params are logical-only parameters from cn_ghost declarations
+  -- Corresponds to: CN's AT.Ghost entries in function types
+  let withGhosts := spec.ghostParams.foldr (init := AT.L lat) fun (sym, bt) rest =>
+    AT.ghost sym bt { loc := .unknown, desc := s!"ghost param {sym.name.getD ""}" } rest
   -- Wrap computational args from right to left (last param is innermost)
-  cParams.foldr (init := AT.L lat) fun (sym, bt) rest =>
+  cParams.foldr (init := withGhosts) fun (sym, bt) rest =>
     AT.computational sym bt { loc := .unknown, desc := s!"parameter {sym.name.getD ""}" } rest
 
 /-- Build the function spec map from a parsed Core file.
@@ -386,7 +391,7 @@ def buildFunctionSpecMap (file : Core.File) : FunctionSpecMap :=
           let paramCTypes : List (String × Core.Ctype) :=
             funInfo.params.filterMap fun fp =>
               fp.sym.bind fun s => s.name.map fun name => (name, fp.ty)
-          let resolveResult := (resolveFunctionSpec spec cParams returnBt (maxParamId + 1) paramCTypes).toOption
+          let resolveResult := (resolveFunctionSpec spec cParams returnBt (maxParamId + 1) paramCTypes file.tagDefs file.globs).toOption
           match resolveResult with
           | none => none  -- Skip unresolvable specs
           | some resolvedSpec =>
@@ -471,7 +476,7 @@ def runJsonTest (jsonPath : String) (expectFail : Bool := false) : IO UInt32 := 
             match findFunctionInfo file sym.name with
             | some info =>
               -- Full verification: check body against spec with parameters bound
-              let result ← checkFunctionWithParams spec info.body info.params info.cParams info.retTy info.cRetTy Core.Loc.t.unknown functionSpecs file.funinfo file.tagDefs
+              let result ← checkFunctionWithParams spec info.body info.params info.cParams info.retTy info.cRetTy Core.Loc.t.unknown functionSpecs file.funinfo file.tagDefs file.loopAttributes file.saveArgCTypes file.globs
               if result.success then
                 -- Discharge conditional failures via SMT
                 let mut cfFailed := false
@@ -676,7 +681,7 @@ def runJsonTestWithVerify (jsonPath : String) (expectFail : Bool := false) : IO 
             match findFunctionInfo file sym.name with
             | some info =>
               -- Type check first
-              let tcResult ← checkFunctionWithParams spec info.body info.params info.cParams info.retTy info.cRetTy Core.Loc.t.unknown functionSpecs file.funinfo file.tagDefs
+              let tcResult ← checkFunctionWithParams spec info.body info.params info.cParams info.retTy info.cRetTy Core.Loc.t.unknown functionSpecs file.funinfo file.tagDefs file.loopAttributes file.saveArgCTypes file.globs
               if !tcResult.success then
                 verifyFail := verifyFail + 1
                 IO.println "  TYPECHECK FAIL"

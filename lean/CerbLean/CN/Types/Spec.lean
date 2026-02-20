@@ -105,6 +105,21 @@ structure FunctionSpec where
   ensures : Postcondition
   /-- Whether the function is marked as trusted (no verification) -/
   trusted : Bool := false
+  /-- Global variable names declared with `accesses`.
+      Corresponds to: accesses clause in CN function specs.
+      CN ref: c_parser.mly accesses production -/
+  accesses : List String := []
+  /-- Ghost parameter declarations from `cn_ghost type name, ...`.
+      These are logical-only parameters that appear in the spec but not
+      in the C function signature. They introduce existentially quantified
+      variables in the precondition.
+      CN ref: c_parser.mly cn_ghost production, core_to_mucore.ml ghost handling -/
+  ghostParams : List (Sym × BaseType) := []
+  /-- Resolved global accesses: (name, fresh value symbol, base type).
+      Populated by resolution; used by Params.lean to generate Owned resources.
+      Each entry maps a global variable name to a fresh symbol representing
+      the value stored at that global's address. -/
+  resolvedAccesses : List (String × Sym × BaseType) := []
   deriving Inhabited
 
 /-! ## Raw CN Annotation

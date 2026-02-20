@@ -234,6 +234,17 @@ def handleKill (kind : KillKind) (ptrPe : APexpr) (loc : Core.Loc)
     | .static ct => ct
     | .dynamic => Ctype.void  -- Dynamic kill (free) - type determined at runtime
 
+  -- Lazy muCore: check for parameter stack slot FIRST, before resource consumption.
+  -- CN's muCore doesn't include param slot kills in the callee — the caller manages them.
+  -- This MUST be checked before resource consumption because the SMT slow path
+  -- in predicateRequest could incorrectly consume an unrelated resource when
+  -- it finds a single name-matching candidate at a different pointer.
+  match ptr.term with
+  | .sym s =>
+    if ← TypingM.isParamStackSlot s.id then
+      return mkUnitTerm loc
+  | _ => pure ()
+
   -- First try to consume Owned<T>(Uninit) for this pointer
   let uninitPred : Predicate := {
     name := .owned (some ct) .uninit
@@ -258,19 +269,7 @@ def handleKill (kind : KillKind) (ptrPe : APexpr) (loc : Core.Loc)
       -- Resource consumed successfully
       return mkUnitTerm loc
     | none =>
-      -- No resource found.
-      -- Fallback: if this is a kill of a parameter stack slot (lazy muCore),
-      -- silently succeed. CN's muCore doesn't include param slot kills in the
-      -- callee — the caller manages them. This fallback only fires when no
-      -- Owned resource exists, avoiding false positives.
-      match ptr.term with
-      | .sym s =>
-        if ← TypingM.isParamStackSlot s.id then
-          return mkUnitTerm loc
-        else
-          TypingM.fail (.other s!"Kill: no Owned resource found for pointer (possible double-free or use-after-free)")
-      | _ =>
-        TypingM.fail (.other s!"Kill: no Owned resource found for pointer (possible double-free or use-after-free)")
+      TypingM.fail (.other s!"Kill: no Owned resource found for pointer (possible double-free or use-after-free)")
 
 /-- Handle store action: write to memory.
     Consumes Owned<T>(Uninit) or Owned<T>(Init), produces Owned<T>(Init) with the stored value.
@@ -366,12 +365,9 @@ def handleStore (_locking : Bool) (tyPe : APexpr) (ptrPe : APexpr) (valPe : APex
         addResourceWithUnfold resource
       return mkUnitTerm loc
     | none =>
-      -- No matching resource found.
-      -- Fallback: if this is a store to a parameter stack slot (lazy muCore),
-      -- update the param value instead. CN's muCore eliminates these stores;
-      -- our lazy approach handles them here when no Owned resource exists.
-      -- This correctly avoids false positives: stores through pointer parameters
-      -- (e.g., *p = x) always find Owned resources from the spec first.
+      -- Fallback: param stack slot check (only when no resource found)
+      -- CN's muCore eliminates stores to parameter slots entirely (core_to_mucore.ml).
+      -- We handle them lazily here by updating the param value map.
       match ptr.term with
       | .sym s =>
         if ← TypingM.isParamStackSlot s.id then

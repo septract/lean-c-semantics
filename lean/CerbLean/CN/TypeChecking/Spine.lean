@@ -233,12 +233,13 @@ Calls spine with a label type and label kind.
     2. Processes the postcondition (resources and constraints)
     3. The continuation receives False (uninhabited) - never called
 
-    DIVERGES-FROM-CN: CN's calltype_lt passes gargs_opt through to spine.
-    We pass [] for gargs since label calls with ghost args are not yet
-    exercised. When ghost label args are needed, callers should pass gargs. -/
-def calltypeLt (loc : Loc) (args : List APexpr) (entry : LabelEntry)
-    (k : False_ → TypingM Unit) : TypingM Unit := do
-  spine loc (.labelCall entry.kind) (fun _ x => x) args [] entry.lt k
+    The `gargs` parameter carries ghost argument values (from cn_ghost declarations
+    or loop invariant ghost bindings). CN passes these separately from computational args.
+
+    Audited: 2026-02-20 against cn/lib/check.ml lines 1207-1208 -/
+def calltypeLt (loc : Loc) (args : List APexpr) (gargs : List IndexTerm)
+    (entry : LabelEntry) (k : False_ → TypingM Unit) : TypingM Unit := do
+  spine loc (.labelCall entry.kind) (fun _ x => x) args gargs entry.lt k
 
 /-! ## Subtype: Postcondition Checking
 
@@ -278,12 +279,13 @@ The inner substitution is ReturnType.subst (substitutes in the LRT).
     Processes the function's arguments via spine, consuming precondition
     resources and returning the ReturnType (which contains the postcondition).
 
-    DIVERGES-FROM-CN: CN's calltype_ft passes gargs_opt through to spine.
-    We pass [] for gargs since function calls with ghost args are not yet
-    exercised. When ghost function args are needed, callers should pass gargs. -/
+    The `gargs` parameter carries ghost argument values (from cn_ghost declarations).
+    CN passes these separately from computational args.
+
+    Audited: 2026-02-19 against cn/lib/check.ml lines 1203-1204 -/
 def calltypeFt (loc : Loc) (fsym : Sym) (args : List APexpr)
-    (ft : AT ReturnType) (k : ReturnType → TypingM Unit) : TypingM Unit :=
-  spine loc (.functionCall fsym) ReturnType.subst args [] ft k
+    (gargs : List IndexTerm) (ft : AT ReturnType) (k : ReturnType → TypingM Unit) : TypingM Unit :=
+  spine loc (.functionCall fsym) ReturnType.subst args gargs ft k
 
 /-! ## Bind Logical Return: Postcondition Processing
 

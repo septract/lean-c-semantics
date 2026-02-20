@@ -468,12 +468,38 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
       | some ft => pure ft
       | none => TypingM.fail (.other s!"Call to function with no spec: {funSym.name.getD "<unnamed>"}")
 
-    -- 3. Process computational args with store resolution, then spine_l for precondition
+    -- 3. Parse call-site ghost arguments from cerb::magic annotations
+    -- Ghost args appear as /*@ expr1, expr2 @*/ at the call site
+    -- Corresponds to: CN's parsing of ghost arguments in c_parser.mly
+    let ghostArgs : List IndexTerm ← do
+      let magicTexts := e.annots.getCerbMagic
+      let mut allArgs : List IndexTerm := []
+      for magicText in magicTexts do
+        match CerbLean.CN.Parser.parseGhostArgs magicText with
+        | .ok parsedArgs =>
+          -- Resolve parsed ghost arg terms against current context
+          let ctx ← TypingM.getContext
+          let st ← TypingM.getState
+          let storeList := st.storeValues.toList.map fun (id, val) => (id, val)
+          let resolveCtx := Resolve.resolveContextFromTypingContext ctx st.tagDefs st.freshCounter storeList
+          for parsedArg in parsedArgs do
+            match Resolve.resolveAnnotTerm resolveCtx parsedArg none with
+            | .ok resolved =>
+              let resolved' := Resolve.substStoreValues ctx storeList resolved
+              allArgs := allArgs ++ [resolved']
+            | .error (.symbolNotFound name) =>
+              TypingM.fail (.other s!"ghost argument: unresolved symbol '{name}'")
+            | .error e =>
+              TypingM.fail (.other s!"ghost argument resolution error: {repr e}")
+        | .error _ => pure ()  -- Not parseable as ghost args, skip
+      pure allArgs
+
+    -- 4. Process computational args with store resolution, then spine_l for precondition
     -- This inlines spine's computational arg processing with an additional
     -- store-resolution step for the lazy muCore transformation.
     -- Corresponds to: Spine.calltype_ft → spine → spine_l
     let rec processComputationalArgs (argsList : List APexpr) (at_ : AT ReturnType)
-        : TypingM Unit := do
+        (gargs : List IndexTerm) : TypingM Unit := do
       match argsList, at_ with
       | arg :: restArgs, .computational s bt _info rest =>
         -- Evaluate the argument expression
@@ -491,10 +517,18 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
           -- Substitute resolved value for parameter in rest of type
           let σ := Subst.single s resolvedVal
           let rest' := AT.subst ReturnType.subst σ rest
-          processComputationalArgs restArgs rest') (some bt)
-      | _, .ghost _s _bt _info rest =>
-        -- Skip ghost args (not yet supported)
-        processComputationalArgs argsList rest
+          processComputationalArgs restArgs rest' gargs) (some bt)
+      | _, .ghost s _bt _info rest =>
+        -- Ghost argument: substitute from parsed ghost arg annotations
+        -- Ghost args come from /*@ expr1, expr2 @*/ at the call site (cerb::magic)
+        -- Corresponds to: spine ghost case, check.ml lines 1170-1200
+        match gargs with
+        | garg :: restGargs =>
+          let σ := Subst.single s garg
+          let rest' := AT.subst ReturnType.subst σ rest
+          processComputationalArgs argsList rest' restGargs
+        | [] =>
+          TypingM.fail (.other s!"Not enough ghost arguments provided in call to {funSym.name.getD "<unnamed>"}")
       | [], .L lat =>
         -- All computational args processed, now process precondition via spine_l
         -- Corresponds to: spine delegates to spine_l for LAT processing
@@ -518,7 +552,7 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
         TypingM.fail (.other s!"Too many arguments in call to {funSym.name.getD "<unnamed>"}")
       | [], .computational _ _ _ _ =>
         TypingM.fail (.other s!"Not enough arguments in call to {funSym.name.getD "<unnamed>"}")
-    processComputationalArgs args ft
+    processComputationalArgs args ft ghostArgs
 
   -- Named procedure call
   -- Corresponds to: Eproc case in check.ml
@@ -611,7 +645,7 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
 
       -- Call Spine.calltypeLt with the label type and kind
       -- The continuation receives False (uninhabited) - never actually called
-      calltypeLt loc args entry fun _false => do
+      calltypeLt loc args [] entry fun _false => do
         -- After the label call, check that all resources are consumed
         -- Corresponds to: all_empty loc original_resources
         let remainingResources ← TypingM.getResources

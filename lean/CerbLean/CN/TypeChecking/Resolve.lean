@@ -763,6 +763,7 @@ def resolveFunctionSpec
     (nextFreshId : Nat := 1000)
     (paramCTypes : List (String × Ctype) := [])
     (tagDefs : TagDefs := [])
+    (globals : List (Sym × Core.GlobDecl) := [])
     : ResolveResult FunctionSpec := do
   -- Build initial context with parameters INCLUDING TYPES
   let paramCtx : ResolveContext := {
@@ -773,8 +774,35 @@ def resolveFunctionSpec
     tagDefs := tagDefs
   }
 
+  -- Create fresh symbols for accessed globals from `accesses` clause.
+  -- In the spec, `g` refers to the VALUE stored at the global (not the address).
+  -- We create fresh symbols for the values, which will be connected to Owned
+  -- resources at the global's address during type checking (Params.lean).
+  -- Corresponds to: CN's compile.ml building env with add_logical for globals
+  let (ctxWithGlobals, resolvedAccesses) :=
+    spec.accesses.foldl (init := (paramCtx, ([] : List (String × Sym × BaseType)))) fun (ctx, acc) globalName =>
+      match globals.find? (fun (sym, _) => sym.name == some globalName) with
+      | some (globalCoreSym, globDecl) =>
+        let globBt := match globDecl with
+          | .def_ _ cTy _ => ctypeToOutputBaseType cTy
+          | .decl _ cTy => ctypeToOutputBaseType cTy
+        let (ctx', freshSym) := ctx.fresh globalName globBt
+        (ctx', acc ++ [(globalName, freshSym, globBt)])
+      | none => (ctx, acc)  -- Global not found; will fail during type checking
+
+  -- Create fresh symbols for ghost parameters (they have placeholder id=0 from parser)
+  -- Ghost params are logical-only parameters declared with `cn_ghost`
+  -- Corresponds to: CN's compile.ml add_logical for ghost params
+  let (ctxWithGhosts, resolvedGhostParams) :=
+    spec.ghostParams.foldl (init := (ctxWithGlobals, ([] : List (Sym × BaseType)))) fun (ctx, acc) (ghostSym, ghostBt) =>
+      match ghostSym.name with
+      | some name =>
+        let (ctx', freshSym) := ctx.fresh name ghostBt
+        (ctx', acc ++ [(freshSym, ghostBt)])
+      | none => (ctx, acc)
+
   -- Create fresh return symbol with return type and add to context
-  let (ctxWithReturn, returnSym) := paramCtx.fresh "return" returnType
+  let (ctxWithReturn, returnSym) := ctxWithGhosts.fresh "return" returnType
 
   -- Resolve precondition (bindings from requires are visible in ensures)
   let (ctxAfterPre, resolvedPre) ← resolvePrecondition ctxWithReturn spec.requires
@@ -786,6 +814,9 @@ def resolveFunctionSpec
            requires := resolvedPre
            ensures := resolvedPost
            trusted := spec.trusted
+           accesses := spec.accesses
+           ghostParams := resolvedGhostParams
+           resolvedAccesses := resolvedAccesses
          }
 
 /-! ## ResolveContext from Typing State
