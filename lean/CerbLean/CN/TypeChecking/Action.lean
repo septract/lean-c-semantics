@@ -269,7 +269,7 @@ def handleKill (kind : KillKind) (ptrPe : APexpr) (loc : Core.Loc)
       -- Resource consumed successfully
       return mkUnitTerm loc
     | none =>
-      TypingM.fail (.other s!"Kill: no Owned resource found for pointer (possible double-free or use-after-free)")
+      TypingM.fail (.other "Kill: no Owned resource found for pointer (possible double-free or use-after-free)")
 
 /-- Handle store action: write to memory.
     Consumes Owned<T>(Uninit) or Owned<T>(Init), produces Owned<T>(Init) with the stored value.

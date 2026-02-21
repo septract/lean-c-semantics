@@ -310,7 +310,19 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
                 | .error (.other msg) =>
                   TypingM.fail (.other s!"ghost statement resolution error: {msg}")
               | none => pure none
-            processGhostStatementByName stmt.kind resolvedConstraint loc
+            -- Resolve index expression for focus/extract/instantiate statements
+            let resolvedIndex ← match stmt.indexExpr with
+              | some idx =>
+                match Resolve.resolveAnnotTerm resolveCtx idx none with
+                | .ok resolved =>
+                  pure (some (Resolve.substStoreValues ctx storeList resolved))
+                | .error (.symbolNotFound name) =>
+                  TypingM.fail (.other s!"ghost statement index: unresolved symbol '{name}'")
+                | .error e =>
+                  TypingM.fail (.other s!"ghost statement index resolution error: {reprStr e}")
+              | none => pure none
+            processGhostStatementByName stmt.kind resolvedConstraint
+              stmt.resourcePred resolvedIndex loc
         | .error _ =>
           -- If it doesn't parse as a ghost statement, it might be something else
           -- (e.g., a function spec or loop spec) — skip silently

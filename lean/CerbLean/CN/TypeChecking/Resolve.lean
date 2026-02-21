@@ -288,10 +288,13 @@ def requestOutputBaseType (req : Request) (fallback : BaseType) : BaseType :=
     | .owned none _ => fallback  -- Type should have been inferred; use fallback
     | .pname _ => fallback  -- User-defined predicates keep their declared type
   | .q qpred =>
-    match qpred.name with
-    | .owned (some ct) _ => ctypeToOutputBaseType ct
-    | .owned none _ => fallback  -- Type should have been inferred; use fallback
-    | .pname _ => fallback
+    -- QPredicate output is a map from quantifier type to element type
+    -- CN ref: the output `o` in `each (q_bt q; guard) { Pred<ct>(...) }` has type Map(q_bt, elem_bt)
+    let elemBt := match qpred.name with
+      | .owned (some ct) _ => ctypeToOutputBaseType ct
+      | .owned none _ => fallback
+      | .pname _ => fallback
+    BaseType.map qpred.q.2 elemBt
 
 /-! ## Symbol Resolution
 
@@ -609,6 +612,17 @@ partial def resolveAnnotTerm (ctx : ResolveContext) (at_ : AnnotTerm)
         match args' with
         | [p] => return .mk (.binop .eq p (.mk (.const .null) .loc loc)) .bool loc
         | _ => throw (.other s!"is_null requires exactly 1 argument, got {args'.length}")
+      | some "array_shift" =>
+        -- array_shift(base, index) => arrayShift(base, inferred_ctype, index) : Loc
+        -- Corresponds to: CNExpr_array_shift in c_parser.mly, compile.ml
+        -- The C type is inferred from the pointer's pointee type during resolution
+        match args' with
+        | [base, index] =>
+          let elemCtype := match tryGetPointeeCtype ctx base with
+            | some ct => ct
+            | none => Ctype.mk' (.basic (.integer (.signed .int_)))  -- default fallback
+          return .mk (.arrayShift base elemCtype index) .loc loc
+        | _ => throw (.other s!"array_shift requires exactly 2 arguments, got {args'.length}")
       | _ =>
         -- Non-builtin function call: resolve symbol and args normally
         match resolveSym ctx fn with
@@ -630,6 +644,15 @@ partial def resolveAnnotTerm (ctx : ResolveContext) (at_ : AnnotTerm)
         | none => throw (.other s!"struct tag {tag.name.getD "?"} not found in tagDefs")
       | bt => throw (.other s!"structMember on non-struct type: {repr bt}")
     return .mk (.structMember obj' member) fieldBt loc
+  | .mk (.mapGet m k) _bt loc =>
+    -- mapGet(m, k) : V where m : Map(K, V)
+    -- The result type is the value type of the map.
+    let m' ← resolveAnnotTerm ctx m none
+    let k' ← resolveAnnotTerm ctx k none
+    let valueBt := match m'.bt with
+      | .map _ vt => vt
+      | _ => m'.bt  -- fallback: if not a map type, use map's own type
+    return .mk (.mapGet m' k') valueBt loc
   | .mk t bt loc =>
     -- For other terms, resolve recursively with expected type, preserve original type
     let t' ← resolveTerm ctx t expectedBt
@@ -658,13 +681,25 @@ def resolvePredicate (ctx : ResolveContext) (p : Predicate) : ResolveResult Pred
   return { p with name := name'', pointer := pointer', iargs := iargs' }
 
 /-- Resolve symbols in a QPredicate.
-    Also resolves struct/union tags in the resource name. -/
+    Also resolves struct/union tags in the resource name.
+    The quantifier variable is added to the resolve context so that
+    expressions within the `each` body (pointer, permission, iargs)
+    can reference it.
+    CN ref: core_to_mucore.ml desugaring of CN_each -/
 def resolveQPredicate (ctx : ResolveContext) (qp : QPredicate) : ResolveResult QPredicate := do
-  let pointer' ← resolveAnnotTerm ctx qp.pointer
-  let permission' ← resolveAnnotTerm ctx qp.permission
-  let iargs' ← qp.iargs.mapM (resolveAnnotTerm ctx)
+  -- Add the quantifier variable to the resolve context so it's available
+  -- in pointer, permission, and iarg expressions
+  let qSym := qp.q.1
+  let qBt := qp.q.2
+  let (ctxWithQ, freshQSym) := if needsResolution qSym then
+    ctx.fresh (qSym.name.getD "q") qBt
+  else
+    (ctx, qSym)
+  let pointer' ← resolveAnnotTerm ctxWithQ qp.pointer
+  let permission' ← resolveAnnotTerm ctxWithQ qp.permission
+  let iargs' ← qp.iargs.mapM (resolveAnnotTerm ctxWithQ)
   let name' := resolveResourceNameTag ctx.tagDefs qp.name
-  return { qp with name := name', pointer := pointer', permission := permission', iargs := iargs' }
+  return { qp with name := name', q := (freshQSym, qBt), pointer := pointer', permission := permission', iargs := iargs' }
 
 /-- Resolve symbols in a Request -/
 def resolveRequest (ctx : ResolveContext) (req : Request) : ResolveResult Request := do

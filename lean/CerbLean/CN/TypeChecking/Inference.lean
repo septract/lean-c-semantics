@@ -30,7 +30,7 @@ open CerbLean.CN.TypeChecking.Resolve (ctypeToOutputBaseType)
     BaseType does not derive BEq (it's recursive), so we compare via repr.
     This is used only for QPredicate quantifier type matching.
     Corresponds to: BaseTypes.equal in CN (baseTypes.ml). -/
-private def baseTypeReprEq (bt1 bt2 : BaseType) : Bool :=
+def baseTypeReprEq (bt1 bt2 : BaseType) : Bool :=
   toString (repr bt1) == toString (repr bt2)
 
 /-! ## Name Subsumption
@@ -348,7 +348,17 @@ def predicateRequestScan (requested : Predicate) : TypingM ScanResult := do
         let iargsMatch := requested.iargs.length == p'.iargs.length &&
           (List.zip requested.iargs p'.iargs).all fun (a, b) => termSyntacticEq a b
         if iargsMatch then
-          candidates := (idx, p', r.output) :: candidates
+          -- Pointer types must be compatible for SMT equality to be well-typed.
+          -- In our lazy muCore approach, param-path pointers may have value types
+          -- (e.g., Bits) while resource pointers have Loc type. Skip incompatible pairs
+          -- to prevent incorrect resource consumption.
+          let ptrTypesCompatible := match requested.pointer.bt, p'.pointer.bt with
+            | .loc, .loc => true
+            | .loc, _ => false
+            | _, .loc => false
+            | _, _ => true  -- Both non-pointer: could be comparable
+          if ptrTypesCompatible then
+            candidates := (idx, p', r.output) :: candidates
     | .q _ => pure ()
 
   match candidates with
@@ -503,6 +513,40 @@ partial def tryRepackArray (requested : Predicate) : TypingM (Option (Predicate 
   | .owned none _ => TypingM.fail (.other "tryRepackArray: unresolved resource type")
   | .pname _ => return none  -- Only Owned can be repacked
 
+/-- Try to extract an index value from a concrete pointer by matching against a
+    QPredicate pointer template. The template contains the quantifier variable `qvar`.
+    Returns `some index` if `template[qvar → index] = concrete` for some index.
+
+    For example, given template `arrayShift(arr, int, i)` and concrete
+    `arrayShift(arr, int, 1u64)`, returns `some 1u64`. -/
+private partial def tryExtractQPIndex (qvar : Sym) (template concrete : IndexTerm) : Option IndexTerm :=
+  match template.term with
+  | .sym s =>
+    if s.id == qvar.id then some concrete  -- Found the quantifier variable position
+    else if termSyntacticEq template concrete then none  -- Matched, no index to extract
+    else none  -- Structural mismatch at non-variable position
+  | .arrayShift tBase tStep tIdx =>
+    match concrete.term with
+    | .arrayShift cBase cStep cIdx =>
+      if ctypeEqualIgnoringAnnots tStep cStep then
+        -- Try to extract index from the index argument first (most common case:
+        -- template = arrayShift(arr, step, qvar), concrete = arrayShift(arr, step, 1u64))
+        match tryExtractQPIndex qvar tIdx cIdx with
+        | some idx =>
+          -- Verify the base also matches with this substitution
+          if termSyntacticEq (tBase.subst (Subst.single qvar idx)) cBase then some idx
+          else none
+        | none =>
+          -- Index positions matched or don't contain qvar. Try the base position.
+          if termSyntacticEq tIdx cIdx then
+            tryExtractQPIndex qvar tBase cBase
+          else none
+      else none
+    | _ => none
+  | _ =>
+    if termSyntacticEq template concrete then none  -- Structurally equal, no index needed
+    else none  -- Structural mismatch
+
 /-- Request a QPredicate resource at a specific index or as a whole.
     For `each (i; guard) { Owned<T>(arrayShift(p, T, i)) }`:
     Searches context for matching QPredicate resources.
@@ -516,13 +560,17 @@ partial def tryRepackArray (requested : Predicate) : TypingM (Option (Predicate 
     - Combining multiple partial Q resources via the General.cases_to_map mechanism
     - Handling movable_indices for extracting individual elements
 
-    Our simplified version handles the common case of a single matching QPredicate
-    that exactly covers the requested permission.
-    Audited: 2026-02-19 -/
+    Our simplified version handles the common case of a single matching QPredicate.
+    It includes alpha-renaming and P resource absorption (merging extracted elements
+    back into the QPredicate).
+    Audited: 2026-02-20 -/
 partial def qpredicateRequest (requested : QPredicate) : TypingM (Option (QPredicate × Output)) := do
   let resources ← TypingM.getResources
   -- Phase 1: Look for a matching QPredicate in context
   -- CN ref: resourceInference.ml:260-313 (map_and_fold_resources scanning Q resources)
+  let mut foundIdx : Option Nat := none
+  let mut foundQP : Option QPredicate := none
+  let mut foundOutput : Option Output := none
   for h : idx in [:resources.length] do
     let r := resources[idx]
     match r.request with
@@ -532,19 +580,78 @@ partial def qpredicateRequest (requested : QPredicate) : TypingM (Option (QPredi
       if nameSubsumed requested.name qp.name
         && ctypeEqualIgnoringAnnots requested.step qp.step
         && baseTypeReprEq requested.q.2 qp.q.2 then
-        -- Check pointer equality syntactically
+        -- Alpha-rename: substitute found QPredicate's quantifier variable with
+        -- the requested quantifier variable. This ensures pointer comparison works
+        -- even when precondition and postcondition `each` clauses use different
+        -- fresh variable IDs for the same logical quantifier.
+        -- CN ref: resourceInference.ml:274-276 (alpha_rename_qpredicate)
+        let alphaSubst := Subst.single qp.q.1
+          (AnnotTerm.mk (.sym requested.q.1) requested.q.2 qp.qLoc)
+        let renamedPointer := qp.pointer.subst alphaSubst
+        -- Check pointer equality after alpha-renaming
         -- CN ref: resourceInference.ml:278 — pmatch = eq_(requested.pointer, p'.pointer)
-        if termSyntacticEq requested.pointer qp.pointer then
-          -- Found a matching QPredicate. Consume it.
-          -- DIVERGES-FROM-CN: CN's full algorithm uses alpha-renaming, permission
-          -- intersection analysis, and partial consumption. We consume the entire
-          -- QPredicate and return its output directly. This is correct when the
-          -- requested permission is exactly equal to or subsumed by the found one.
-          TypingM.removeResourceAt idx
-          return some (qp, r.output)
-    | .p _ => pure ()  -- Not a QPredicate
-  -- No matching QPredicate found
-  return none
+        if termSyntacticEq requested.pointer renamedPointer then
+          -- Store the alpha-renamed QPredicate
+          let renamedQP : QPredicate := { qp with
+            q := (requested.q.1, qp.q.2)
+            pointer := renamedPointer
+            permission := qp.permission.subst alphaSubst
+            iargs := qp.iargs.map (·.subst alphaSubst)
+          }
+          foundIdx := some idx
+          foundQP := some renamedQP
+          foundOutput := some r.output
+          break
+    | .p _ => pure ()
+  match foundIdx, foundQP, foundOutput with
+  | some idx, some qp, some output =>
+    -- Phase 2: Absorb individual P resources back into the QPredicate.
+    -- This handles the case where focus/extract extracted elements that now
+    -- need to be merged back for postcondition consumption.
+    -- Uses tryExtractQPIndex to match P resource pointers against the QPredicate's
+    -- pointer template and extract the concrete index value.
+    -- CN ref: reverse of extractable_one (pack.ml:155-191)
+    let mut currentQP := qp
+    let mut currentOutput := output
+    let allResources ← TypingM.getResources
+    let mut absorbedIndices : List Nat := []
+    for h2 : pIdx in [:allResources.length] do
+      let pr := allResources[pIdx]
+      match pr.request with
+      | .p pred =>
+        if nameSubsumed currentQP.name pred.name then
+          -- Try to extract the index by matching P's pointer against QPredicate's
+          -- pointer template. E.g., QPredicate pointer = arrayShift(arr, int, i),
+          -- P pointer = arrayShift(arr, int, 1u64) → index = 1u64
+          match tryExtractQPIndex currentQP.q.1 currentQP.pointer pred.pointer with
+          | some indexTerm =>
+            -- Absorb: extend permission with (qvar == index), update output map
+            let loc := currentQP.permission.loc
+            let qVar : IndexTerm := AnnotTerm.mk (.sym currentQP.q.1) currentQP.q.2 currentQP.qLoc
+            let eqIndex : IndexTerm := AnnotTerm.mk
+              (.binop .eq qVar indexTerm) .bool loc
+            let newPermission : IndexTerm := AnnotTerm.mk
+              (.binop .or_ currentQP.permission eqIndex) .bool loc
+            let newOutputValue : IndexTerm := AnnotTerm.mk
+              (.mapSet currentOutput.value indexTerm pr.output.value) currentOutput.value.bt loc
+            currentQP := { currentQP with permission := newPermission }
+            currentOutput := { value := newOutputValue }
+            absorbedIndices := pIdx :: absorbedIndices
+          | none => pure ()
+      | .q _ => pure ()
+    -- Remove absorbed P resources (in reverse order to maintain indices)
+    let sortedIndices := absorbedIndices.mergeSort (· > ·)
+    for pIdx in sortedIndices do
+      TypingM.removeResourceAt pIdx
+    -- Adjust the QPredicate index if P resources were removed before it
+    let adjustedIdx := sortedIndices.foldl (init := idx) fun acc pIdx =>
+      if pIdx < acc then acc - 1 else acc
+    -- Consume the (possibly merged) QPredicate
+    TypingM.removeResourceAt adjustedIdx
+    return some (currentQP, currentOutput)
+  | _, _, _ =>
+    -- No matching QPredicate found
+    return none
 
 /-- Request a predicate resource from the context.
     First tries direct scan, then tries "packing" for compound resources.

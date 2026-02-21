@@ -423,6 +423,11 @@ partial def simplifyBinop (op : BinOp) (l r : AnnotTerm) (bt : BaseType) (loc : 
   -- Addition: constant folding and identity
   -- CN ref: simplify.ml:227-241
   | .add =>
+    -- Q constant folding: Q(q1) + Q(q2) → Q(q1 + q2)
+    -- CN ref: simplify.ml:232-233
+    if let (.const (.q n1 d1), .const (.q n2 d2)) := (l.term, r.term) then
+      .mk (.const (.q (n1 * d2 + n2 * d1) (d1 * d2))) bt loc
+    else
     match getNumZ l.term, getNumZ r.term with
     | some i1, some i2 => numLitNorm bt (i1 + i2) loc
     | _, some z => if z == 0 then l else
@@ -443,8 +448,14 @@ partial def simplifyBinop (op : BinOp) (l r : AnnotTerm) (bt : BaseType) (loc : 
     if AnnotTerm.synEq l r then
       match bt with
       | .integer => .mk (.const (.z 0)) bt loc
+      | .real => .mk (.const (.q 0 1)) bt loc  -- CN ref: simplify.ml:247
       | _ => .mk (.binop .sub l r) bt loc
     else
+      -- Q constant folding: Q(q1) - Q(q2) → Q(q1 - q2)
+      -- CN ref: simplify.ml:249-250
+      if let (.const (.q n1 d1), .const (.q n2 d2)) := (l.term, r.term) then
+        .mk (.const (.q (n1 * d2 - n2 * d1) (d1 * d2))) bt loc
+      else
       match getNumZ l.term, getNumZ r.term with
       | some i1, some i2 => numLitNorm bt (i1 - i2) loc
       | _, some z => if z == 0 then l else
@@ -533,14 +544,25 @@ partial def simplifyBinop (op : BinOp) (l r : AnnotTerm) (bt : BaseType) (loc : 
     | some i1, some i2 => .mk (.const (.bool (i1 < i2))) bt loc
     | _, _ => .mk (.binop .lt l r) bt loc
 
-  -- Less-or-equal: constant folding and self-equality
+  -- Less-or-equal: constant folding, self-equality, and Rem/Mod special case
   -- CN ref: simplify.ml:325-344
   | .le =>
     match getNumZ l.term, getNumZ r.term with
     | some i1, some i2 => .mk (.const (.bool (decide (i1 ≤ i2)))) bt loc
     | _, _ =>
       if AnnotTerm.synEq l r then .mk (.const (.bool true)) bt loc
-      else .mk (.binop .le l r) bt loc
+      else
+        -- Rem/Mod special case: (x % n) <= (n-1) → true when n > 0
+        -- CN ref: simplify.ml:334-343
+        let isRemMod := match l.term with
+          | .binop .rem _ (.mk (.const (.z z1)) _ _) => some z1
+          | .binop .mod_ _ (.mk (.const (.z z1)) _ _) => some z1
+          | _ => none
+        match isRemMod, r.term with
+        | some z1, .const (.z z2) =>
+          if z1 > 0 && z2 > 0 && z1 == z2 + 1 then .mk (.const (.bool true)) bt loc
+          else .mk (.binop .le l r) bt loc
+        | _, _ => .mk (.binop .le l r) bt loc
 
   -- Min: constant folding and self-equality
   -- CN ref: simplify.ml:345-360
@@ -644,6 +666,10 @@ partial def simplifyUnop (op : UnOp) (arg : AnnotTerm) (bt : BaseType) (loc : Lo
   -- Negate(Bits(sign, width, z)) => normalized Bits
   | .negate, .const (.bits _sign _width z) =>
     numLitNorm bt (-z) loc
+  -- Negate(Q(n, d)) => Q(-n, d)
+  -- CN ref: simplify.ml:418
+  | .negate, .const (.q n d) =>
+    .mk (.const (.q (-n) d)) bt loc
   | _, _ => .mk (.unop op arg) bt loc
 
 /-- Simplify NthTuple: reduce Tuple projection.

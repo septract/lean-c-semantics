@@ -23,6 +23,7 @@
 
 import CerbLean.CN.TypeChecking.Monad
 import CerbLean.CN.TypeChecking.Pexpr
+import CerbLean.CN.TypeChecking.Inference
 import CerbLean.CN.Types
 
 namespace CerbLean.CN.TypeChecking
@@ -184,20 +185,79 @@ def handleInstantiate (_loc : Loc) : TypingM Unit := do
   throw (.other "not yet implemented: instantiate ghost statement (requires QPredicate support, WP-F)")
 
 /-- Handle an `extract` (focus) ghost statement.
-    Would extract a single element from a quantified resource, keeping the
-    QPredicate with an updated guard excluding the extracted index.
+    Extracts a single element from a quantified resource (QPredicate / `each`),
+    producing a regular Predicate resource at the given index, and updating
+    the QPredicate's guard to exclude that index.
 
-    CN ref: check.ml:2227-2246
-    ```ocaml
-    | M_CN_extract (loc, to_extract, index_it) ->
-      ...extract from each, adjust guard...
-    ```
+    CN ref: check.ml:2158-2190 (Extract handler) + pack.ml:155-191 (extractable_one)
 
-    Not yet implemented: requires QPredicate support (WP-F).
+    In CN, `extract` adds a "movable index" and then `do_unfold_resources`
+    iterates to extract elements. We perform the extraction directly here,
+    which is equivalent for single-element extraction.
 
-    Audited: 2026-02-19 -/
-def handleExtract (_loc : Loc) : TypingM Unit := do
-  throw (.other "not yet implemented: extract/focus ghost statement (requires QPredicate support, WP-F)")
+    Given `focus Owned<int>, 1u64;` with context containing:
+      `each (u64 i; 0 <= i && i < 3) { Owned<int>(array_shift(arr, i)) } => elems`
+    This produces:
+      1. `Owned<int>(array_shift(arr, 1u64)) => map_get(elems, 1u64)`
+      2. Updated QPredicate: guard becomes `(0 <= i && i < 3) && (i != 1u64)`
+
+    Audited: 2026-02-20 against pack.ml:155-191 -/
+def handleExtract (resourceName : ResourceName) (indexTerm : IndexTerm) (loc : Loc) : TypingM Unit := do
+  let resources ← TypingM.getResources
+  -- Phase 1: Find a matching QPredicate by name and quantifier base type
+  -- CN ref: pack.ml:162-165 — match Q resources where name matches and index BT matches q BT
+  let mut found := none
+  for h : idx in [:resources.length] do
+    let r := resources[idx]
+    match r.request with
+    | .q qp =>
+      if nameSubsumed resourceName qp.name
+        && baseTypeReprEq indexTerm.bt qp.q.2 then
+        found := some (idx, qp, r.output)
+        break
+    | .p _ => pure ()
+  match found with
+  | none =>
+    -- Debug: show what resources are actually in context
+    let resInfo := resources.map fun r => match r.request with
+      | .q qp => s!"Q({reprStr qp.name}, q_bt={reprStr qp.q.2})"
+      | .p pred => s!"P({reprStr pred.name})"
+    throw (.other s!"extract/focus: no matching QPredicate found for resource '{reprStr resourceName}' (index bt={reprStr indexTerm.bt}). Resources in context: {resInfo}")
+  | some (idx, qp, output) =>
+    -- Phase 2: Check that the index is within the QPredicate's permission
+    -- CN ref: pack.ml:166-168 — substitute index for q in permission, check provable
+    let su := Subst.single qp.q.1 indexTerm
+    let indexPermission := qp.permission.subst su
+    TypingM.requireConstraint (.t indexPermission) loc "extract/focus: index within permission"
+    -- Phase 3: Create the extracted element as a regular Predicate resource
+    -- CN ref: pack.ml:170-177
+    -- Pointer: substitute the quantifier variable in the QPredicate's pointer template
+    -- e.g., arrayShift(arr, int, i)[i → 1u64] = arrayShift(arr, int, 1u64)
+    let elemPointer : IndexTerm := qp.pointer.subst su
+    -- Output value: map_get(qp_output, index) with element type (not map type)
+    let elemBt := match output.value.bt with
+      | .map _ vt => vt
+      | _ => output.value.bt
+    let elemOutput : Output := ⟨AnnotTerm.mk (.mapGet output.value indexTerm) elemBt loc⟩
+    let elemPred : Predicate := {
+      name := qp.name
+      pointer := elemPointer
+      iargs := qp.iargs.map (·.subst su)
+    }
+    let elemResource : Resource := { request := .p elemPred, output := elemOutput }
+    -- Phase 4: Update QPredicate permission to exclude the extracted index
+    -- CN ref: pack.ml:179-186 — permission := permission AND (q != index)
+    let qVar : IndexTerm := AnnotTerm.mk (.sym qp.q.1) qp.q.2 qp.qLoc
+    let neIndex : IndexTerm := AnnotTerm.mk
+      (.unop .not (AnnotTerm.mk (.binop .eq qVar indexTerm) .bool loc)) .bool loc
+    let updatedPermission : IndexTerm := AnnotTerm.mk
+      (.binop .and_ qp.permission neIndex) .bool loc
+    let updatedQP : QPredicate := { qp with permission := updatedPermission }
+    let updatedQPResource : Resource := { request := .q updatedQP, output := output }
+    -- Phase 5: Remove old QPredicate, add updated QPredicate and extracted element
+    TypingM.removeResourceAt idx
+    TypingM.addR updatedQPResource
+    TypingM.addR elemResource
 
 /-- Handle a `split_case` ghost statement.
     Provides case-split guidance to the solver by adding a constraint as an assumption.
@@ -299,17 +359,17 @@ The main entry point dispatches on the ghost statement kind and calls
 the appropriate handler.
 -/
 
-/-- Process a ghost statement with a constraint term argument.
-    This is the primary dispatch for ghost statements that take a boolean
-    expression as their argument (have, assert, split_case).
-
-    The constraint term should be of type Bool and represent the condition
-    being asserted, verified, or used for case splitting.
+/-- Process a ghost statement.
+    Dispatches on the ghost statement kind and calls the appropriate handler.
+    For most statements, `constraintTerm` provides the boolean expression argument.
+    For extract/instantiate, `resourcePred` and `indexExpr` provide the resource
+    name and index respectively.
 
     Corresponds to: cn_statement matching in check.ml:2171-2283
 
-    Audited: 2026-02-19 -/
+    Audited: 2026-02-20 -/
 def processGhostStatement (kind : GhostStatementKind) (constraintTerm : Option IndexTerm)
+    (resourcePred : Option ResourceName) (indexExpr : Option IndexTerm)
     (loc : Loc) : TypingM Unit := do
   match kind with
   | .have_ =>
@@ -326,7 +386,10 @@ def processGhostStatement (kind : GhostStatementKind) (constraintTerm : Option I
     | none => throw (.other "split_case ghost statement requires a constraint expression")
   | .print => handlePrint loc
   | .instantiate => handleInstantiate loc
-  | .extract => handleExtract loc
+  | .extract =>
+    match resourcePred, indexExpr with
+    | some rn, some idx => handleExtract rn idx loc
+    | _, _ => throw (.other "extract/focus ghost statement requires a resource predicate and index expression")
   | .pack => handlePack loc
   | .unpack => handleUnpack loc
   | .unfold => handleUnfold loc
@@ -340,11 +403,12 @@ def processGhostStatement (kind : GhostStatementKind) (constraintTerm : Option I
     This is the convenience entry point for callers that have the ghost
     statement kind as a raw string (e.g., from parsed annotations).
 
-    Audited: 2026-02-19 -/
+    Audited: 2026-02-20 -/
 def processGhostStatementByName (kindName : String) (constraintTerm : Option IndexTerm)
+    (resourcePred : Option ResourceName) (indexExpr : Option IndexTerm)
     (loc : Loc) : TypingM Unit := do
   match GhostStatementKind.fromString kindName with
-  | .ok kind => processGhostStatement kind constraintTerm loc
+  | .ok kind => processGhostStatement kind constraintTerm resourcePred indexExpr loc
   | .error msg => throw (.other msg)
 
 end CerbLean.CN.TypeChecking

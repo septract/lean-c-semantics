@@ -437,6 +437,15 @@ where
         let newExpr := mkTerm (.structMember e (mkIdent member))
         postfixRest newExpr
       | none => pure e
+    | some '[' =>
+      -- Subscript: e[idx] → mapGet(e, idx)
+      -- CN ref: c_parser.mly CNExpr_binop (CN_map_get) for map subscript
+      let _ ← any
+      ws
+      let idx ← expr
+      symbol "]"
+      let newExpr := mkTerm (.mapGet e idx)
+      postfixRest newExpr
     | _ => pure e
 
 /-- Parse a unary prefix expression: -expr, !expr, ~expr
@@ -650,18 +659,60 @@ def resource : P Request := do
   | ptr :: iargs =>
     pure (.p { name := pred, pointer := ptr, iargs := iargs })
 
+/-- Parse an `each` resource (quantified predicate / QPredicate).
+    Format: `each (base_type var; guard) {Pred<type>(pointer_args)}`
+
+    CN ref: c_parser.mly:2377-2384
+
+    Example: `each (u64 i; 0u64 <= i && i < 3u64) {Owned<int>(array_shift(arr, i))}` -/
+partial def eachResource : P Request := do
+  keyword "each"
+  symbol "("
+  let qBt ← cnBaseType
+  let qName ← ident
+  symbol ";"
+  let guard ← expr
+  symbol ")"
+  symbol "{"
+  let pred ← predName
+  symbol "("
+  let args ← exprList
+  symbol ")"
+  symbol "}"
+  match args with
+  | [] => fail "each: inner resource requires at least one argument (pointer)"
+  | ptr :: iargs =>
+    let qSym := mkSym qName
+    -- Extract C type from the predicate name for the step type
+    let step : Ctype := match pred with
+      | .owned (some ct) _ => ct
+      | _ => Ctype.mk' (.basic (.integer (.signed .int_)))  -- default to int
+    pure (.q {
+      name := pred
+      pointer := ptr
+      q := (qSym, qBt)
+      qLoc := Core.Loc.t.unknown
+      step := step
+      permission := guard
+      iargs := iargs
+    })
+
 /-! ## Clause Parsers -/
 
-/-- Parse a take clause: take v = Resource(...) -/
-def takeClause : P Clause := do
+/-- Parse a take clause: `take v = Resource(...)` or `take v = each (...) {Resource(...)}`
+    CN ref: c_parser.mly condition production -/
+partial def takeClause : P Clause := do
   keyword "take"
   let name ← ident
   symbol "="
-  let res ← resource
-  symbol ";"
   let sym := mkSym name
+  -- Try `each` resource first, then fall back to regular resource
+  let req ← attempt eachResource <|> resource
+  symbol ";"
+  -- Output uses placeholder type (.unit) — resolution will assign the correct type
+  -- via requestOutputBaseType which handles both P and Q requests
   let output : Output := { value := mkTerm (.sym sym) }
-  pure (.resource sym { request := res, output := output })
+  pure (.resource sym { request := req, output := output })
 
 /-- Parse a let clause: let v = expr
     Binds variable name for use in subsequent clauses.
@@ -676,7 +727,7 @@ def letClause : P Clause := do
 
 /-- Keywords that should not be parsed as identifiers in expressions -/
 def cnKeywords : List String := ["requires", "ensures", "take", "let", "trusted", "implies",
-                                  "accesses", "cn_ghost"]
+                                  "accesses", "cn_ghost", "each"]
 
 /-- Fail if next token is a keyword (using negative lookahead) -/
 def notKeyword : P Unit := do
@@ -688,6 +739,7 @@ def notKeyword : P Unit := do
   notFollowedBy (keyword "trusted")
   notFollowedBy (keyword "accesses")
   notFollowedBy (keyword "cn_ghost")
+  notFollowedBy (keyword "each")
 
 /-- Parse a constraint clause: expr; -/
 def constraintClause : P Clause := do
