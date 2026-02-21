@@ -472,9 +472,16 @@ def constToTerm : Const → TranslateResult
     -- CN encodes CType constants via a CTypeMap assigning each ctype an Int (solver.ml:552)
     -- We don't maintain such a map; mark as unsupported for now
     .unsupported "ctypeConst in SMT query (no CTypeMap)"
-  | .default _ =>
+  | .default bt =>
     -- CN encodes Default(t) as cn_val(cn_none(translate_base_type t)) (solver.ml:553)
-    .unsupported "default value in SMT query"
+    -- (cn_val (as cn_none (cn_option <sort>)))
+    -- Audited: 2026-02-20
+    match baseTypeToSort bt with
+    | .unsupported r => .unsupported s!"default value type: {r}"
+    | .ok innerSort =>
+      let optionSort := Term.appT (Term.symbolT "cn_option") innerSort
+      let noneTyped := Term.mkApp2 (Term.symbolT "as") (Term.symbolT "cn_none") optionSort
+      .ok (Term.appT (Term.symbolT "cn_val") noneTyped)
 
 /-- Check if a base type is a bitvector type -/
 def isBitsType : BaseType → Bool
@@ -501,8 +508,53 @@ def isIntLiteral (tm : Smt.Term) : Option Int :=
 def intToBitVecTerm (n : Int) (width : Nat) : Smt.Term :=
   mkBitVecLiteral width n
 
+/-- Generate SMT term for count-leading-zeros via recursive binary decomposition.
+    Corresponds to: CN's bv_clz (solver.ml:575-591)
+    Splits bitvector in half, checks if top half is zero, recurses. -/
+partial def bvClzTerm (resultW : Nat) (w : Nat) (e : Smt.Term) : Smt.Term :=
+  let mkResult (k : Nat) := mkBitVecLiteral resultW k
+  let eq0 (width : Nat) (val : Smt.Term) :=
+    Term.mkApp2 (Term.symbolT "=") val (mkBitVecLiteral width 0)
+  let mkExtract (hi lo : Nat) (val : Smt.Term) :=
+    Term.appT (Term.literalT s!"(_ extract {hi} {lo})") val
+  let rec count (w : Nat) (e : Smt.Term) : Smt.Term :=
+    if w ≤ 1 then
+      Term.mkApp3 (Term.symbolT "ite") (eq0 w e) (mkResult 1) (mkResult 0)
+    else
+      let topW := w / 2
+      let botW := w - topW
+      let top := mkExtract (w - 1) (w - topW) e
+      let bot := mkExtract (botW - 1) 0 e
+      Term.mkApp3 (Term.symbolT "ite") (eq0 topW top)
+        (Term.mkApp2 (Term.symbolT "bvadd") (count botW bot) (mkResult topW))
+        (count topW top)
+  count w e
+
+/-- Generate SMT term for count-trailing-zeros via recursive binary decomposition.
+    Corresponds to: CN's bv_ctz (solver.ml:597-613)
+    Like CLZ but checks bottom half instead of top. -/
+partial def bvCtzTerm (resultW : Nat) (w : Nat) (e : Smt.Term) : Smt.Term :=
+  let mkResult (k : Nat) := mkBitVecLiteral resultW k
+  let eq0 (width : Nat) (val : Smt.Term) :=
+    Term.mkApp2 (Term.symbolT "=") val (mkBitVecLiteral width 0)
+  let mkExtract (hi lo : Nat) (val : Smt.Term) :=
+    Term.appT (Term.literalT s!"(_ extract {hi} {lo})") val
+  let rec count (w : Nat) (e : Smt.Term) : Smt.Term :=
+    if w ≤ 1 then
+      Term.mkApp3 (Term.symbolT "ite") (eq0 w e) (mkResult 1) (mkResult 0)
+    else
+      let topW := w / 2
+      let botW := w - topW
+      let top := mkExtract (w - 1) (w - topW) e
+      let bot := mkExtract (botW - 1) 0 e
+      Term.mkApp3 (Term.symbolT "ite") (eq0 botW bot)
+        (Term.mkApp2 (Term.symbolT "bvadd") (count topW top) (mkResult botW))
+        (count botW bot)
+  count w e
+
 /-- Convert a UnOp application to Smt.Term.
-    Type-aware: dispatches to bitvector operations for Bits types. -/
+    Type-aware: dispatches to bitvector operations for Bits types.
+    Audited: 2026-02-20 -/
 def unOpToTerm (op : UnOp) (argBt : BaseType) (arg : Smt.Term) : TranslateResult :=
   let useBv := isBitsType argBt
   match op with
@@ -511,10 +563,40 @@ def unOpToTerm (op : UnOp) (argBt : BaseType) (arg : Smt.Term) : TranslateResult
                else .ok (Term.appT (Term.symbolT "-") arg)
   | .bwCompl => if useBv then .ok (Term.appT (Term.symbolT "bvnot") arg)
                 else .unsupported "bwCompl requires Bits type"
-  | .bwClzNoSMT => .unsupported "bwClzNoSMT"
-  | .bwCtzNoSMT => .unsupported "bwCtzNoSMT"
-  | .bwFfsNoSMT => .unsupported "bwFfsNoSMT"
-  | .bwFlsNoSMT => .unsupported "bwFlsNoSMT"
+  -- CLZ: count leading zeros via binary decomposition (solver.ml:668-671)
+  | .bwClzNoSMT =>
+    match argBt with
+    | .bits _ w => .ok (bvClzTerm w w arg)
+    | _ => .unsupported "bwClzNoSMT requires Bits type"
+  -- CTZ: count trailing zeros via binary decomposition (solver.ml:673-676)
+  | .bwCtzNoSMT =>
+    match argBt with
+    | .bits _ w => .ok (bvCtzTerm w w arg)
+    | _ => .unsupported "bwCtzNoSMT requires Bits type"
+  -- FFS: find first set = (x == 0) ? 0 : (ctz(x) + 1) (solver.ml:636-645)
+  | .bwFfsNoSMT =>
+    match argBt with
+    | .bits _ w =>
+      let zero := mkBitVecLiteral w 0
+      let one := mkBitVecLiteral w 1
+      let ctz := bvCtzTerm w w arg
+      .ok (Term.mkApp3 (Term.symbolT "ite")
+        (Term.mkApp2 (Term.symbolT "=") arg zero)
+        zero
+        (Term.mkApp2 (Term.symbolT "bvadd") ctz one))
+    | _ => .unsupported "bwFfsNoSMT requires Bits type"
+  -- FLS: find last set = (x == 0) ? 0 : (width - clz(x)) (solver.ml:646-657)
+  | .bwFlsNoSMT =>
+    match argBt with
+    | .bits _ w =>
+      let zero := mkBitVecLiteral w 0
+      let widthBv := mkBitVecLiteral w w
+      let clz := bvClzTerm w w arg
+      .ok (Term.mkApp3 (Term.symbolT "ite")
+        (Term.mkApp2 (Term.symbolT "=") arg zero)
+        zero
+        (Term.mkApp2 (Term.symbolT "bvsub") widthBv clz))
+    | _ => .unsupported "bwFlsNoSMT requires Bits type"
 
 /-- Convert a BinOp application to Smt.Term.
     Type-aware: dispatches to bitvector operations for Bits types.
@@ -598,9 +680,21 @@ def binOpToTerm (op : BinOp) (lBt rBt : BaseType) (l r : Smt.Term) : TranslateRe
     if useBv then
       if signed then mkBinApp "bvashr" else mkBinApp "bvlshr"
     else .unsupported "shiftRight requires Bits type"
-  -- Exp: CN handles this specially (solver.ml:711-715) by evaluating constant exponents
-  -- at translation time. We don't do that; mark unsupported for now.
-  | .exp => .unsupported "exp (only constant exponents supported in CN)"
+  -- Exp: CN evaluates constant exponents at translation time (solver.ml:711-715)
+  -- If both operands are constants, compute base^exp directly.
+  -- Audited: 2026-02-20
+  | .exp =>
+    match isIntLiteral l, isIntLiteral r with
+    | some base, some exp =>
+      if exp >= 0 && exp < 64 then
+        let result := base ^ exp.toNat
+        if useBv then
+          match lBt with
+          | .bits _ w => .ok (mkBitVecLiteral w result)
+          | _ => .unsupported s!"exp: unexpected BV type {repr lBt}"
+        else .ok (Term.literalT (toString result))
+      else .unsupported s!"exp: exponent {exp} out of range [0, 64)"
+    | _, _ => .unsupported s!"exp: non-constant operands (CN requires constant folding)"
   | .expNoSMT => mkUninterpApp "exp" lBt  -- solver.ml:716
   -- Min/Max: CN translates as ite (solver.ml:767-769)
   -- NOTE: this duplicates terms, matching CN's approach
@@ -735,40 +829,51 @@ partial def termToSmtTerm (env : Option TypeEnv) : Types.Term → TranslateResul
     | .unsupported r, _ => .unsupported r
     | _, .unsupported r => .unsupported r
   | .representable ct val =>
-    -- representable(ct, val): CN's value_check `Representable mode (indexTerms.ml:959-1010)
-    -- Dispatch on C type, matching CN's aux function:
-    --   Void/Byte → true
-    --   Integer → range check (in_z_range)
-    --   Pointer → true (value_check_pointer `Representable, indexTerms.ml:936)
-    --   Struct → recursive per-field (not yet implemented)
-    --   Array → recursive per-element (not yet implemented)
+    -- representable(ct, val): CN's value_check `Representable (indexTerms.ml:959-1010)
+    -- Audited: 2026-02-20 against indexTerms.ml:959-1010
     match ct.ty with
     | .void | .byte => .ok (Term.symbolT "true")
     | .basic (.integer ity) =>
-      -- For BitVec values, representability is trivially true (bounded by type width)
-      if isBitsType val.bt then
-        .ok (Term.symbolT "true")
+      if isBitsType val.bt then .ok (Term.symbolT "true")
       else
-        -- For unbounded integers, generate range constraint
         match annotTermToSmtTerm env val with
         | .unsupported r => .unsupported r
         | .ok valTm =>
-          let bounds := integerTypeBounds ity
-          match bounds with
+          match integerTypeBounds ity with
           | some (lo, hi) =>
             let loTm := Term.literalT (toString lo)
             let hiTm := Term.literalT (toString hi)
-            let loCond := Term.mkApp2 (Term.symbolT "<=") loTm valTm
-            let hiCond := Term.mkApp2 (Term.symbolT "<") valTm hiTm
-            .ok (Term.mkApp2 (Term.symbolT "and") loCond hiCond)
+            .ok (Term.mkApp2 (Term.symbolT "and")
+              (Term.mkApp2 (Term.symbolT "<=") loTm valTm)
+              (Term.mkApp2 (Term.symbolT "<") valTm hiTm))
           | none => .unsupported s!"representable: no bounds for {repr ity}"
-    | .pointer _ _ =>
-      -- CN: value_check_pointer `Representable returns bool_ true (indexTerms.ml:936)
-      .ok (Term.symbolT "true")
+    | .basic (.floating _) => .ok (Term.symbolT "true")
+    | .pointer _ _ => .ok (Term.symbolT "true")
     | _ => .unsupported s!"representable for {repr ct.ty}"
-  | .good ct _val =>
-    -- good(ct, val) checks val is representable in ct - needs proper handling
-    .unsupported s!"good (type check for {repr ct.ty})"
+  | .good ct val =>
+    -- good(ct, val): CN's value_check `Good (indexTerms.ml:959-1010)
+    -- Same as representable except pointer types also check alignment.
+    -- DIVERGES-FROM-CN: pointer alignment check returns true (would need alignof)
+    -- Audited: 2026-02-20
+    match ct.ty with
+    | .void | .byte => .ok (Term.symbolT "true")
+    | .basic (.integer ity) =>
+      if isBitsType val.bt then .ok (Term.symbolT "true")
+      else
+        match annotTermToSmtTerm env val with
+        | .unsupported r => .unsupported r
+        | .ok valTm =>
+          match integerTypeBounds ity with
+          | some (lo, hi) =>
+            let loTm := Term.literalT (toString lo)
+            let hiTm := Term.literalT (toString hi)
+            .ok (Term.mkApp2 (Term.symbolT "and")
+              (Term.mkApp2 (Term.symbolT "<=") loTm valTm)
+              (Term.mkApp2 (Term.symbolT "<") valTm hiTm))
+          | none => .unsupported s!"good: no bounds for {repr ity}"
+    | .basic (.floating _) => .ok (Term.symbolT "true")
+    | .pointer _ _ => .ok (Term.symbolT "true")
+    | _ => .unsupported s!"good for {repr ct.ty}"
   | .wrapI _intType val =>
     -- wrapI wraps integer value to representation type (modular arithmetic)
     -- Corresponds to: wrapI in CN's indexTerms.ml
@@ -1041,7 +1146,22 @@ partial def termToSmtTerm (env : Option TypeEnv) : Types.Term → TranslateResul
           | _, .unsupported r => .unsupported s!"structUpdate value: {r}"
         | some (.union_ _) => .unsupported "structUpdate on union"
       | _ => .unsupported s!"structUpdate: object type is not struct ({repr obj.bt})"
-  | .record _ => .unsupported "record"
+  | .record members =>
+    -- CN encodes records as tuples (solver.ml:421, 833-835)
+    -- Record with fields [(f1, v1), ...] becomes cn_tuple_N(v1, ...)
+    -- Audited: 2026-02-20
+    let arity := members.length
+    if arity > maxTupleArity then
+      .unsupported s!"record arity {arity} exceeds max {maxTupleArity}"
+    else
+      let conName := s!"cn_tuple_{arity}"
+      let rec buildRecordApp (acc : Smt.Term) : List (Identifier × AnnotTerm) → TranslateResult
+        | [] => .ok acc
+        | (_, value) :: rest =>
+          match annotTermToSmtTerm env value with
+          | .ok valTm => buildRecordApp (Term.appT acc valTm) rest
+          | .unsupported r => .unsupported s!"record field: {r}"
+      buildRecordApp (Term.symbolT conName) members
   | .recordMember _ _ => .unsupported "recordMember"
   | .recordUpdate _ _ _ => .unsupported "recordUpdate"
   | .constructor constr args =>

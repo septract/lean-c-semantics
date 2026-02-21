@@ -61,6 +61,19 @@ call the original continuation k. This matches CN exactly.
 private def mkUnitTermExpr (loc : Core.Loc) : IndexTerm :=
   AnnotTerm.mk (.const .unit) .unit loc
 
+/-- Check that both pointers have allocation IDs and they're equal (same provenance).
+    Corresponds to: check_both_eq_alloc in check.ml:464-479
+    Generates constraint: hasAllocId(p1) ∧ hasAllocId(p2) ∧ allocId(p1) == allocId(p2) -/
+private def checkBothEqAlloc (arg1 arg2 : IndexTerm) (loc : Core.Loc) : TypingM Unit := do
+  let hasAlloc1 := AnnotTerm.mk (.hasAllocId arg1) .bool loc
+  let hasAlloc2 := AnnotTerm.mk (.hasAllocId arg2) .bool loc
+  let allocId1 := AnnotTerm.mk (.cast (.option .allocId) arg1) (.option .allocId) loc
+  let allocId2 := AnnotTerm.mk (.cast (.option .allocId) arg2) (.option .allocId) loc
+  let eqAllocs := AnnotTerm.mk (.binop .eq allocId1 allocId2) .bool loc
+  let bothHave := AnnotTerm.mk (.binop .and_ hasAlloc1 hasAlloc2) .bool loc
+  let constr := AnnotTerm.mk (.binop .and_ bothHave eqAllocs) .bool loc
+  TypingM.requireConstraint (.t constr) loc "pointer comparison: both pointers have equal allocation IDs"
+
 /-- Evaluate a list of arguments in CPS style, collecting results.
     The final continuation receives all evaluated argument terms. -/
 private def evalArgsK (args : List APexpr) (k : List IndexTerm → TypingM Unit) : TypingM Unit := do
@@ -186,15 +199,62 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
           k (AnnotTerm.mk (.unop .not (AnnotTerm.mk (.sym resSym) .bool loc)) .bool loc)
 
     -- PtrLt/PtrGt/PtrLe/PtrGe: ordered pointer comparisons
-    -- Corresponds to: pointer_op in check.ml lines 1597-1606
-    -- Requires check_both_eq_alloc and check_live_alloc_bounds - not yet implemented
-    | .ptrLt, _ => TypingM.fail (.other "memop ptrLt not yet implemented (requires allocation checks)")
-    | .ptrGt, _ => TypingM.fail (.other "memop ptrGt not yet implemented (requires allocation checks)")
-    | .ptrLe, _ => TypingM.fail (.other "memop ptrLe not yet implemented (requires allocation checks)")
-    | .ptrGe, _ => TypingM.fail (.other "memop ptrGe not yet implemented (requires allocation checks)")
+    -- Corresponds to: pointer_op in check.ml lines 1597-1614
+    -- CN's pointer_op: check_both_eq_alloc, check_live_alloc_bounds, then compare.
+    -- DIVERGES-FROM-CN: We skip check_live_alloc_bounds (requires allocation history
+    -- tracking). We do check_both_eq_alloc (same provenance requirement).
+    -- CN: gtPointer_ (a,b) = ltPointer_ (b,a), gePointer_ (a,b) = lePointer_ (b,a)
+    -- Audited: 2026-02-20 against check.ml:1597-1614
+    | .ptrLt, [pe1, pe2] =>
+      checkPexprK pe1 fun arg1 =>
+        checkPexprK pe2 fun arg2 => do
+          checkBothEqAlloc arg1 arg2 loc
+          k (AnnotTerm.mk (.binop .ltPointer arg1 arg2) .bool loc)
+    | .ptrGt, [pe1, pe2] =>
+      checkPexprK pe1 fun arg1 =>
+        checkPexprK pe2 fun arg2 => do
+          checkBothEqAlloc arg1 arg2 loc
+          -- CN: gtPointer_ (a,b) = ltPointer_ (b,a)
+          k (AnnotTerm.mk (.binop .ltPointer arg2 arg1) .bool loc)
+    | .ptrLe, [pe1, pe2] =>
+      checkPexprK pe1 fun arg1 =>
+        checkPexprK pe2 fun arg2 => do
+          checkBothEqAlloc arg1 arg2 loc
+          k (AnnotTerm.mk (.binop .lePointer arg1 arg2) .bool loc)
+    | .ptrGe, [pe1, pe2] =>
+      checkPexprK pe1 fun arg1 =>
+        checkPexprK pe2 fun arg2 => do
+          checkBothEqAlloc arg1 arg2 loc
+          -- CN: gePointer_ (a,b) = lePointer_ (b,a)
+          k (AnnotTerm.mk (.binop .lePointer arg2 arg1) .bool loc)
 
-    -- Unimplemented memops - fail explicitly with details
-    | .ptrdiff, _ => TypingM.fail (.other "memop ptrdiff not yet implemented")
+    -- Ptrdiff: pointer subtraction
+    -- Corresponds to: Ptrdiff case in check.ml lines 1615-1645
+    -- CN: (cast ptrdiff_t (addr(arg1) - addr(arg2))) / sizeof(elem_type)
+    -- DIVERGES-FROM-CN: skips check_live_alloc_bounds
+    -- Audited: 2026-02-20
+    | .ptrdiff, [pe_ct, pe1, pe2] =>
+      match extractCtypeConst pe_ct with
+      | .error e => TypingM.fail e
+      | .ok ct =>
+        checkPexprK pe1 fun arg1 =>
+          checkPexprK pe2 fun arg2 => do
+            checkBothEqAlloc arg1 arg2 loc
+            -- Compute divisor: sizeof(array element type) or sizeof(ct)
+            let elemTy := match ct.ty with
+              | .array itemTy _ => itemTy
+              | ty => ty
+            let divisorBt : BaseType := .bits .signed 64  -- ptrdiff_t
+            -- addr(arg1) - addr(arg2) as bitvectors
+            let addr1 := AnnotTerm.mk (.cast (.bits .unsigned 64) arg1) (.bits .unsigned 64) loc
+            let addr2 := AnnotTerm.mk (.cast (.bits .unsigned 64) arg2) (.bits .unsigned 64) loc
+            let diff := AnnotTerm.mk (.binop .sub addr1 addr2) (.bits .unsigned 64) loc
+            -- Cast to ptrdiff_t (signed 64-bit)
+            let diffSigned := AnnotTerm.mk (.cast divisorBt diff) divisorBt loc
+            -- Divide by sizeof(elem_type)
+            let sizeTerm := AnnotTerm.mk (.sizeOf { ty := elemTy : CerbLean.Core.Ctype }) divisorBt loc
+            let result := AnnotTerm.mk (.binop .div diffSigned sizeTerm) divisorBt loc
+            k result
 
     -- IntFromPtr: cast pointer to integer
     -- Corresponds to: IntFromPtr case in check.ml lines 1646-1672
@@ -222,7 +282,30 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
           TypingM.requireConstraint (.t reprTerm) loc "intFromPtr: result representable in target type"
           k castResult
 
-    | .ptrFromInt, _ => TypingM.fail (.other "memop ptrFromInt not yet implemented")
+    -- PtrFromInt: integer to pointer conversion
+    -- Corresponds to: PtrFromInt case in check.ml lines 1673-1699
+    -- CN creates a fresh pointer symbol and constrains:
+    --   if (arg == 0) then (result == null) else (hasAllocId(result) ∧ addr(result) == arg)
+    -- Note: allocation ID is intentionally left unconstrained (CN comment).
+    -- Audited: 2026-02-20 against check.ml:1673-1699
+    | .ptrFromInt, [_pe_from_ct, _pe_to_ct, pe_int] =>
+      checkPexprK pe_int fun intArg => do
+        let resSym ← TypingM.freshSym "intToPtr"
+        TypingM.addA resSym .loc loc "integer to pointer conversion result"
+        let result := AnnotTerm.mk (.sym resSym) .loc loc
+        -- if (intArg == 0) then (result == null) else (hasAllocId(result) ∧ addr(result) == cast(intArg))
+        let zero := AnnotTerm.mk (.const (.bits .unsigned 64 0)) (.bits .unsigned 64) loc
+        let isZero := AnnotTerm.mk (.binop .eq intArg zero) .bool loc
+        let nullTerm := AnnotTerm.mk (.const .null) .loc loc
+        let nullCase := AnnotTerm.mk (.binop .eq result nullTerm) .bool loc
+        let hasAlloc := AnnotTerm.mk (.hasAllocId result) .bool loc
+        let castArg := AnnotTerm.mk (.cast (.bits .unsigned 64) intArg) (.bits .unsigned 64) loc
+        let addrResult := AnnotTerm.mk (.cast (.bits .unsigned 64) result) (.bits .unsigned 64) loc
+        let addrEq := AnnotTerm.mk (.binop .eq addrResult castArg) .bool loc
+        let nonNullCase := AnnotTerm.mk (.binop .and_ hasAlloc addrEq) .bool loc
+        let constr := AnnotTerm.mk (.ite isZero nullCase nonNullCase) .bool loc
+        TypingM.addC (.t constr)
+        k result
     -- PtrMemberShift: compute pointer to struct/union member
     -- Corresponds to: PEmember_shift in check.ml lines 693-711
     -- CN marks the memop version as CHERI-only (check.ml:1747-1748) and uses the pure
@@ -243,7 +326,21 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
     | .vaCopy, _ => TypingM.fail (.other "memop vaCopy not yet implemented")
     | .vaArg, _ => TypingM.fail (.other "memop vaArg not yet implemented")
     | .vaEnd, _ => TypingM.fail (.other "memop vaEnd not yet implemented")
-    | .copyAllocId, _ => TypingM.fail (.other "memop copyAllocId not yet implemented")
+    -- CopyAllocId: create pointer with alloc_id from one pointer, address from another
+    -- Corresponds to: Copy_alloc_id case in check.ml lines 1749-1763
+    -- Arguments: [addr_bitvec, source_pointer]
+    -- Creates result with address from arg1 and allocation ID from arg2.
+    -- DIVERGES-FROM-CN: skips check_live_alloc_bounds on result
+    -- Audited: 2026-02-20 against check.ml:1749-1763
+    | .copyAllocId, [pe_addr, pe_src] =>
+      checkPexprK pe_addr fun addrArg =>
+        checkPexprK pe_src fun srcArg => do
+          -- Check source pointer has allocation ID
+          let hasAlloc := AnnotTerm.mk (.hasAllocId srcArg) .bool loc
+          TypingM.requireConstraint (.t hasAlloc) loc "copyAllocId: source pointer has allocation ID"
+          -- Result: copyAllocId(addr, src) — takes address from addr, alloc_id from src
+          let result := AnnotTerm.mk (.copyAllocId addrArg srcArg) .loc loc
+          k result
     | .cheriIntrinsic _, _ => TypingM.fail (.other "memop cheriIntrinsic not yet implemented")
 
     -- Argument count mismatch - fail with details
