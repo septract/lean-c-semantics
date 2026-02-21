@@ -21,18 +21,20 @@
   constraint     = expr
 
   resource       = pred "(" expr_list ")"
-  pred           = ("Owned" | "RW") ["<" ctype ">"]
-                 | ("Block" | "W")  ["<" ctype ">"]
+  pred           = ("Owned" | "RW") ["<" ctype ">"]  -- type optional, inferred from pointer
+                 | ("Block" | "W")  ["<" ctype ">"]  -- type optional, inferred from pointer
                  | UNAME                     -- user-defined predicate
 
   expr           = binary_expr ["?" expr ":" expr]
   binary_expr    = unary_expr (binop unary_expr)*
-  unary_expr     = "-" unary_expr | "!" unary_expr | "~" unary_expr | postfix_expr
+  unary_expr     = "-" unary_expr | "!" unary_expr | "~" unary_expr (bitwise complement)
+                 | postfix_expr
   postfix_expr   = atom_expr ("." IDENT | "->" IDENT)*
   atom_expr      = IDENT | NUMBER | "(" expr ")" | "(" cn_base_type ")" unary_expr
                  | "return" | "null" | "true" | "false"
                  | IDENT "(" expr_list ")"   -- function call
-  binop          = "==" | "!=" | "<" | "<=" | ">" | ">=" | "&&" | "||" | "+" | "-" | "*" | "/" | "%"
+  binop          = "==" | "!=" | "<" | "<=" | ">" | ">=" | "&&" | "||" | "implies"
+                 | "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^"
 
   cn_base_type   = "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | ...
   ctype          = [sign] [size] [base] ["*"]*  -- C type for resources
@@ -178,6 +180,10 @@ def buildCtype (sign : Option CSignSpec) (size : Option CSizeSpec) (baseName : S
   -- Build the base type
   let baseType : Ctype := match baseName with
     | "void" => .void
+    -- Cerberus treats plain 'char' as signed on all supported target platforms
+    -- (x86-64 Linux/macOS). This matches Cerberus's ABI choice via its
+    -- impl_funs.ml:ocaml_char_is_signed = true. C standard says char signedness
+    -- is implementation-defined (C11 6.2.5p15).
     | "char" =>
       let charSign := sign.getD .signed
       .basic (.integer (if charSign == .unsigned then .unsigned .ichar else .signed .ichar))
@@ -396,7 +402,7 @@ partial def atomExpr : P AnnotTerm := do
       let name ← ident
       match name with
       | "return" => pure (mkTerm (.sym (mkSym "return")))
-      | "null" => pure (mkTerm (.const .null))
+      | "null" | "NULL" => pure (mkTerm (.const .null))
       | "true" => pure (mkTerm (.const (.bool true)))
       | "false" => pure (mkTerm (.const (.bool false)))
       | _ =>
@@ -435,6 +441,15 @@ where
         let newExpr := mkTerm (.structMember e (mkIdent member))
         postfixRest newExpr
       | none => pure e
+    | some '[' =>
+      -- Subscript: e[idx] → mapGet(e, idx)
+      -- CN ref: c_parser.mly CNExpr_binop (CN_map_get) for map subscript
+      let _ ← any
+      ws
+      let idx ← expr
+      symbol "]"
+      let newExpr := mkTerm (.mapGet e idx)
+      postfixRest newExpr
     | _ => pure e
 
 /-- Parse a unary prefix expression: -expr, !expr, ~expr
@@ -477,61 +492,87 @@ partial def unaryExpr : P AnnotTerm := do
 
 /-- Parse a binary operator. Returns (opString, binop, swapOperands).
     For `>` and `>=`, we return the corresponding `<`/`<=` op with swap=true,
-    since CN normalizes a > b to b < a. -/
-partial def binop : P (String × BinOp × Bool) := lexeme do
-  let c ← any
-  match c with
-  | '+' => pure ("+", .add, false)
-  | '-' => pure ("-", .sub, false)
-  | '*' => pure ("*", .mul, false)
-  | '/' => pure ("/", .div, false)
-  | '%' => pure ("%", .mod_, false)
-  | '=' =>
-    let c2 ← peek?
-    if c2 == some '=' then do
-      let _ ← any
-      pure ("==", .eq, false)
-    else
-      fail "expected '==' operator"
-  | '!' =>
-    let c2 ← any
-    if c2 == '=' then pure ("!=", .eq, false)  -- Will be wrapped in NOT
-    else fail "expected '!=' operator"
-  | '<' =>
-    let c2 ← peek?
-    if c2 == some '=' then do
-      let _ ← any
-      pure ("<=", .le, false)
-    else
-      pure ("<", .lt, false)
-  | '>' =>
-    let c2 ← peek?
-    if c2 == some '=' then do
-      let _ ← any
-      -- >= becomes <= with swapped operands: a >= b  ↔  b <= a
-      pure (">=", .le, true)
-    else
-      -- > becomes < with swapped operands: a > b  ↔  b < a
-      pure (">", .lt, true)
-  | '&' =>
-    let c2 ← any
-    if c2 == '&' then pure ("&&", .and_, false)
-    else fail "expected '&&' operator"
-  | '|' =>
-    let c2 ← any
-    if c2 == '|' then pure ("||", .or_, false)
-    else fail "expected '||' operator"
-  | _ => fail s!"unexpected operator character: {c}"
+    since CN normalizes a > b to b < a.
+    Supports: arithmetic (+, -, *, /, %), comparison (==, !=, <, <=, >, >=),
+    logical (&&, ||, implies), bitwise (&, |, ^).
+    NOTE: << and >> are not part of CN's cn_binop type (cn.lem:43-61).
+    Reference: c_parser.mly lines 1900-1935 -/
+partial def binop : P (String × BinOp × Bool) :=
+  attempt keywordBinop <|> symbolBinop
+where
+  /-- Parse keyword binary operators (e.g., `implies`) -/
+  keywordBinop : P (String × BinOp × Bool) := lexeme do
+    keyword "implies"
+    pure ("implies", .implies, false)
+  /-- Parse symbolic binary operators -/
+  symbolBinop : P (String × BinOp × Bool) := lexeme do
+    let c ← any
+    match c with
+    | '+' => pure ("+", .add, false)
+    | '-' => pure ("-", .sub, false)
+    | '*' => pure ("*", .mul, false)
+    | '/' => pure ("/", .div, false)
+    | '%' => pure ("%", .rem, false)  -- CN's % maps to Rem (C remainder), not Mod
+    | '^' => pure ("^", .bwXor, false)
+    | '=' =>
+      let c2 ← peek?
+      if c2 == some '=' then do
+        let _ ← any
+        pure ("==", .eq, false)
+      else
+        fail "expected '==' operator"
+    | '!' =>
+      let c2 ← any
+      if c2 == '=' then pure ("!=", .eq, false)  -- Will be wrapped in NOT
+      else fail "expected '!=' operator"
+    -- NOTE: << and >> are not part of CN's cn_binop type (cn.lem:43-61).
+    -- They exist in Core IR but not CN specs.
+    | '<' =>
+      let c2 ← peek?
+      if c2 == some '=' then do
+        let _ ← any
+        pure ("<=", .le, false)
+      else
+        pure ("<", .lt, false)
+    | '>' =>
+      let c2 ← peek?
+      if c2 == some '=' then do
+        let _ ← any
+        -- >= becomes <= with swapped operands: a >= b  ↔  b <= a
+        pure (">=", .le, true)
+      else
+        -- > becomes < with swapped operands: a > b  ↔  b < a
+        pure (">", .lt, true)
+    | '&' =>
+      let c2 ← peek?
+      if c2 == some '&' then do
+        let _ ← any
+        pure ("&&", .and_, false)
+      else
+        pure ("&", .bwAnd, false)
+    | '|' =>
+      let c2 ← peek?
+      if c2 == some '|' then do
+        let _ ← any
+        pure ("||", .or_, false)
+      else
+        pure ("|", .bwOr, false)
+    | _ => fail s!"unexpected operator character: {c}"
 
-/-- Binary operator precedence (higher = tighter binding) -/
-partial def binopPrec : String → Nat
-  | "*" | "/" | "%" => 6
-  | "+" | "-" => 5
-  | "<" | "<=" | ">" | ">=" => 4
-  | "==" | "!=" => 3
-  | "&&" => 2
-  | "||" => 1
-  | _ => 0
+/-- Binary operator precedence (higher = tighter binding).
+    Matches CN spec expression grammar (c_parser.mly lines 1947-2021).
+    NOTE: This differs from standard C precedence! CN groups bitwise ops with
+    arithmetic: `& ^` at mul level, `|` at add level.
+    This means `return == x | y` parses as `return == (x | y)` in CN.
+    Reference: c_parser.mly mul_expr, add_expr, rel_expr, bool_*_expr -/
+partial def binopPrec : String → Option Nat
+  | "*" | "/" | "%" | "&" | "^" => some 6              -- mul_expr
+  | "+" | "-" | "|" => some 5                          -- add_expr
+  | "<" | "<=" | ">" | ">=" | "==" | "!=" => some 4   -- rel_expr
+  | "&&" => some 3                                      -- bool_and_expr
+  | "implies" => some 2                                 -- bool_implies_expr
+  | "||" => some 1                                      -- bool_or_expr
+  | _ => none
 
 /-- Parse a binary expression using precedence climbing -/
 partial def expr : P AnnotTerm := do
@@ -544,7 +585,8 @@ where
     -- operator doesn't consume input (the caller needs to see it).
     let opOpt ← optional (attempt do
       let (opStr, op, swap) ← binop
-      let prec := binopPrec opStr
+      let some prec := binopPrec opStr
+        | fail s!"unknown binary operator: {opStr}"
       if prec < minPrec then fail "precedence too low"
       pure (opStr, op, swap, prec))
     match opOpt with
@@ -563,7 +605,8 @@ where
       else
         pure lhs
     | some (opStr, op, swap, _prec) => do
-        let prec := binopPrec opStr
+        let some prec := binopPrec opStr
+          | fail s!"unknown binary operator: {opStr}"
         let rhs ← unaryExpr
         let rhs ← binExprRest rhs (prec + 1)
         -- If swap is true, flip operands (e.g., a > b becomes b < a)
@@ -576,27 +619,32 @@ end
 
 /-! ## Predicate Parsers -/
 
-/-- Parse a predicate name (Owned, Block, or user-defined) -/
+/-- Parse a predicate name (Owned, Block, or user-defined).
+    CN allows both `Owned<type>(p)` (explicit) and `Owned(p)` (type inferred from p).
+    Reference: c_parser.mly cn_pred production -/
 def predName : P ResourceName := do
   let name ← ident
   match name with
   | "Owned" | "RW" =>
-    -- Parse required type parameter: Owned<type> or RW<type>
+    -- Parse optional type parameter: Owned<type> or RW<type> or Owned or RW
     -- RW is the production name in CN; Owned is deprecated
-    -- CN requires explicit type; no defaulting
-    symbol "<"
-    let ct ← parseCtype
-    symbol ">"
-    pure (.owned ct .init)
+    -- When no type given, it will be inferred during resolution from the pointer's C type
+    let ctOpt ← optional (attempt do
+      symbol "<"
+      let ct ← parseCtype
+      symbol ">"
+      pure ct)
+    pure (.owned ctOpt .init)
   | "Block" | "W" =>
-    -- Parse required type parameter: Block<type> or W<type>
+    -- Parse optional type parameter: Block<type> or W<type> or Block or W
     -- W is the production name in CN; Block is deprecated
-    -- CN requires explicit type; no defaulting
-    symbol "<"
-    let ct ← parseCtype
-    symbol ">"
+    let ctOpt ← optional (attempt do
+      symbol "<"
+      let ct ← parseCtype
+      symbol ">"
+      pure ct)
     -- Block/W represents uninitialized memory
-    pure (.owned ct .uninit)
+    pure (.owned ctOpt .uninit)
   | _ =>
     if name.front.isUpper then
       pure (.pname (mkSym name))
@@ -614,18 +662,60 @@ def resource : P Request := do
   | ptr :: iargs =>
     pure (.p { name := pred, pointer := ptr, iargs := iargs })
 
+/-- Parse an `each` resource (quantified predicate / QPredicate).
+    Format: `each (base_type var; guard) {Pred<type>(pointer_args)}`
+
+    CN ref: c_parser.mly:2377-2384
+
+    Example: `each (u64 i; 0u64 <= i && i < 3u64) {Owned<int>(array_shift(arr, i))}` -/
+partial def eachResource : P Request := do
+  keyword "each"
+  symbol "("
+  let qBt ← cnBaseType
+  let qName ← ident
+  symbol ";"
+  let guard ← expr
+  symbol ")"
+  symbol "{"
+  let pred ← predName
+  symbol "("
+  let args ← exprList
+  symbol ")"
+  symbol "}"
+  match args with
+  | [] => fail "each: inner resource requires at least one argument (pointer)"
+  | ptr :: iargs =>
+    let qSym := mkSym qName
+    -- Extract C type from the predicate name for the step type
+    let step : Ctype ← match pred with
+      | .owned (some ct) _ => pure ct
+      | _ => fail "each: cannot infer step type when predicate type is not explicit"
+    pure (.q {
+      name := pred
+      pointer := ptr
+      q := (qSym, qBt)
+      qLoc := Core.Loc.t.unknown
+      step := step
+      permission := guard
+      iargs := iargs
+    })
+
 /-! ## Clause Parsers -/
 
-/-- Parse a take clause: take v = Resource(...) -/
-def takeClause : P Clause := do
+/-- Parse a take clause: `take v = Resource(...)` or `take v = each (...) {Resource(...)}`
+    CN ref: c_parser.mly condition production -/
+partial def takeClause : P Clause := do
   keyword "take"
   let name ← ident
   symbol "="
-  let res ← resource
-  symbol ";"
   let sym := mkSym name
+  -- Try `each` resource first, then fall back to regular resource
+  let req ← attempt eachResource <|> resource
+  symbol ";"
+  -- Output uses placeholder type (.unit) — resolution will assign the correct type
+  -- via requestOutputBaseType which handles both P and Q requests
   let output : Output := { value := mkTerm (.sym sym) }
-  pure (.resource sym { request := res, output := output })
+  pure (.resource sym { request := req, output := output })
 
 /-- Parse a let clause: let v = expr
     Binds variable name for use in subsequent clauses.
@@ -639,7 +729,8 @@ def letClause : P Clause := do
   pure (.letBinding (mkSym name) e)
 
 /-- Keywords that should not be parsed as identifiers in expressions -/
-def cnKeywords : List String := ["requires", "ensures", "take", "let", "trusted"]
+def cnKeywords : List String := ["requires", "ensures", "take", "let", "trusted", "implies",
+                                  "accesses", "cn_ghost", "each"]
 
 /-- Fail if next token is a keyword (using negative lookahead) -/
 def notKeyword : P Unit := do
@@ -649,6 +740,9 @@ def notKeyword : P Unit := do
   notFollowedBy (keyword "take")
   notFollowedBy (keyword "let")
   notFollowedBy (keyword "trusted")
+  notFollowedBy (keyword "accesses")
+  notFollowedBy (keyword "cn_ghost")
+  notFollowedBy (keyword "each")
 
 /-- Parse a constraint clause: expr; -/
 def constraintClause : P Clause := do
@@ -664,11 +758,47 @@ def condition : P Clause :=
 
 /-! ## Function Spec Parsers -/
 
-/-- Parse a requires clause -/
-def requiresClause : P (List Clause) := do
+/-- Parse an `accesses` clause: `accesses name1, name2, ...;`
+    Declares global variables that the function accesses.
+    CN ref: c_parser.mly accesses production -/
+def accessesClause : P (List String) := do
+  keyword "accesses"
+  let first ← ident
+  let rest ← many (attempt (symbol "," *> ident))
+  symbol ";"
+  pure (first :: rest.toList)
+
+/-- Parse a single ghost parameter declaration: `type name`
+    CN ref: c_parser.mly cn_ghost production -/
+partial def ghostParamDecl : P (Sym × BaseType) := do
+  let bt ← cnBaseType
+  let name ← ident
+  pure (mkSym name, bt)
+
+/-- Parse a `cn_ghost` clause: `cn_ghost type1 name1, type2 name2;`
+    Declares ghost (logical-only) parameters for the function.
+    CN ref: c_parser.mly cn_ghost production, core_to_mucore.ml ghost handling -/
+partial def ghostParamsClause : P (List (Sym × BaseType)) := do
+  keyword "cn_ghost"
+  let first ← ghostParamDecl
+  let rest ← many (attempt (symbol "," *> ghostParamDecl))
+  symbol ";"
+  pure (first :: rest.toList)
+
+/-- Parse a requires clause, optionally preceded by cn_ghost declarations.
+    The cn_ghost clause appears after the `requires` keyword in CN syntax:
+    ```
+    requires cn_ghost i32 a, i32 b;
+             a + b == total;
+    ```
+    CN ref: c_parser.mly requires + cn_ghost interaction -/
+partial def requiresClause : P (List Clause × List (Sym × BaseType)) := do
   keyword "requires"
+  -- Ghost params can appear right after `requires` keyword
+  let ghostParamsOpt ← optional (attempt ghostParamsClause)
+  let ghostParams := ghostParamsOpt.getD []
   let clauses ← many1 condition
-  pure clauses.toList
+  pure (clauses.toList, ghostParams)
 
 /-- Parse an ensures clause -/
 def ensuresClause : P (List Clause) := do
@@ -683,22 +813,29 @@ def ensuresClause : P (List Clause) := do
     This matches CN's approach in core_to_mucore.ml:1164 where ret_s is
     created before desugaring ensures.
 
-    Audited: 2026-01-27 against cn/lib/core_to_mucore.ml -/
-def functionSpec : P FunctionSpec := do
+    Audited: 2026-02-19 against cn/lib/core_to_mucore.ml -/
+partial def functionSpec : P FunctionSpec := do
   ws
   let trusted ← optional (keyword "trusted" *> symbol ";")
-  let reqs ← optional requiresClause
-  let enss ← optional ensuresClause
+  -- Parse accesses clauses (can appear before requires)
+  let accBlocks ← many (attempt accessesClause)
+  let reqBlocks ← many (attempt requiresClause)
+  let ensBlocks ← many ensuresClause
   ws
+  -- Extract ghost params and clauses from requires blocks
+  let allClauses := reqBlocks.toList.map (·.1) |>.flatten
+  let allGhostParams := reqBlocks.toList.map (·.2) |>.flatten
   -- Create the return symbol. This is the symbol that `return` references
   -- in the postcondition resolve to. Using ID 0 matches mkSym "return".
   -- Corresponds to: register_new_cn_local (Id.make here "return") in CN
   let returnSym : Sym := { id := 0, name := some "return" }
   pure {
     returnSym := returnSym
-    requires := { clauses := reqs.getD [] }
-    ensures := { clauses := enss.getD [] }
+    requires := { clauses := allClauses }
+    ensures := { clauses := ensBlocks.toList.flatten }
     trusted := trusted.isSome
+    accesses := accBlocks.toList.flatten
+    ghostParams := allGhostParams
   }
 
 /-! ## Main Entry Points -/
@@ -712,5 +849,110 @@ def parseFunctionSpecOpt (input : String) : Option FunctionSpec :=
   match parseFunctionSpec input with
   | .ok spec => some spec
   | .error _ => none
+
+/-! ## Loop Invariant Parsing
+
+Parses loop invariant annotations of the form `inv expr1; expr2; expr3;`.
+This is called when processing loop_attributes from CN annotations.
+
+CN ref: c_parser.mly cn_inv production, core_to_mucore.ml loop handling
+-/
+
+/-- Parse a loop invariant: `inv expr1; expr2; ...`
+    Returns a list of constraint expressions (one per semicolon-separated clause).
+    The `inv` keyword has already been consumed by the caller in some contexts;
+    this parser expects the full `inv expr; expr; ...` format.
+
+    CN ref: c_parser.mly cn_inv, core_to_mucore.ml loop invariant handling -/
+partial def parseInvariant (input : String) : Except String (List AnnotTerm) :=
+  runParser (do
+    ws
+    keyword "inv"
+    let mut exprs : List AnnotTerm := []
+    -- Parse constraint expressions separated by semicolons
+    while (← peek?).isSome do
+      -- Don't parse keywords as expressions
+      notKeyword
+      let e ← expr
+      symbol ";"
+      exprs := exprs ++ [e]
+      ws
+    pure exprs) input
+
+/-! ## Ghost Statement Parsing
+
+Parses CN ghost statement text from cerb::magic attributes.
+Format: "cn_have(expr)" or "cn_have(expr);" or "have(expr)" etc.
+
+CN ref: cn/lib/parse.ml:78-79 (cn_statements → C_parser.cn_statements)
+-/
+
+/-- A parsed ghost statement -/
+structure ParsedGhostStatement where
+  kind : String
+  constraint : Option AnnotTerm
+  /-- For focus/instantiate: the resource predicate name -/
+  resourcePred : Option ResourceName := none
+  /-- For focus/instantiate: the index expression -/
+  indexExpr : Option AnnotTerm := none
+
+/-- Parse a focus/instantiate ghost statement: `focus Pred<type>, indexExpr;`
+    or `instantiate Pred<type>, indexExpr;`
+    CN ref: check.ml:2204-2246 (instantiate and extract/focus handling) -/
+partial def focusStatement : P ParsedGhostStatement := do
+  ws
+  let kind ← ident
+  if kind != "focus" && kind != "instantiate" && kind != "extract" then
+    fail "not a focus/instantiate statement"
+  let pred ← predName
+  symbol ","
+  let indexE ← expr
+  let _ ← optional (symbol ";")
+  pure { kind := kind, constraint := none, resourcePred := some pred, indexExpr := some indexE }
+
+/-- Parse a single ghost statement: kind(expr) or kind(expr); or focus Pred, index; -/
+partial def ghostStatement : P ParsedGhostStatement := do
+  ws
+  -- Try focus/instantiate format first (keyword Pred<type>, index;)
+  match ← optional (attempt focusStatement) with
+  | some stmt => pure stmt
+  | none =>
+    let kind ← ident
+    -- Some statements have an argument expression, some don't
+    let constraint ← optional (attempt do
+      symbol "("
+      let e ← expr
+      symbol ")"
+      pure e)
+    -- Skip optional trailing semicolons
+    let _ ← optional (symbol ";")
+    pure { kind := kind, constraint := constraint }
+
+/-- Parse one or more ghost statements from a magic attribute string.
+    CN ref: cn/lib/parse.ml:78-79 -/
+def parseGhostStatements (input : String) : Except String (List ParsedGhostStatement) :=
+  runParser (do
+    let mut stmts := []
+    ws
+    -- Parse statements until we hit EOF (peek? returns none)
+    while (← peek?).isSome do
+      let s ← ghostStatement
+      stmts := stmts ++ [s]
+      ws
+    pure stmts) input
+
+/-- Parse call-site ghost arguments from a magic attribute string.
+    Ghost args are comma-separated CN expressions: `3i32, 7i32`
+    CN ref: c_parser.mly ghost argument annotations at call sites -/
+def parseGhostArgs (input : String) : Except String (List AnnotTerm) :=
+  runParser (do
+    ws
+    let first ← expr
+    let mut args := [first]
+    while (← optional (symbol ",")).isSome do
+      let arg ← expr
+      args := args ++ [arg]
+    ws
+    pure args) input
 
 end CerbLean.CN.Parser

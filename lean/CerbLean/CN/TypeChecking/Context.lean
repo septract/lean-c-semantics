@@ -161,6 +161,21 @@ def addL (s : Sym) (bt : BaseType) (info : LInfo) (ctx : Context) : Context :=
 def addLValue (s : Sym) (v : IndexTerm) (info : LInfo) (ctx : Context) : Context :=
   { ctx with logical := (s, .value v, info) :: ctx.logical }
 
+/-! ### Moving Variables Between Scopes
+
+Corresponds to: context.ml lines 114-121
+-/
+
+/-- Move a computational variable to logical scope.
+    Corresponds to: remove_a in context.ml:114-121 -/
+def removeA (s : Sym) (ctx : Context) : Context :=
+  match ctx.computational.find? (fun (s', _, _) => s'.id == s.id) with
+  | some entry =>
+    { ctx with
+      computational := ctx.computational.filter (fun (s', _, _) => s'.id != s.id)
+      logical := entry :: ctx.logical }
+  | none => ctx
+
 /-! ### Constraints
 
 Corresponds to: context.ml lines 123-128

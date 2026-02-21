@@ -38,12 +38,14 @@ inductive LogicalConstraint where
 namespace LogicalConstraint
 
 /-- Substitute in a logical constraint.
-    Corresponds to: LC.subst in cn/lib/logicalConstraints.ml -/
+    Corresponds to: LC.subst in cn/lib/logicalConstraints.ml lines 23-28 -/
 def subst (σ : Subst) : LogicalConstraint → LogicalConstraint
   | .t term => .t (term.subst σ)
-  | .forall_ binding body =>
-    -- Note: should alpha-rename if binding symbol is in σ, but we simplify
-    .forall_ binding (body.subst σ)
+  | .forall_ (s, bt) body =>
+    -- Alpha-rename bound variable if it conflicts with substitution
+    -- Corresponds to: logicalConstraints.ml lines 26-28
+    let (s', body') := suitablyAlphaRename σ.relevant s body
+    .forall_ (s', bt) (body'.subst σ)
 
 end LogicalConstraint
 

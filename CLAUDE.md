@@ -160,14 +160,17 @@ cd lean && .lake/build/bin/cerblean_memtest # Run directly
 
 **CN Verification Tests** (`make test-cn`):
 ```bash
-make test-cn                              # Run integration tests on tests/cn/
+make test-cn                              # Run all CN integration tests (nolibc + libc)
+make test-cn-nolibc                       # Run integration tests (fast, --nolibc)
+make test-cn-libc                         # Run libc-only tests (*.libc.* files)
 make test-cn-unit                         # Run unit tests only (fast, no Cerberus)
+./scripts/test_cn.sh --nolibc             # Run tests without libc (skips *.libc.* tests)
 ./scripts/test_cn.sh                      # Run all tests in tests/cn/
 ./scripts/test_cn.sh /path/to/test.c      # Run a specific test
 ./scripts/test_cn.sh --unit               # Run unit tests only
 ```
 
-CN test file conventions: `NNN-description.c` (pass), `NNN-description.fail.c` (expected fail), `NNN-description.smt-fail.c` (SMT-level fail). The `.fail.c` and `.smt-fail.c` suffixes auto-pass `--expect-fail`.
+CN test file conventions: `NNN-description.c` (pass), `NNN-description.fail.c` (expected fail), `NNN-description.libc.fail.c` (expected-fail requiring libc, skipped with --nolibc), `NNN-description.smt-fail.c` (SMT-level fail). The `.fail.c` and `.smt-fail.c` suffixes auto-pass `--expect-fail`.
 
 **Cerberus OCaml Code Coverage** (`scripts/test_coverage.sh`):
 ```bash
@@ -328,6 +331,58 @@ The ONLY acceptable reasons to modify a test:
 ### ABSOLUTE RULE: Backwards Compatibility is an Anti-Goal
 
 **Backwards compatibility with previous versions of our own code is an ANTI-GOAL.** The ONLY source of truth is Cerberus and CN. If our implementation diverges, it is WRONG and must be fixed, even if it breaks tests, changes behavior, or invalidates proofs. Fix it immediately. There is no "deprecation period" for incorrect semantics.
+
+### Marking Known Divergences: `DIVERGES-FROM-CN`
+
+When our implementation intentionally diverges from CN or Cerberus (e.g., missing padding handling, simplified rollback), mark the code with a `DIVERGES-FROM-CN` comment. This makes divergences greppable and ensures they get revisited.
+
+**Format**:
+```lean
+-- DIVERGES-FROM-CN: <short description of what CN does differently>
+```
+
+**Rules**:
+- Every `DIVERGES-FROM-CN` must explain what CN does and how we differ
+- The divergence must be **intentional and justified** (e.g., internally consistent simplification, feature not yet needed). If it's not justified, fix it instead of marking it
+- Divergences that would cause **incorrect results** are NOT acceptable — those must be fixed immediately. `DIVERGES-FROM-CN` is only for cases where our behavior is correct but less complete than CN
+- Periodically grep for `DIVERGES-FROM-CN` to audit and close gaps
+
+**Example**:
+```lean
+-- DIVERGES-FROM-CN: CN's unpack_owned (pack.ml:113-124) also produces padding
+-- resources (Owned<char[N]>(Uninit) at padding offsets). We only produce member
+-- resources. Internally consistent since tryRepackStruct also skips padding.
+let fieldResources := fields.filterMap fun (field : FieldDef) =>
+```
+
+### Marking Bugs Found During Audit: `FIXME`
+
+When you spot a bug or incorrect behavior during an audit but can't fix it on the spot, mark it with `FIXME`. This is for things that are **actually wrong** — not intentional simplifications (use `DIVERGES-FROM-CN` for those).
+
+**Format**:
+```lean
+-- FIXME: <what's wrong and why it matters>
+```
+
+**Rules**:
+- `FIXME` means the code produces or could produce **incorrect results**. Fix ASAP
+- Must explain what's wrong, not just flag the line
+- If you can fix it now, fix it instead of tagging it
+- Periodically grep for `FIXME` — the count should trend toward zero
+
+**Distinction from `DIVERGES-FROM-CN`**:
+
+| Tag | Meaning | Correct? | Action |
+|-----|---------|----------|--------|
+| `DIVERGES-FROM-CN` | Intentional, behavior correct but incomplete | Yes | Revisit when needed |
+| `FIXME` | Bug or incorrect behavior | No | Fix ASAP |
+
+**Example**:
+```lean
+-- FIXME: we compare Sym by id only, but CN uses digest+id (Sym.equal).
+-- This could match the wrong symbol if two syms share an id but differ in digest.
+if sym1.id == sym2.id then
+```
 
 ### Always Use Build Targets for Testing
 **Always use Makefile targets** (`make test`, `make test-cn`, etc.) rather than invoking test binaries directly.

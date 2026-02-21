@@ -345,6 +345,11 @@ structure File where
   funinfo : FunInfoMap := {}
   /-- Loop attributes for CN verification -/
   loopAttributes : LoopAttributes := []
+  /-- C types for Esave args, keyed by label symbol ID.
+      Extracted from ctype_pass_by in JSON. Used by CN loop invariant infrastructure
+      to build proper label types with Owned resources.
+      Corresponds to: lt field in milicore.ml Mi_Label -/
+  saveArgCTypes : List (Nat × List (Option Sym × Ctype)) := []
   /-- Visible objects environment for marker scopes -/
   visibleObjectsEnv : VisibleObjectsEnv := []
 

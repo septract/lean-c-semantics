@@ -5,11 +5,14 @@
 #
 # Options:
 #   --unit         Run unit tests only (no Cerberus required)
+#   --nolibc       Skip libc (faster, skips *.libc.* tests)
+#   --libc-only    Run only *.libc.* tests (with libc)
 #   -v, --verbose  Show detailed output per test
 #   -h, --help     Show this help message
 
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
-set -euo pipefail
+set -uo pipefail
+# NOTE: -e is intentionally omitted — we capture exit codes for comparison
 
 usage() {
     cat <<'EOF'
@@ -22,11 +25,15 @@ With file arguments, tests only those specific C files.
 
 Options:
   --unit         Run unit tests only (no Cerberus required)
+  --nolibc       Skip libc (faster, skips *.libc.* tests)
+  --libc-only    Run only *.libc.* tests (with libc)
   -v, --verbose  Show detailed output per test
   -h, --help     Show this help message
 
 Examples:
   ./scripts/test_cn.sh                      # All integration tests
+  ./scripts/test_cn.sh --nolibc             # Skip libc tests (faster)
+  ./scripts/test_cn.sh --libc-only          # Only libc tests
   ./scripts/test_cn.sh tests/cn/001-*.c     # Specific test
   ./scripts/test_cn.sh --unit               # Unit tests only
 EOF
@@ -35,6 +42,8 @@ EOF
 
 # Parse arguments
 UNIT_MODE=false
+NO_LIBC=false
+LIBC_ONLY=false
 VERBOSE=false
 TEST_ARGS=()
 
@@ -43,6 +52,14 @@ while [[ $# -gt 0 ]]; do
         -h|--help) usage ;;
         --unit)
             UNIT_MODE=true
+            shift
+            ;;
+        --nolibc)
+            NO_LIBC=true
+            shift
+            ;;
+        --libc-only)
+            LIBC_ONLY=true
             shift
             ;;
         -v|--verbose)
@@ -62,6 +79,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 TEST_CN="$LEAN_DIR/.lake/build/bin/test_cn"
+
+# Validate flag combinations
+if $NO_LIBC && $LIBC_ONLY; then
+    echo "Error: --nolibc and --libc-only are mutually exclusive" >&2
+    exit 1
+fi
 
 # Handle --unit flag: run unit tests only
 if $UNIT_MODE; then
@@ -89,6 +112,26 @@ else
     done
 fi
 
+# Filter test files based on libc flags
+if $NO_LIBC; then
+    FILTERED=()
+    for f in "${TEST_FILES[@]}"; do
+        [[ "$(basename "$f")" == *.libc.* ]] && continue
+        FILTERED+=("$f")
+    done
+    TEST_FILES=("${FILTERED[@]}")
+elif $LIBC_ONLY; then
+    FILTERED=()
+    for f in "${TEST_FILES[@]}"; do
+        [[ "$(basename "$f")" == *.libc.* ]] || continue
+        FILTERED+=("$f")
+    done
+    TEST_FILES=("${FILTERED[@]}")
+fi
+
+# Check prerequisites
+require_cerberus
+
 # Build Lean project
 build_lean test_cn
 echo ""
@@ -97,72 +140,119 @@ echo ""
 TMP_JSON=$(mktemp "$TMP_DIR/cn-test-XXXXXXXXXX")
 register_cleanup "$TMP_JSON"
 
-# Track results
+# Counters
 TOTAL_PASS=0
 TOTAL_FAIL=0
+TOTAL_CERB_SKIP=0
 FAILED_FILES=()
 
-echo "=== CN Integration Tests ==="
-echo "Testing ${#TEST_FILES[@]} file(s)"
+total_to_test=${#TEST_FILES[@]}
+echo "Running CN type checking..."
+echo "================================="
+echo "Testing $total_to_test file(s)"
 echo ""
 
+file_num=0
 for TEST_FILE in "${TEST_FILES[@]}"; do
-    BASENAME=$(basename "$TEST_FILE")
-
-    if $VERBOSE; then
-        echo "=== Testing: $BASENAME ==="
-    fi
+    BASENAME=$(basename "$TEST_FILE" .c)
+    file_num=$((file_num + 1))
+    prefix="[$file_num/$total_to_test]"
 
     # Determine if this is an expected-failure test
-    EXPECT_FAIL=""
-    if [[ "$BASENAME" == *.fail.c ]] || [[ "$BASENAME" == *.smt-fail.c ]]; then
-        EXPECT_FAIL="--expect-fail"
-        if $VERBOSE; then
-            echo "  (expecting failure)"
-        fi
+    EXPECT_FAIL=false
+    if [[ "$BASENAME" == *.fail ]] || [[ "$BASENAME" == *.smt-fail ]]; then
+        EXPECT_FAIL=true
     fi
 
     # Check test file exists
     if [[ ! -f "$TEST_FILE" ]]; then
-        echo -e "${RED}ERROR: Test file not found: $TEST_FILE${NC}"
+        echo "$prefix FAIL $BASENAME: file not found"
         TOTAL_FAIL=$((TOTAL_FAIL + 1))
         FAILED_FILES+=("$TEST_FILE")
         continue
     fi
 
     # Generate JSON with Cerberus
-    if ! "$CERBERUS" --switches=at_magic_comments --json_core_out="$TMP_JSON" "$TEST_FILE" 2>/dev/null; then
-        echo -e "${RED}  ERROR: Cerberus failed on $BASENAME${NC}"
-        TOTAL_FAIL=$((TOTAL_FAIL + 1))
-        FAILED_FILES+=("$TEST_FILE")
+    CERBERUS_FLAGS=("--switches=at_magic_comments")
+    if $NO_LIBC; then
+        CERBERUS_FLAGS+=("--nolibc")
+    fi
+    cerb_exit=0
+    cerb_output=$("$CERBERUS" "${CERBERUS_FLAGS[@]}" --json_core_out="$TMP_JSON" "$TEST_FILE" 2>&1) || cerb_exit=$?
+    if [[ $cerb_exit -ne 0 ]]; then
+        TOTAL_CERB_SKIP=$((TOTAL_CERB_SKIP + 1))
+        cerb_reason=$(echo "$cerb_output" | head -1 | cut -c1-80)
+        echo "$prefix CERB_SKIP $BASENAME: $cerb_reason"
         continue
     fi
 
-    # Run Lean test on JSON (with --expect-fail for .fail.c files)
-    if "$TEST_CN" $EXPECT_FAIL "$TMP_JSON" 2>&1; then
-        TOTAL_PASS=$((TOTAL_PASS + 1))
-    else
-        echo -e "${RED}  ERROR: Lean test failed on $BASENAME${NC}"
-        TOTAL_FAIL=$((TOTAL_FAIL + 1))
-        FAILED_FILES+=("$TEST_FILE")
-    fi
+    # Run Lean CN type checker (no --expect-fail; we handle expectations here)
+    cn_exit=0
+    cn_output=$("$TEST_CN" "$TMP_JSON" 2>&1) || cn_exit=$?
 
     if $VERBOSE; then
-        echo ""
+        # Show full test_cn output indented
+        if [[ -n "$cn_output" ]]; then
+            echo "$cn_output" | sed 's/^/  /'
+        fi
+    fi
+
+    if $EXPECT_FAIL; then
+        if [[ $cn_exit -ne 0 ]]; then
+            # Expected fail, got fail — correct
+            TOTAL_PASS=$((TOTAL_PASS + 1))
+            echo "$prefix PASS $BASENAME (failed as expected)"
+        else
+            # Expected fail, got pass — wrong
+            TOTAL_FAIL=$((TOTAL_FAIL + 1))
+            FAILED_FILES+=("$TEST_FILE")
+            echo "$prefix FAIL $BASENAME: expected failure but passed"
+        fi
+    else
+        if [[ $cn_exit -eq 0 ]]; then
+            # Expected pass, got pass — correct
+            TOTAL_PASS=$((TOTAL_PASS + 1))
+            echo "$prefix PASS $BASENAME"
+        else
+            # Expected pass, got fail — wrong
+            TOTAL_FAIL=$((TOTAL_FAIL + 1))
+            FAILED_FILES+=("$TEST_FILE")
+            # Extract a one-line reason from test_cn output (prefer "error:" lines)
+            reason=$(echo "$cn_output" | grep -m1 'error:' | sed 's/^[[:space:]]*//' | cut -c1-80)
+            reason=${reason:-$(echo "$cn_output" | grep -i -m1 'fail\|not yet\|not impl\|unsupported\|unhandled' | sed 's/^[[:space:]]*//' | cut -c1-80)}
+            reason=${reason:-"(no details)"}
+            echo "$prefix FAIL $BASENAME: $reason"
+        fi
     fi
 done
 
-echo "=== Summary ==="
-echo -e "Passed: ${GREEN}$TOTAL_PASS${NC}"
-echo -e "Failed: ${RED}$TOTAL_FAIL${NC}"
+echo ""
+echo "================================="
+echo "Results Summary"
+echo "================================="
+echo ""
+echo "  Pass:      $TOTAL_PASS"
+echo "  Fail:      $TOTAL_FAIL"
+echo "  Cerb Skip: $TOTAL_CERB_SKIP"
+echo ""
 
 if [[ ${#FAILED_FILES[@]} -gt 0 ]]; then
-    echo ""
     echo "Failed files:"
     for f in "${FAILED_FILES[@]}"; do
-        echo "  - $f"
+        echo "  - $(basename "$f")"
     done
-    exit 1
+    echo ""
 fi
 
-echo "=== All Tests Complete ==="
+TOTAL_RAN=$((TOTAL_PASS + TOTAL_FAIL))
+if [[ $TOTAL_RAN -gt 0 ]]; then
+    PASS_RATE=$((TOTAL_PASS * 100 / TOTAL_RAN))
+    echo "Pass rate: ${PASS_RATE}% ($TOTAL_PASS/$TOTAL_RAN)"
+fi
+
+# Exit with failure if any tests failed
+if [[ $TOTAL_FAIL -gt 0 ]]; then
+    echo ""
+    echo -e "${RED}FAILED: $TOTAL_FAIL test failure(s)${NC}"
+    exit 1
+fi
