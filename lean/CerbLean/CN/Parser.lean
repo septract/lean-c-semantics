@@ -34,7 +34,7 @@
                  | "return" | "null" | "true" | "false"
                  | IDENT "(" expr_list ")"   -- function call
   binop          = "==" | "!=" | "<" | "<=" | ">" | ">=" | "&&" | "||" | "implies"
-                 | "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "<<" | ">>"
+                 | "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^"
 
   cn_base_type   = "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | ...
   ctype          = [sign] [size] [base] ["*"]*  -- C type for resources
@@ -180,6 +180,10 @@ def buildCtype (sign : Option CSignSpec) (size : Option CSizeSpec) (baseName : S
   -- Build the base type
   let baseType : Ctype := match baseName with
     | "void" => .void
+    -- Cerberus treats plain 'char' as signed on all supported target platforms
+    -- (x86-64 Linux/macOS). This matches Cerberus's ABI choice via its
+    -- impl_funs.ml:ocaml_char_is_signed = true. C standard says char signedness
+    -- is implementation-defined (C11 6.2.5p15).
     | "char" =>
       let charSign := sign.getD .signed
       .basic (.integer (if charSign == .unsigned then .unsigned .ichar else .signed .ichar))
@@ -490,7 +494,8 @@ partial def unaryExpr : P AnnotTerm := do
     For `>` and `>=`, we return the corresponding `<`/`<=` op with swap=true,
     since CN normalizes a > b to b < a.
     Supports: arithmetic (+, -, *, /, %), comparison (==, !=, <, <=, >, >=),
-    logical (&&, ||, implies), bitwise (&, |, ^, <<, >>).
+    logical (&&, ||, implies), bitwise (&, |, ^).
+    NOTE: << and >> are not part of CN's cn_binop type (cn.lem:43-61).
     Reference: c_parser.mly lines 1900-1935 -/
 partial def binop : P (String × BinOp × Bool) :=
   attempt keywordBinop <|> symbolBinop
@@ -520,22 +525,18 @@ where
       let c2 ← any
       if c2 == '=' then pure ("!=", .eq, false)  -- Will be wrapped in NOT
       else fail "expected '!=' operator"
+    -- NOTE: << and >> are not part of CN's cn_binop type (cn.lem:43-61).
+    -- They exist in Core IR but not CN specs.
     | '<' =>
       let c2 ← peek?
-      if c2 == some '<' then do
-        let _ ← any
-        pure ("<<", .shiftLeft, false)
-      else if c2 == some '=' then do
+      if c2 == some '=' then do
         let _ ← any
         pure ("<=", .le, false)
       else
         pure ("<", .lt, false)
     | '>' =>
       let c2 ← peek?
-      if c2 == some '>' then do
-        let _ ← any
-        pure (">>", .shiftRight, false)
-      else if c2 == some '=' then do
+      if c2 == some '=' then do
         let _ ← any
         -- >= becomes <= with swapped operands: a >= b  ↔  b <= a
         pure (">=", .le, true)
@@ -561,17 +562,17 @@ where
 /-- Binary operator precedence (higher = tighter binding).
     Matches CN spec expression grammar (c_parser.mly lines 1947-2021).
     NOTE: This differs from standard C precedence! CN groups bitwise ops with
-    arithmetic: `& ^ << >>` at mul level, `|` at add level.
+    arithmetic: `& ^` at mul level, `|` at add level.
     This means `return == x | y` parses as `return == (x | y)` in CN.
     Reference: c_parser.mly mul_expr, add_expr, rel_expr, bool_*_expr -/
-partial def binopPrec : String → Nat
-  | "*" | "/" | "%" | "&" | "^" | "<<" | ">>" => 6  -- mul_expr
-  | "+" | "-" | "|" => 5                              -- add_expr
-  | "<" | "<=" | ">" | ">=" | "==" | "!=" => 4       -- rel_expr
-  | "&&" => 3                                          -- bool_and_expr
-  | "implies" => 2                                     -- bool_implies_expr
-  | "||" => 1                                          -- bool_or_expr
-  | _ => 0
+partial def binopPrec : String → Option Nat
+  | "*" | "/" | "%" | "&" | "^" => some 6              -- mul_expr
+  | "+" | "-" | "|" => some 5                          -- add_expr
+  | "<" | "<=" | ">" | ">=" | "==" | "!=" => some 4   -- rel_expr
+  | "&&" => some 3                                      -- bool_and_expr
+  | "implies" => some 2                                 -- bool_implies_expr
+  | "||" => some 1                                      -- bool_or_expr
+  | _ => none
 
 /-- Parse a binary expression using precedence climbing -/
 partial def expr : P AnnotTerm := do
@@ -584,7 +585,8 @@ where
     -- operator doesn't consume input (the caller needs to see it).
     let opOpt ← optional (attempt do
       let (opStr, op, swap) ← binop
-      let prec := binopPrec opStr
+      let some prec := binopPrec opStr
+        | fail s!"unknown binary operator: {opStr}"
       if prec < minPrec then fail "precedence too low"
       pure (opStr, op, swap, prec))
     match opOpt with
@@ -603,7 +605,8 @@ where
       else
         pure lhs
     | some (opStr, op, swap, _prec) => do
-        let prec := binopPrec opStr
+        let some prec := binopPrec opStr
+          | fail s!"unknown binary operator: {opStr}"
         let rhs ← unaryExpr
         let rhs ← binExprRest rhs (prec + 1)
         -- If swap is true, flip operands (e.g., a > b becomes b < a)
@@ -684,9 +687,9 @@ partial def eachResource : P Request := do
   | ptr :: iargs =>
     let qSym := mkSym qName
     -- Extract C type from the predicate name for the step type
-    let step : Ctype := match pred with
-      | .owned (some ct) _ => ct
-      | _ => Ctype.mk' (.basic (.integer (.signed .int_)))  -- default to int
+    let step : Ctype ← match pred with
+      | .owned (some ct) _ => pure ct
+      | _ => fail "each: cannot infer step type when predicate type is not explicit"
     pure (.q {
       name := pred
       pointer := ptr

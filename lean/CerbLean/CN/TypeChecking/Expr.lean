@@ -420,10 +420,18 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
               | none => pure none
             processGhostStatementByName stmt.kind resolvedConstraint
               stmt.resourcePred resolvedIndex loc
-        | .error _ =>
-          -- If it doesn't parse as a ghost statement, it might be something else
-          -- (e.g., a function spec or loop spec) — skip silently
-          pure ()
+        | .error e =>
+          -- Ghost statements start with known prefixes. If the text looks like a ghost
+          -- statement but failed to parse, report the error. Other magic text (function
+          -- specs, loop specs) is handled elsewhere and should be silently skipped.
+          let trimmed := magicText.trim
+          if trimmed.startsWith "cn_" || trimmed.startsWith "instantiate " ||
+             trimmed.startsWith "extract " || trimmed.startsWith "split_case " ||
+             trimmed.startsWith "unfold " || trimmed.startsWith "apply " ||
+             trimmed.startsWith "have " then
+            TypingM.fail (.other s!"ghost statement parse error: {e}")
+          else
+            pure ()  -- Not a ghost statement; handled elsewhere
       -- Continue with e2 (ghost statement doesn't bind a value)
       checkExpr labels e2 k
     else
@@ -445,6 +453,12 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
 
   -- Conditional: if cond then thenE else elseE
   -- Corresponds to: Eif case in check.ml lines 1985-2002
+  --
+  -- DIVERGES-FROM-CN: CN's `pure` combinator (typing.ml:67-72) discards BOTH branches'
+  -- state changes. Our tryBranch approach preserves the successful branch's resource state.
+  -- This is sound when both branches call `k` symmetrically (which is the normal case).
+  -- For programs with asymmetric resource patterns across branches, this could diverge.
+  -- The current approach works correctly for all 103 tests.
   --
   -- CN uses inline solver access (`provable(false)`) to detect dead branches.
   -- We use conditional failures instead: try each branch, catch errors, create
@@ -600,7 +614,7 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
               TypingM.fail (.other s!"ghost argument: unresolved symbol '{name}'")
             | .error e =>
               TypingM.fail (.other s!"ghost argument resolution error: {repr e}")
-        | .error _ => pure ()  -- Not parseable as ghost args, skip
+        | .error e => dbg_trace s!"Warning: failed to parse potential ghost args: {e}"; pure ()
       pure allArgs
 
     -- 4. Process computational args with store resolution, then spine_l for precondition
@@ -687,11 +701,9 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
   | .unseq es =>
     if es.isEmpty then
       k (mkUnitTermExpr loc)
-    else if es.length == 1 then
-      -- Single expression: return its result directly
-      checkExpr labels es.head! k
     else
-      -- Multiple expressions: evaluate all and return a tuple
+      -- Evaluate all expressions and return a tuple (including 1-tuples)
+      -- CN always constructs a tuple for Eunseq, even with a single element.
       -- Use CPS to collect all results
       let rec collectResults (remaining : List AExpr) (acc : List IndexTerm)
           : TypingM Unit := do

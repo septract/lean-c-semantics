@@ -319,10 +319,16 @@ namespace ReturnType
 /-- Substitute in a ReturnType.
     Corresponds to: ReturnTypes.subst in returnTypes.ml
 
-    Only substitutes in the LRT (postcondition), not the sym/bt.
-    The sym is a binder (will be renamed in bind_logical_return). -/
+    Alpha-renames the return symbol if it conflicts with the substitution,
+    then substitutes in the LRT (postcondition).
+    CN ref: returnTypes.ml:16-19 (subst with suitably_alpha_rename) -/
 def subst (σ : Subst) (rt : ReturnType) : ReturnType :=
-  { rt with lrt := rt.lrt.subst σ }
+  let (sym', lrt') := if σ.relevant.contains rt.sym.id then
+    let sym' := freshSymFor rt.sym σ.relevant
+    let renameσ := Subst.single rt.sym (AnnotTerm.mk (.sym sym') rt.bt default)
+    (sym', rt.lrt.subst renameσ)
+  else (rt.sym, rt.lrt)
+  { rt with sym := sym', lrt := LRT.subst σ lrt' }
 
 end ReturnType
 

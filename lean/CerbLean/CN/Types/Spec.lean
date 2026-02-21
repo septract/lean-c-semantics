@@ -73,9 +73,19 @@ Corresponds to: LRT.subst in cn/lib/logicalReturnTypes.ml
 Used to substitute the return symbol with the actual return value.
 -/
 
-/-- Substitute in a clause -/
+/-- Substitute in a clause.
+    Corresponds to: LRT.subst Resource case in logicalReturnTypes.ml:25-40
+    Note: In CN's LRT, the Resource case has a continuation (rest of LRT),
+    and alpha-renaming of `n` applies to that continuation. In our flat Clause
+    representation there is no continuation, so alpha-renaming of `n` is not
+    needed here -- it is handled at the LRT level (LRT.subst) or by the caller
+    (Postcondition.subst iterating over clauses). We only substitute in the
+    resource fields. -/
 def Clause.subst (σ : Subst) : Clause → Clause
-  | .resource n r => .resource n r  -- TODO: subst in resource if needed
+  | .resource n r =>
+    let request' := r.request.subst σ
+    let output' := { r.output with value := r.output.value.subst σ }
+    .resource n { r with request := request', output := output' }
   | .constraint assertion => .constraint (assertion.subst σ)
   | .letBinding n v => .letBinding n (v.subst σ)
 

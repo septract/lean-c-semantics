@@ -482,7 +482,7 @@ partial def bindPattern (pat : APattern) (value : IndexTerm) : TypingM PatternBi
     -- the value's type when the pattern annotation is insufficient.
     let cnBt := match coreBaseTypeToCN bt with
       | some t => t
-      | none => value.bt  -- Pattern annotation insufficient; use actual value type
+      | none => value.bt  -- Pattern annotation insufficient (e.g., `loaded integer`); use value's type
     TypingM.addAValue sym value loc s!"pattern binding {sym.name.getD ""}"
     return { boundVars := [(sym, cnBt)] }
   | .base none _ =>
@@ -1287,8 +1287,7 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
       -- Non-constant: wrap in cast (symbolic conversion)
       return AnnotTerm.mk (.cast targetBt argVal) targetBt argVal.loc
     | _, _ =>
-      -- Non-Bits target type: pass through
-      return argVal
+      TypingM.fail (.other s!"conv_int: target type {repr targetBt} is not Bits")
 
   -- Wrap integer (modular arithmetic)
   -- Corresponds to: PEwrapI in cn/lib/check.ml lines 945-985

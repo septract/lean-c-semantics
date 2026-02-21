@@ -510,8 +510,16 @@ partial def resolveAnnotTerm (ctx : ResolveContext) (at_ : AnnotTerm)
     | some (.bits sign width) =>
       -- CHECK mode with Bits expected: use expected type
       return .mk (.const (.bits sign width n)) (.bits sign width) loc
-    | some _ =>
-      -- CHECK mode with non-Bits expected: keep as unbounded Integer
+    | some bt =>
+      -- CHECK mode with non-Bits expected: keep as unbounded Integer.
+      -- Reject truly incompatible types (bool, loc, struct, etc.)
+      -- but allow .integer and .unit (unit appears as placeholder in some contexts).
+      match bt with
+      | .integer | .unit | .real => pure ()  -- Compatible with Z literal
+      | .bits _ _ => pure ()  -- Already handled above; unreachable but needed for exhaustiveness
+      | .bool | .loc | .struct_ _ | .datatype _ | .record _ | .list _ | .set _
+      | .option _ | .tuple _ | .map _ _ | .ctype | .allocId | .memByte =>
+        throw (.other s!"integer literal {n} cannot satisfy expected type {repr bt}")
       return .mk (.const (.z n)) .integer loc
     | none =>
       -- INFER mode: pick smallest fitting Bits type (CN's default behavior)
@@ -558,10 +566,17 @@ partial def resolveAnnotTerm (ctx : ResolveContext) (at_ : AnnotTerm)
         throw (.unknownPointeeType "pointer - integer: cannot determine element type")
     | _, _ =>
       -- Normal (non-pointer) binary operation
-      let resultBt := match op with
-        | .eq | .lt | .le | .and_ | .or_ | .implies => .bool
+      -- Upgrade comparison ops to pointer variants when left operand has Loc type.
+      -- CN's wellTyped.ml uses LTPointer/LEPointer for pointer comparisons,
+      -- which the SMT backend translates to addr_of-based unsigned BV comparisons.
+      let op' := match op, l'.bt with
+        | .lt, .loc => .ltPointer
+        | .le, .loc => .lePointer
+        | _, _ => op
+      let resultBt := match op' with
+        | .eq | .lt | .le | .ltPointer | .lePointer | .and_ | .or_ | .implies => .bool
         | _ => l'.bt  -- Arithmetic ops: result type matches left operand
-      return .mk (.binop op l' r') resultBt loc
+      return .mk (.binop op' l' r') resultBt loc
   | .mk (.unop op arg) _bt loc =>
     -- For unary ops, thread expected type to operand
     let arg' ← resolveAnnotTerm ctx arg expectedBt
@@ -600,11 +615,17 @@ partial def resolveAnnotTerm (ctx : ResolveContext) (at_ : AnnotTerm)
         | [p, q] => return .mk (.binop .eq p q) .bool loc
         | _ => throw (.other s!"ptr_eq requires exactly 2 arguments, got {args'.length}")
       | some "addr_eq" =>
-        -- addr_eq(p, q) => EQ(addr(p), addr(q)) : Bool
+        -- addr_eq(p, q) => EQ(addr_of(p), addr_of(q)) : Bool
         -- Corresponds to: addr_eq_def in cn/lib/builtins.ml lines 139-145
-        -- TODO: need addr_ index term constructor
+        -- We cast both pointers to BitVec 64, which the SMT backend translates
+        -- as addr_of (SmtLib.lean:951-955), extracting just the address component.
+        -- This differs from ptr_eq which compares the full pointer (including alloc_id).
         match args' with
-        | [p, q] => return .mk (.binop .eq p q) .bool loc
+        | [p, q] =>
+          let addrBt : BaseType := .bits .unsigned 64
+          let addrP := AnnotTerm.mk (.cast addrBt p) addrBt loc
+          let addrQ := AnnotTerm.mk (.cast addrBt q) addrBt loc
+          return .mk (.binop .eq addrP addrQ) .bool loc
         | _ => throw (.other s!"addr_eq requires exactly 2 arguments, got {args'.length}")
       | some "is_null" =>
         -- is_null(p) => EQ(p, NULL) : Bool
@@ -618,9 +639,9 @@ partial def resolveAnnotTerm (ctx : ResolveContext) (at_ : AnnotTerm)
         -- The C type is inferred from the pointer's pointee type during resolution
         match args' with
         | [base, index] =>
-          let elemCtype := match tryGetPointeeCtype ctx base with
-            | some ct => ct
-            | none => Ctype.mk' (.basic (.integer (.signed .int_)))  -- default fallback
+          let elemCtype ← match tryGetPointeeCtype ctx base with
+            | some ct => pure ct
+            | none => throw (.unknownPointeeType "array_shift: cannot determine element type from pointer")
           return .mk (.arrayShift base elemCtype index) .loc loc
         | _ => throw (.other s!"array_shift requires exactly 2 arguments, got {args'.length}")
       | _ =>
@@ -649,9 +670,9 @@ partial def resolveAnnotTerm (ctx : ResolveContext) (at_ : AnnotTerm)
     -- The result type is the value type of the map.
     let m' ← resolveAnnotTerm ctx m none
     let k' ← resolveAnnotTerm ctx k none
-    let valueBt := match m'.bt with
-      | .map _ vt => vt
-      | _ => m'.bt  -- fallback: if not a map type, use map's own type
+    let valueBt ← match m'.bt with
+      | .map _ vt => pure vt
+      | _ => throw (.other s!"mapGet applied to non-map type: {repr m'.bt}")
     return .mk (.mapGet m' k') valueBt loc
   | .mk t bt loc =>
     -- For other terms, resolve recursively with expected type, preserve original type
@@ -814,16 +835,16 @@ def resolveFunctionSpec
   -- We create fresh symbols for the values, which will be connected to Owned
   -- resources at the global's address during type checking (Params.lean).
   -- Corresponds to: CN's compile.ml building env with add_logical for globals
-  let (ctxWithGlobals, resolvedAccesses) :=
-    spec.accesses.foldl (init := (paramCtx, ([] : List (String × Sym × BaseType)))) fun (ctx, acc) globalName =>
+  let (ctxWithGlobals, resolvedAccesses) ←
+    spec.accesses.foldlM (init := (paramCtx, ([] : List (String × Sym × BaseType)))) fun (ctx, acc) globalName =>
       match globals.find? (fun (sym, _) => sym.name == some globalName) with
-      | some (globalCoreSym, globDecl) =>
+      | some (_globalCoreSym, globDecl) =>
         let globBt := match globDecl with
           | .def_ _ cTy _ => ctypeToOutputBaseType cTy
           | .decl _ cTy => ctypeToOutputBaseType cTy
         let (ctx', freshSym) := ctx.fresh globalName globBt
-        (ctx', acc ++ [(globalName, freshSym, globBt)])
-      | none => (ctx, acc)  -- Global not found; will fail during type checking
+        pure (ctx', acc ++ [(globalName, freshSym, globBt)])
+      | none => throw (.other s!"accessed global '{globalName}' not found in program globals")
 
   -- Create fresh symbols for ghost parameters (they have placeholder id=0 from parser)
   -- Ghost params are logical-only parameters declared with `cn_ghost`
@@ -943,6 +964,65 @@ partial def substStoreValues
     .mk (.arrayShift (substStoreValues ctx storeValues base) ct (substStoreValues ctx storeValues idx)) bt loc
   | .mk (.cast targetBt value) bt loc =>
     .mk (.cast targetBt (substStoreValues ctx storeValues value)) bt loc
-  | other => other  -- Constants, sizeOf, etc. don't contain sym refs
+  | .mk (.mapGet m k) bt loc =>
+    .mk (.mapGet (substStoreValues ctx storeValues m) (substStoreValues ctx storeValues k)) bt loc
+  | .mk (.mapSet m k v) bt loc =>
+    .mk (.mapSet (substStoreValues ctx storeValues m) (substStoreValues ctx storeValues k) (substStoreValues ctx storeValues v)) bt loc
+  | .mk (.mapConst keyTy value) bt loc =>
+    .mk (.mapConst keyTy (substStoreValues ctx storeValues value)) bt loc
+  | .mk (.mapDef varBt body) bt loc =>
+    .mk (.mapDef varBt (substStoreValues ctx storeValues body)) bt loc
+  | .mk (.memberShift base tag member) bt loc =>
+    .mk (.memberShift (substStoreValues ctx storeValues base) tag member) bt loc
+  | .mk (.wrapI ity val) bt loc =>
+    .mk (.wrapI ity (substStoreValues ctx storeValues val)) bt loc
+  | .mk (.good ct val) bt loc =>
+    .mk (.good ct (substStoreValues ctx storeValues val)) bt loc
+  | .mk (.representable ct val) bt loc =>
+    .mk (.representable ct (substStoreValues ctx storeValues val)) bt loc
+  | .mk (.aligned ptr align) bt loc =>
+    .mk (.aligned (substStoreValues ctx storeValues ptr) (substStoreValues ctx storeValues align)) bt loc
+  | .mk (.let_ var binding body) bt loc =>
+    .mk (.let_ var (substStoreValues ctx storeValues binding) (substStoreValues ctx storeValues body)) bt loc
+  | .mk (.match_ scrutinee cases) bt loc =>
+    .mk (.match_ (substStoreValues ctx storeValues scrutinee) (cases.map fun (p, t') => (p, substStoreValues ctx storeValues t'))) bt loc
+  | .mk (.eachI lo varBt hi body) bt loc =>
+    .mk (.eachI lo varBt hi (substStoreValues ctx storeValues body)) bt loc
+  | .mk (.cons h tl) bt loc =>
+    .mk (.cons (substStoreValues ctx storeValues h) (substStoreValues ctx storeValues tl)) bt loc
+  | .mk (.head l) bt loc =>
+    .mk (.head (substStoreValues ctx storeValues l)) bt loc
+  | .mk (.tail l) bt loc =>
+    .mk (.tail (substStoreValues ctx storeValues l)) bt loc
+  | .mk (.apply fn args) bt loc =>
+    .mk (.apply fn (args.map (substStoreValues ctx storeValues))) bt loc
+  | .mk (.struct_ tag members) bt loc =>
+    .mk (.struct_ tag (members.map fun (id, t') => (id, substStoreValues ctx storeValues t'))) bt loc
+  | .mk (.structUpdate obj member value) bt loc =>
+    .mk (.structUpdate (substStoreValues ctx storeValues obj) member (substStoreValues ctx storeValues value)) bt loc
+  | .mk (.record members) bt loc =>
+    .mk (.record (members.map fun (id, t') => (id, substStoreValues ctx storeValues t'))) bt loc
+  | .mk (.recordMember obj member) bt loc =>
+    .mk (.recordMember (substStoreValues ctx storeValues obj) member) bt loc
+  | .mk (.recordUpdate obj member value) bt loc =>
+    .mk (.recordUpdate (substStoreValues ctx storeValues obj) member (substStoreValues ctx storeValues value)) bt loc
+  | .mk (.constructor constr args) bt loc =>
+    .mk (.constructor constr (args.map fun (id, t') => (id, substStoreValues ctx storeValues t'))) bt loc
+  | .mk (.copyAllocId addr loc_) bt loc =>
+    .mk (.copyAllocId (substStoreValues ctx storeValues addr) (substStoreValues ctx storeValues loc_)) bt loc
+  | .mk (.hasAllocId ptr) bt loc =>
+    .mk (.hasAllocId (substStoreValues ctx storeValues ptr)) bt loc
+  | .mk (.cnSome value) bt loc =>
+    .mk (.cnSome (substStoreValues ctx storeValues value)) bt loc
+  | .mk (.isSome opt) bt loc =>
+    .mk (.isSome (substStoreValues ctx storeValues opt)) bt loc
+  | .mk (.getOpt opt) bt loc =>
+    .mk (.getOpt (substStoreValues ctx storeValues opt)) bt loc
+  -- Leaf terms: no sub-expressions to recurse into
+  | .mk (.const _) _ _ => t
+  | .mk (.sizeOf _) _ _ => t
+  | .mk (.offsetOf _ _) _ _ => t
+  | .mk (.nil _) _ _ => t
+  | .mk (.cnNone _) _ _ => t
 
 end CerbLean.CN.TypeChecking.Resolve

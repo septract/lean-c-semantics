@@ -520,10 +520,10 @@ def checkAction (pact : Paction) : TypingM IndexTerm := do
     -- RMW is not fully implemented in CN either
     TypingM.fail (.other s!"RMW operations not yet supported at {repr loc}")
 
-  -- Memory fence (no resource changes)
+  -- Memory fence
   -- Corresponds to: Eaction Fence case in check.ml line 1900
   | .fence _order =>
-    return mkUnitTerm loc
+    TypingM.fail (.other "Fence not yet supported")
 
   -- Compare-exchange operations
   -- Corresponds to: Eaction CompareExchangeStrong/Weak cases in check.ml lines 1901-1904

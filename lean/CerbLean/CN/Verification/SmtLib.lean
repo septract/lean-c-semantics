@@ -293,7 +293,10 @@ def generateStructPreamble (env : TypeEnv) : String :=
     | .struct_ members _ =>
       match generateStructDeclaration tag members with
       | some decl => acc ++ decl
-      | none => acc  -- Skip structs with unsupported field types
+      | none =>
+        -- Audited: 2026-02-20. Report which struct was skipped due to unsupported field types.
+        dbg_trace s!"SmtLib: skipping struct declaration for {structSmtName tag} (unsupported field type)"
+        acc
     | .union_ _ => acc  -- CN does not support unions (check.ml:200)
 
 /-! ## Type-to-Sort Translation
@@ -602,7 +605,7 @@ def unOpToTerm (op : UnOp) (argBt : BaseType) (arg : Smt.Term) : TranslateResult
     Type-aware: dispatches to bitvector operations for Bits types.
     Both operands are expected to have matching types (enforced by Pexpr.lean).
     Corresponds to: CN's solver.ml lines 688-730 for arithmetic, 752-765 for comparisons
-    Audited: 2026-02-18 -/
+    Audited: 2026-02-20 -/
 def binOpToTerm (op : BinOp) (lBt rBt : BaseType) (l r : Smt.Term) : TranslateResult :=
   -- Pointer comparisons: extract addresses and compare as bitvectors
   -- Must be handled before the type consistency check since loc is now an ADT sort.
@@ -648,7 +651,7 @@ def binOpToTerm (op : BinOp) (lBt rBt : BaseType) (l r : Smt.Term) : TranslateRe
   | .rem =>
     if useBv then
       if signed then mkBinApp "bvsrem" else mkBinApp "bvurem"
-    else mkBinApp "mod"
+    else mkBinApp "rem"  -- SMT-LIB `rem` is truncated remainder (C-style), not Euclidean `mod`
   | .remNoSMT => mkUninterpApp "rem" lBt  -- solver.ml:723
   | .mod_ =>
     if useBv then
@@ -874,15 +877,52 @@ partial def termToSmtTerm (env : Option TypeEnv) : Types.Term → TranslateResul
     | .basic (.floating _) => .ok (Term.symbolT "true")
     | .pointer _ _ => .ok (Term.symbolT "true")
     | _ => .unsupported s!"good for {repr ct.ty}"
-  | .wrapI _intType val =>
-    -- wrapI wraps integer value to representation type (modular arithmetic)
-    -- Corresponds to: wrapI in CN's indexTerms.ml
-    -- For bitvec SMT sorts, modular wrapping is enforced by the sort itself,
-    -- so this is identity. If we ever use unbounded integer sorts, this would
-    -- need explicit modular arithmetic (bvmod or similar).
+  | .wrapI intType val =>
+    -- wrapI wraps integer value to target bitvector type (modular arithmetic).
+    -- Corresponds to: bv_cast in CN's solver.ml:557-569
+    -- Determines target sign/width from intType, compares with source type,
+    -- and applies sign_extend/zero_extend/extract as needed.
+    -- Audited: 2026-02-20
     match annotTermToSmtTerm env val with
     | .unsupported r => .unsupported r
-    | .ok valTm => .ok valTm
+    | .ok valTm =>
+      -- Determine target sign and width from the IntegerType parameter
+      let targetInfo : Option (Sign × Nat) := match intType with
+        | .bool => none  -- bool is not a bitvector type
+        | .char => some (.signed, 8)
+        | .signed kind => some (.signed, intBaseKindWidthSmt kind)
+        | .unsigned kind => some (.unsigned, intBaseKindWidthSmt kind)
+        | .size_t => some (.unsigned, 64)
+        | .ptrdiff_t => some (.signed, 64)
+        | .wchar_t => some (.signed, 32)
+        | .wint_t => some (.signed, 32)
+        | .ptraddr_t => some (.unsigned, 64)
+        | .enum _ => some (.signed, 32)
+      match targetInfo with
+      | none => .ok valTm  -- Non-bitvector target (e.g., bool): identity
+      | some (targetSign, targetW) =>
+        -- Get source type info
+        match val.bt with
+        | .bits sourceSign sourceW =>
+          if sourceW == targetW then .ok valTm  -- Same width: identity
+          else if sourceW < targetW then
+            -- Widening: sign_extend for signed source, zero_extend for unsigned
+            let extOp := if sourceSign == .signed then "sign_extend" else "zero_extend"
+            let ext := Term.mkApp2 (Term.symbolT "_") (Term.symbolT extOp) (Term.literalT (toString (targetW - sourceW)))
+            .ok (Term.appT ext valTm)
+          else
+            -- Narrowing: extract [targetW-1:0]
+            let extract := Term.mkApp3 (Term.symbolT "_") (Term.symbolT "extract")
+              (Term.literalT (toString (targetW - 1))) (Term.literalT "0")
+            .ok (Term.appT extract valTm)
+        | .integer =>
+          -- Int -> BitVec: use int2bv
+          let int2bv := Term.literalT s!"(_ int2bv {targetW})"
+          .ok (Term.appT int2bv valTm)
+        | _ =>
+          -- For other source types (e.g., already the right type), identity
+          let _ := targetSign  -- suppress unused warning
+          .ok valTm
   | .cast targetType val =>
     -- cast changes type between CN base types
     -- Corresponds to: cast_ in CN's indexTerms.ml
@@ -1091,36 +1131,31 @@ partial def termToSmtTerm (env : Option TypeEnv) : Types.Term → TranslateResul
       | _ => .unsupported s!"nthTuple on non-tuple type ({repr tup.bt})"
   -- Struct construction: apply constructor to member values
   -- Corresponds to: solver.ml:805-808 (IT.Struct)
+  -- Audited: 2026-02-20
   | .struct_ tag members =>
     let conName := structSmtName tag
-    -- Translate each member value
-    -- Translate all member values, collecting results
-    let (memberStrs, unsupErr) := members.foldl (init := ([], Option.none))
-      fun (acc, err) (_, t) =>
-        match err with
-        | some _ => (acc, err)  -- Already hit an error, skip rest
-        | none =>
-          match annotTermToSmtTerm env t with
-          | .ok term => (acc ++ [toString (Term.toSexp term)], none)
-          | .unsupported r => (acc, some r)
-    match unsupErr with
-    | some r => .unsupported s!"struct member: {r}"
-    | none =>
-      let argsStr := String.intercalate " " memberStrs
-      .ok (Term.literalT s!"({conName} {argsStr})")
+    -- Build n-ary application: (conName m1 m2 ... mN)
+    let rec buildStructApp (acc : Smt.Term) : List (Identifier × AnnotTerm) → TranslateResult
+      | [] => .ok acc
+      | (_, t) :: rest =>
+        match annotTermToSmtTerm env t with
+        | .ok memberTm => buildStructApp (Term.appT acc memberTm) rest
+        | .unsupported r => .unsupported s!"struct member: {r}"
+    buildStructApp (Term.symbolT conName) members
   -- Struct member access: apply selector function
   -- Corresponds to: solver.ml:809-810 (IT.StructMember)
+  -- Audited: 2026-02-20
   | .structMember obj member =>
     match annotTermToSmtTerm env obj with
     | .ok objTerm =>
       let selName := structFieldName member
-      let objStr := toString (Term.toSexp objTerm)
-      .ok (Term.literalT s!"({selName} {objStr})")
+      .ok (Term.appT (Term.symbolT selName) objTerm)
     | .unsupported r => .unsupported s!"structMember object: {r}"
   -- Struct update: reconstruct with one field changed
   -- Corresponds to: solver.ml:811-827 (IT.StructUpdate)
   -- CN reconstructs the entire struct, copying all fields except the updated one.
   -- We need TypeEnv to enumerate all fields.
+  -- Audited: 2026-02-20
   | .structUpdate obj member value =>
     match env with
     | none => .unsupported "structUpdate requires TypeEnv"
@@ -1134,14 +1169,12 @@ partial def termToSmtTerm (env : Option TypeEnv) : Types.Term → TranslateResul
           -- For each member: if it's the updated one, use value; otherwise project from obj
           match annotTermToSmtTerm env obj, annotTermToSmtTerm env value with
           | .ok objTerm, .ok valTerm =>
-            let objStr := toString (Term.toSexp objTerm)
-            let valStr := toString (Term.toSexp valTerm)
             let conName := structSmtName tag
-            let fieldStrs := members.map fun m =>
-              if m.name == member then valStr
-              else s!"({structFieldName m.name} {objStr})"
-            let argsStr := String.intercalate " " fieldStrs
-            .ok (Term.literalT s!"({conName} {argsStr})")
+            -- Build n-ary application: for each field, project or replace
+            let term := members.foldl (init := Term.symbolT conName) fun acc m =>
+              if m.name == member then Term.appT acc valTerm
+              else Term.appT acc (Term.appT (Term.symbolT (structFieldName m.name)) objTerm)
+            .ok term
           | .unsupported r, _ => .unsupported s!"structUpdate object: {r}"
           | _, .unsupported r => .unsupported s!"structUpdate value: {r}"
         | some (.union_ _) => .unsupported "structUpdate on union"
@@ -1162,8 +1195,45 @@ partial def termToSmtTerm (env : Option TypeEnv) : Types.Term → TranslateResul
           | .ok valTm => buildRecordApp (Term.appT acc valTm) rest
           | .unsupported r => .unsupported s!"record field: {r}"
       buildRecordApp (Term.symbolT conName) members
-  | .recordMember _ _ => .unsupported "recordMember"
-  | .recordUpdate _ _ _ => .unsupported "recordUpdate"
+  | .recordMember obj member =>
+    -- CN encodes records as tuples; recordMember projects the Nth field.
+    -- Corresponds to: solver.ml record handling (records are tuples, solver.ml:421, 836-840)
+    -- Find the field index from the record type's member list, then use cn_get_N_of_M.
+    -- Audited: 2026-02-20
+    match obj.bt with
+    | .record members =>
+      let arity := members.length
+      match members.findIdx? (·.1 == member) with
+      | some idx =>
+        let selector := s!"cn_get_{idx}_of_{arity}"
+        match annotTermToSmtTerm env obj with
+        | .ok objTm => .ok (Term.appT (Term.symbolT selector) objTm)
+        | .unsupported r => .unsupported s!"recordMember object: {r}"
+      | none => .unsupported s!"recordMember: member {member.name} not found in record"
+    | _ => .unsupported s!"recordMember on non-record type ({repr obj.bt})"
+  | .recordUpdate obj member value =>
+    -- CN encodes records as tuples; recordUpdate reconstructs the tuple with one field changed.
+    -- Corresponds to: solver.ml record handling (records are tuples, solver.ml:421, 841-849)
+    -- For each field: if it's the updated field, use new value; otherwise project from original.
+    -- Audited: 2026-02-20
+    match obj.bt with
+    | .record members =>
+      let arity := members.length
+      match annotTermToSmtTerm env obj, annotTermToSmtTerm env value with
+      | .ok objTm, .ok valTm =>
+        let conName := s!"cn_tuple_{arity}"
+        -- Build the tuple: for each member, project or replace
+        let rec buildFields (acc : Smt.Term) (idx : Nat) : List (Identifier × BaseType) → TranslateResult
+          | [] => .ok acc
+          | (fieldId, _) :: rest =>
+            let fieldTm :=
+              if fieldId == member then valTm
+              else Term.appT (Term.symbolT s!"cn_get_{idx}_of_{arity}") objTm
+            buildFields (Term.appT acc fieldTm) (idx + 1) rest
+        buildFields (Term.symbolT conName) 0 members
+      | .unsupported r, _ => .unsupported s!"recordUpdate object: {r}"
+      | _, .unsupported r => .unsupported s!"recordUpdate value: {r}"
+    | _ => .unsupported s!"recordUpdate on non-record type ({repr obj.bt})"
   | .constructor constr args =>
     -- Datatype constructor application (solver.ml:916-919)
     let conName := symToSmtName constr
@@ -1199,18 +1269,27 @@ partial def termToSmtTerm (env : Option TypeEnv) : Types.Term → TranslateResul
     | .unsupported r => .unsupported r
   | .mapConst keyBt val =>
     -- SMT array constant (solver.ml:892-903): ((as const (Array K V)) val)
-    match baseTypeToSort keyBt with
-    | .unsupported r => .unsupported s!"mapConst key type: {r}"
-    | .ok kSort =>
-      match baseTypeToSort val.bt with
-      | .unsupported r => .unsupported s!"mapConst value type: {r}"
-      | .ok vSort =>
-        match annotTermToSmtTerm env val with
-        | .unsupported r => .unsupported r
-        | .ok valTm =>
-          let arrSort := Term.mkApp2 (Term.symbolT "Array") kSort vSort
-          let constFn := Term.mkApp2 (Term.symbolT "as") (Term.symbolT "const") arrSort
-          .ok (Term.appT constFn valTm)
+    -- GAP-9: CVC5 cannot handle `(as const ...)` on non-literal values like Default.
+    -- When the value is a Default constant, emit a plain Default of the map type instead.
+    -- Audited: 2026-02-20
+    match val.term with
+    | .const (.default t) =>
+      -- Translate the entire mapConst as Default(Map(keyBt, t))
+      let mapBt := BaseType.map keyBt t
+      constToTerm (.default mapBt)
+    | _ =>
+      match baseTypeToSort keyBt with
+      | .unsupported r => .unsupported s!"mapConst key type: {r}"
+      | .ok kSort =>
+        match baseTypeToSort val.bt with
+        | .unsupported r => .unsupported s!"mapConst value type: {r}"
+        | .ok vSort =>
+          match annotTermToSmtTerm env val with
+          | .unsupported r => .unsupported r
+          | .ok valTm =>
+            let arrSort := Term.mkApp2 (Term.symbolT "Array") kSort vSort
+            let constFn := Term.mkApp2 (Term.symbolT "as") (Term.symbolT "const") arrSort
+            .ok (Term.appT constFn valTm)
   | .mapSet mp key val =>
     -- SMT array store (solver.ml:904-905): (store map key val)
     match annotTermToSmtTerm env mp, annotTermToSmtTerm env key, annotTermToSmtTerm env val with

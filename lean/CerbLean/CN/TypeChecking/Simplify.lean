@@ -37,8 +37,7 @@ def Const.synEq : Const → Const → Bool
   | .unit, .unit => true
   | .null, .null => true
   | .ctypeConst ct1, .ctypeConst ct2 => ct1 == ct2
-  -- BaseType doesn't have BEq; conservatively return false for .default
-  | .default _, .default _ => false
+  | .default bt1, .default bt2 => BaseType.beq bt1 bt2
   | _, _ => false
 
 mutual
@@ -169,11 +168,13 @@ Gets the numeric value from a constant term (Z or Bits).
 -/
 
 /-- Extract integer value from a constant term (Z or Bits).
-    Returns none for non-numeric terms. -/
+    Returns none for non-numeric terms.
+    For Bits values, normalizes to the representable range first.
+    CN ref: IT.get_num_z in indexTerms.ml -/
 def getNumZ (t : Term) : Option Int :=
   match t with
   | .const (.z v) => some v
-  | .const (.bits _ _ v) => some v
+  | .const (.bits sign width v) => some (normaliseToRange sign width v)
   | _ => none
 
 /-! ## Term Simplification
@@ -244,11 +245,24 @@ partial def simplifyTerm' (t : Term) (bt : BaseType) (loc : Loc) : AnnotTerm :=
     let tup' := simplifyTerm tup
     simplifyNthTuple n tup' bt loc
 
-  -- Struct construction: simplify members
+  -- Struct construction: simplify members + identity detection
   -- CN ref: simplify.ml:495-508
   | .struct_ tag members =>
     let members' := members.map fun (id, t) => (id, simplifyTerm t)
-    .mk (.struct_ tag members') bt loc
+    -- Check for struct identity: {.a = s.a, .b = s.b, ...} => s
+    -- CN ref: simplify.ml:498-506
+    match members'.head? with
+    | some (_, firstTerm) =>
+      match firstTerm.term with
+      | .structMember srcObj _ =>
+        if members'.all fun (memName, memTerm) =>
+          match memTerm.term with
+          | .structMember obj name => AnnotTerm.synEq obj srcObj && name == memName
+          | _ => false
+        then srcObj
+        else .mk (.struct_ tag members') bt loc
+      | _ => .mk (.struct_ tag members') bt loc
+    | none => .mk (.struct_ tag members') bt loc
 
   -- Struct member access: simplify then reduce
   -- CN ref: simplify.ml:509-520
@@ -323,15 +337,16 @@ partial def simplifyTerm' (t : Term) (bt : BaseType) (loc : Loc) : AnnotTerm :=
   -- CN ref: simplify.ml:559-566
   | .wrapI ity value =>
     let val' := simplifyTerm value
-    .mk (.wrapI ity val') bt loc
+    match getNumZ val'.term with
+    | some z => numLitNorm bt z loc
+    | none => .mk (.wrapI ity val') bt loc
 
-  -- Cast: simplify child
-  -- DIVERGES-FROM-CN: CN's cast_reduce (simplify.ml:199-206) eliminates casts when
-  -- source and target types are equal. We can't do this because BaseType lacks BEq.
-  -- The cast is preserved but semantically correct.
+  -- Cast: simplify child, eliminate identity casts
+  -- CN ref: simplify.ml:199-206 (cast_reduce)
   | .cast targetBt value =>
     let val' := simplifyTerm value
-    .mk (.cast targetBt val') bt loc
+    if BaseType.beq targetBt val'.bt then val'
+    else .mk (.cast targetBt val') bt loc
 
   -- Nil, cons, head, tail: simplify children
   | .nil elemBt => .mk (.nil elemBt) bt loc

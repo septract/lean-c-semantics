@@ -150,8 +150,20 @@ namespace QPredicate
 
 /-- Substitute in a quantified predicate.
     Replaces symbol references in pointer, permission, and index args.
-    Corresponds to: QPredicate substitution in CN -/
+    Alpha-renames the quantified variable if it conflicts with the substitution.
+    Corresponds to: QPredicate substitution in CN
+    CN ref: request.ml:111-125 -/
 def subst (σ : Subst) (qp : QPredicate) : QPredicate :=
+  -- Alpha-rename quantified variable if it conflicts with substitution
+  let qp := if σ.relevant.contains qp.q.1.id then
+    let q' := freshSymFor qp.q.1 σ.relevant
+    let renameσ := Subst.single qp.q.1 (AnnotTerm.mk (.sym q') qp.q.2 qp.qLoc)
+    { qp with
+      q := (q', qp.q.2)
+      pointer := qp.pointer.subst renameσ
+      permission := qp.permission.subst renameσ
+      iargs := qp.iargs.map (·.subst renameσ) }
+  else qp
   { qp with
     pointer := qp.pointer.subst σ
     permission := qp.permission.subst σ

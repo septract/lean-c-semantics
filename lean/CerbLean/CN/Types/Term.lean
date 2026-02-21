@@ -322,6 +322,26 @@ instance : Inhabited Term where
 instance : Inhabited AnnotTerm where
   default := .mk (.const .unit) .unit default
 
+/-! ## Pattern Bound Variables
+
+Collect symbol IDs bound by a pattern (used for freeVarIds in match cases).
+-/
+
+mutual
+
+/-- Collect symbol IDs bound by a pattern (inner structure).
+    Used to subtract pattern-bound variables from free variable collection. -/
+partial def Pattern_.boundVarIds : Pattern_ → List Nat
+  | .sym s => [s.id]
+  | .wild => []
+  | .constructor _ args => args.flatMap fun (_, p) => Pattern.boundVarIds p
+
+/-- Collect symbol IDs bound by a pattern. -/
+partial def Pattern.boundVarIds : Pattern → List Nat
+  | .mk pat _ _ => pat.boundVarIds
+
+end
+
 /-! ## Index Term Aliases
 
 Following CN convention, IndexTerms.t is the annotated term type.
@@ -382,7 +402,9 @@ partial def Term.freeVarIds (t : Term) : List Nat :=
   | .let_ var binding body =>
     binding.freeVarIds ++ body.freeVarIds.filter (· != var.id)
   | .match_ scrutinee cases =>
-    scrutinee.freeVarIds ++ cases.flatMap fun (_, t) => t.freeVarIds
+    scrutinee.freeVarIds ++ cases.flatMap fun (pat, t) =>
+      let patBound := pat.boundVarIds
+      t.freeVarIds.filter (fun id => !patBound.contains id)
   | .cast _ value => value.freeVarIds
   | .cnNone _ => []
   | .cnSome value => value.freeVarIds

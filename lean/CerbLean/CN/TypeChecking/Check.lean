@@ -286,6 +286,6 @@ def parseAndCheckBool
     : IO Bool := do
   match ← parseAndCheck input with
   | .ok result => return result.success
-  | .error _ => return false
+  | .error e => IO.eprintln s!"CN check error: {e}"; return false
 
 end CerbLean.CN.TypeChecking

@@ -362,14 +362,16 @@ def predicateRequestScan (requested : Predicate) : TypingM ScanResult := do
     | .q _ => pure ()
 
   match candidates with
-  | [(idx, p', output)] =>
-    -- Single candidate: use it and add pointer equality obligation
+  | (idx, p', output) :: _ =>
+    -- Use the first candidate and add pointer equality obligation.
+    -- Corresponds to: CN tries candidates sequentially and uses the first
+    -- one where SMT can prove pointer equality.
     TypingM.removeResourceAt idx
     let eqTerm : IndexTerm := AnnotTerm.mk (.binop .eq requested.pointer p'.pointer) .bool requested.pointer.loc
     TypingM.requireConstraint (.t eqTerm) requested.pointer.loc "resource pointer equality"
     return .found p' output
-  | _ =>
-    -- No match or ambiguous (multiple candidates) - fail
+  | [] =>
+    -- No candidates found
     return .notFound
 
 /-! ## Struct Resource Repacking

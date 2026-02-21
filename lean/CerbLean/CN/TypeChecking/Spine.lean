@@ -170,8 +170,7 @@ where
       -- CN: let@ garg = WellTyped.check_term (fst info) bt garg in
       --     aux args_acc args gargs (subst rt_subst (make_subst [(s, garg)]) ftyp) k
       -- WellTyped.check_term verifies the term's base type matches expected bt.
-      -- Compare types via Repr string since BaseType lacks BEq/DecidableEq.
-      if toString (repr garg.bt) != toString (repr bt) then
+      if !BaseType.beq garg.bt bt then
         TypingM.fail (.other s!"Ghost argument type mismatch at {repr loc}: expected {repr bt}, got {repr garg.bt}")
       -- Substitute ghost value for parameter in rest of type
       -- Ghost args do NOT accumulate into argsAcc (only computational args do)

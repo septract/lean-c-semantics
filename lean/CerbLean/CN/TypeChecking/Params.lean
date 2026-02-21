@@ -219,7 +219,7 @@ private def parseInvariantConstraints (text : String) : List AnnotTerm :=
     if part.isEmpty then none
     else match CN.Parser.runParser CN.Parser.expr part with
       | .ok term => some term
-      | .error _ => none
+      | .error e => dbg_trace s!"Warning: failed to parse invariant expression: {e}"; none
 
 /-- Build an Owned<ct>(Init) resource request for a pointer.
     Corresponds to: Translate.ownership in core_to_mucore.ml line 713 -/
@@ -254,7 +254,9 @@ private def buildLoopLabelType
     | _ => none
 
   -- Step 2: Get the C types for the args from saveArgCTypes
-  let argCTypes := saveArgCTypes.lookup symId |>.getD []
+  let argCTypes := match saveArgCTypes.lookup symId with
+    | some cts => cts
+    | none => dbg_trace s!"Warning: no C types found for loop label {symId}"; []
 
   -- Step 3: Get invariant text from loop_attributes
   let invariantTexts := match loopIdOpt with
@@ -272,7 +274,7 @@ private def buildLoopLabelType
   let resolvedConstraints := rawConstraints.filterMap fun constraint =>
     match Resolve.resolveAnnotTerm resolveCtx constraint none with
     | .ok resolved => some resolved
-    | .error _ => none
+    | .error e => dbg_trace s!"Warning: failed to resolve invariant constraint: {repr e}"; none
 
   -- Step 5: Build the LAT (logical argument type) part
   -- Start with the terminal value
@@ -289,7 +291,9 @@ private def buildLoopLabelType
     fun ((sym, _bt), (_argSymOpt, ct)) acc =>
       let ptrTerm := AnnotTerm.mk (.sym sym) .loc info.loc
       let outputBt := Resolve.ctypeToOutputBaseType ct
-      let outputSym : Sym := { id := sym.id + 10000, name := sym.name.map (· ++ "_out") }
+      -- QUALITY: ideally use a proper fresh counter instead of ID offset.
+      -- Using large offset to avoid collisions with other symbols.
+      let outputSym : Sym := { id := sym.id + 1000000, name := sym.name.map (· ++ "_out") }
       .resource outputSym (mkOwnedRequest ct ptrTerm) outputBt
         { loc := info.loc, desc := s!"loop var {sym.name.getD ""} ownership" } acc
 
@@ -483,7 +487,7 @@ def checkFunctionWithParams
             requires := { clauses := clause :: spec.requires.clauses }
             ensures := { clauses := clause :: spec.ensures.clauses }
           }
-        | none => spec  -- Global not found; will fail during type checking
+        | none => dbg_trace s!"Warning: unknown global '{globalName}' in accesses clause"; spec
 
       -- Step 6: Create label context from label definitions
       -- Corresponds to: WProc.label_context in wellTyped.ml line 2474
