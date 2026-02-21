@@ -451,7 +451,7 @@ Corresponds to: IT.suitably_alpha_rename in cn/lib/indexTerms.ml lines 351-355
 
 /-- Create a fresh symbol based on an existing one, with an ID not in the given set.
     Corresponds to: Sym.fresh_same in cn/lib/sym.ml line 50 -/
-private def freshSymFor (s : Sym) (relevantIds : List Nat) : Sym :=
+def freshSymFor (s : Sym) (relevantIds : List Nat) : Sym :=
   let maxId := relevantIds.foldl (fun acc id => max acc id) s.id
   { s with id := maxId + 1 }
 

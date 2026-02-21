@@ -98,10 +98,23 @@ namespace LAT
     Corresponds to: LAT.subst in logicalArgumentTypes.ml -/
 partial def subst {α : Type} (innerSubst : Subst → α → α) (σ : Subst) : LAT α → LAT α
   | .define_ name value info rest =>
-    -- Note: should alpha-rename if name is in σ.relevant, but we simplify
-    .define_ name (value.subst σ) info (subst innerSubst σ rest)
+    -- Alpha-rename bound variable if it conflicts with substitution
+    -- Corresponds to: logicalArgumentTypes.ml lines 53-55 (suitably_alpha_rename)
+    let (name', rest') := if σ.relevant.contains name.id then
+      let name' := freshSymFor name σ.relevant
+      let renameσ := Subst.single name (AnnotTerm.mk (.sym name') value.bt value.loc)
+      (name', subst innerSubst renameσ rest)
+    else (name, rest)
+    .define_ name' (value.subst σ) info (subst innerSubst σ rest')
   | .resource name req bt info rest =>
-    .resource name (req.subst σ) bt info (subst innerSubst σ rest)
+    -- Alpha-rename bound variable if it conflicts with substitution
+    -- Corresponds to: logicalArgumentTypes.ml lines 57-59
+    let (name', rest') := if σ.relevant.contains name.id then
+      let name' := freshSymFor name σ.relevant
+      let renameσ := Subst.single name (AnnotTerm.mk (.sym name') bt default)
+      (name', subst innerSubst renameσ rest)
+    else (name, rest)
+    .resource name' (req.subst σ) bt info (subst innerSubst σ rest')
   | .constraint lc info rest =>
     .constraint (lc.subst σ) info (subst innerSubst σ rest)
   | .I inner => .I (innerSubst σ inner)
@@ -167,9 +180,23 @@ namespace AT
     Corresponds to: AT.subst in argumentTypes.ml -/
 partial def subst {α : Type} (innerSubst : Subst → α → α) (σ : Subst) : AT α → AT α
   | .computational name bt info rest =>
-    .computational name bt info (subst innerSubst σ rest)
+    -- Alpha-rename bound variable if it conflicts with substitution
+    -- Corresponds to: argumentTypes.ml lines 30-32 (suitably_alpha_rename)
+    let (name', rest') := if σ.relevant.contains name.id then
+      let name' := freshSymFor name σ.relevant
+      let renameσ := Subst.single name (AnnotTerm.mk (.sym name') bt default)
+      (name', subst innerSubst renameσ rest)
+    else (name, rest)
+    .computational name' bt info (subst innerSubst σ rest')
   | .ghost name bt info rest =>
-    .ghost name bt info (subst innerSubst σ rest)
+    -- Alpha-rename bound variable if it conflicts with substitution
+    -- Corresponds to: argumentTypes.ml lines 34-36
+    let (name', rest') := if σ.relevant.contains name.id then
+      let name' := freshSymFor name σ.relevant
+      let renameσ := Subst.single name (AnnotTerm.mk (.sym name') bt default)
+      (name', subst innerSubst renameσ rest)
+    else (name, rest)
+    .ghost name' bt info (subst innerSubst σ rest')
   | .L lat => .L (LAT.subst innerSubst σ lat)
 
 /-- Create an argument type from a function spec (return type).
@@ -230,9 +257,22 @@ namespace LRT
     Corresponds to: LRT.subst in logicalReturnTypes.ml -/
 partial def subst (σ : Subst) : LRT → LRT
   | .define name value info rest =>
-    .define name (value.subst σ) info (subst σ rest)
+    -- Alpha-rename bound variable if it conflicts with substitution
+    -- Corresponds to: logicalReturnTypes.ml suitably_alpha_rename
+    let (name', rest') := if σ.relevant.contains name.id then
+      let name' := freshSymFor name σ.relevant
+      let renameσ := Subst.single name (AnnotTerm.mk (.sym name') value.bt value.loc)
+      (name', LRT.subst renameσ rest)
+    else (name, rest)
+    .define name' (value.subst σ) info (LRT.subst σ rest')
   | .resource name req bt info rest =>
-    .resource name (req.subst σ) bt info (subst σ rest)
+    -- Alpha-rename bound variable if it conflicts with substitution
+    let (name', rest') := if σ.relevant.contains name.id then
+      let name' := freshSymFor name σ.relevant
+      let renameσ := Subst.single name (AnnotTerm.mk (.sym name') bt default)
+      (name', LRT.subst renameσ rest)
+    else (name, rest)
+    .resource name' (req.subst σ) bt info (LRT.subst σ rest')
   | .constraint lc info rest =>
     .constraint (lc.subst σ) info (subst σ rest)
   | .I => .I
