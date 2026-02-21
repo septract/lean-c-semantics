@@ -179,8 +179,8 @@ structure TypingState where
   /-- Symbol equality map: tracks sym = value bindings extracted from constraints.
       Corresponds to: sym_eqs in typing.ml:14.
       CN uses this for term simplification (make_simp_ctxt, typing.ml:112-114).
-      We populate it to match CN's architecture; currently used for constraint
-      propagation, future use for simplification (H5). -/
+      Used to build SimCtxt for simplification: when the simplifier encounters
+      a symbol, it substitutes the known value from this map. -/
   symEqs : Std.HashMap Nat IndexTerm := {}
   /-- Accumulated proof obligations for post-hoc SMT discharge -/
   obligations : ObligationSet := []
@@ -201,11 +201,11 @@ structure TypingState where
 
 namespace TypingState
 
-def empty : TypingState :=
-  { context := Context.empty, freshCounter := 0 }
+def empty (freshCounter : Nat := 0) : TypingState :=
+  { context := Context.empty, freshCounter := freshCounter }
 
-def withContext (ctx : Context) : TypingState :=
-  { context := ctx, freshCounter := 0 }
+def withContext (ctx : Context) (freshCounter : Nat := 0) : TypingState :=
+  { context := ctx, freshCounter := freshCounter }
 
 end TypingState
 
@@ -379,9 +379,16 @@ inductive Provable where
 
     Corresponds to: Solver.provable in solver.ml:1367-1404 -/
 def provable (lc : LogicalConstraint) : TypingM Provable := do
+  -- Build simplification context from typing state
+  -- CN ref: make_simp_ctxt (typing.ml:112-114) builds from sym_eqs + memory model
+  let st ← getState
+  let simpCtxt : Simplify.SimCtxt := {
+    symEqs := st.symEqs
+    typeEnv := some (CerbLean.Memory.TypeEnv.mk st.tagDefs)
+  }
   -- Simplify constraint before checking (CN does this in solver.ml via simplify)
   -- CN ref: solver.ml:1375-1376 (simplify before provable query)
-  let lc := Simplify.simplifyConstraint lc
+  let lc := Simplify.simplifyConstraint simpCtxt lc
   -- Quick syntactic checks (CN does these too)
   match lc with
   | .t t =>
@@ -450,7 +457,7 @@ def addLValue (s : Sym) (v : IndexTerm) (loc : Loc) (desc : String) : TypingM Un
   modifyState fun st => { st with symEqs := st.symEqs.insert s.id v }
   -- Add equality constraint so SMT solver knows sym = value.
   -- CN achieves this via term substitution in make_simp_ctxt (typing.ml:112-114);
-  -- we use explicit context constraints instead since we lack that infrastructure (H5).
+  -- we also add an explicit context constraint for the SMT solver obligation encoding.
   -- Uses modifyContext directly (not TypingM.addC) to avoid redundant symEqs insertion.
   let symTerm := AnnotTerm.mk (.sym s) v.bt loc
   let eqTerm := AnnotTerm.mk (.binop .eq symTerm v) .bool loc

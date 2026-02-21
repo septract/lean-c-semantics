@@ -6,15 +6,40 @@
   Performs constant folding, boolean simplification, equality
   simplification, and accessor reduction (struct member, tuple nth).
 
-  Audited: 2026-02-18 against cn/lib/simplify.ml
+  Audited: 2026-02-20 against cn/lib/simplify.ml
 -/
 
 import CerbLean.CN.Types
+import CerbLean.Memory.Layout
+import Std.Data.HashMap
 
 namespace CerbLean.CN.TypeChecking.Simplify
 
-open CerbLean.Core (Sym Identifier Loc Ctype IntegerType)
+open CerbLean.Core (Sym Identifier Loc Ctype Ctype_ IntegerType)
 open CerbLean.CN.Types
+open CerbLean.Memory (TypeEnv sizeof_)
+
+/-! ## Simplification Context
+
+Corresponds to: simp_ctxt in cn/lib/simplify.ml:31-36
+CN builds a simplification context from sym_eqs (typing.ml:112-114,
+make_simp_ctxt) and the memory model (for sizeof evaluation).
+-/
+
+/-- Simplification context, threaded through the simplifier.
+    Corresponds to: simp_ctxt in cn/lib/simplify.ml:31-36.
+    - `symEqs`: maps symbol IDs to their known constant values
+      (from constraints of the form `sym == value`).
+      CN ref: simp_ctxt.sym_eqs, built by make_simp_ctxt (typing.ml:112-114)
+    - `typeEnv`: tag definitions for sizeof/offsetof evaluation.
+      CN ref: Memory.size_of_ctype used in simplify.ml:585 -/
+structure SimCtxt where
+  symEqs : Std.HashMap Nat IndexTerm := {}
+  typeEnv : Option TypeEnv := none
+  deriving Inhabited
+
+/-- Empty simplification context (no symbol bindings, no type env). -/
+def SimCtxt.empty : SimCtxt := {}
 
 /-! ## Syntactic Equality
 
@@ -181,51 +206,54 @@ def getNumZ (t : Term) : Option Int :=
 
 Recursive bottom-up simplification.
 Corresponds to: IndexTerms.simp in cn/lib/simplify.ml lines 215-637
-Audited: 2026-02-18
+Audited: 2026-02-20
 -/
 
 mutual
 
 /-- Simplify an index term (recursive, bottom-up).
     CN ref: simplify.ml, IndexTerms.simp
-    Audited: 2026-02-18 -/
-partial def simplifyTerm (at_ : AnnotTerm) : AnnotTerm :=
+    Audited: 2026-02-20 -/
+partial def simplifyTerm (ctx : SimCtxt) (at_ : AnnotTerm) : AnnotTerm :=
   match at_ with
   | .mk t bt loc =>
-    let result := simplifyTerm' t bt loc
+    let result := simplifyTerm' ctx t bt loc
     result
 
 /-- Inner simplification on Term, given the annotation context.
     Corresponds to: the big match in IndexTerms.simp (simplify.ml:220-637) -/
-partial def simplifyTerm' (t : Term) (bt : BaseType) (loc : Loc) : AnnotTerm :=
+partial def simplifyTerm' (ctx : SimCtxt) (t : Term) (bt : BaseType) (loc : Loc) : AnnotTerm :=
   match t with
   -- Constants pass through unchanged
   -- CN ref: simplify.ml:226
   | .const _ => .mk t bt loc
 
-  -- Symbols pass through (we don't have a value context here)
-  -- CN ref: simplify.ml:221-225
-  | .sym _ => .mk t bt loc
+  -- Symbols: replace with known constant value from context, then simplify
+  -- CN ref: simplify.ml:221-225 (Sym.Map.find_opt sym simp_ctxt.sym_eqs)
+  | .sym s =>
+    match ctx.symEqs.get? s.id with
+    | some value => simplifyTerm ctx value
+    | none => .mk t bt loc
 
   -- Binary operations: simplify children first, then fold
   -- CN ref: simplify.ml:227-556
   | .binop op l r =>
-    let l' := simplifyTerm l
-    let r' := simplifyTerm r
+    let l' := simplifyTerm ctx l
+    let r' := simplifyTerm ctx r
     simplifyBinop op l' r' bt loc
 
   -- Unary operations
   -- CN ref: simplify.ml:409-438
   | .unop op arg =>
-    let arg' := simplifyTerm arg
+    let arg' := simplifyTerm ctx arg
     simplifyUnop op arg' bt loc
 
   -- If-then-else
   -- CN ref: simplify.ml:439-447
   | .ite cond thenBr elseBr =>
-    let cond' := simplifyTerm cond
-    let then' := simplifyTerm thenBr
-    let else' := simplifyTerm elseBr
+    let cond' := simplifyTerm ctx cond
+    let then' := simplifyTerm ctx thenBr
+    let else' := simplifyTerm ctx elseBr
     match cond'.term with
     | .const (.bool true) => then'
     | .const (.bool false) => else'
@@ -236,19 +264,19 @@ partial def simplifyTerm' (t : Term) (bt : BaseType) (loc : Loc) : AnnotTerm :=
   -- Tuple construction: simplify elements
   -- CN ref: simplify.ml:489-491
   | .tuple elems =>
-    let elems' := elems.map simplifyTerm
+    let elems' := elems.map (simplifyTerm ctx)
     .mk (.tuple elems') bt loc
 
   -- Tuple projection: simplify then reduce
   -- CN ref: simplify.ml:492-494
   | .nthTuple n tup =>
-    let tup' := simplifyTerm tup
+    let tup' := simplifyTerm ctx tup
     simplifyNthTuple n tup' bt loc
 
   -- Struct construction: simplify members + identity detection
   -- CN ref: simplify.ml:495-508
   | .struct_ tag members =>
-    let members' := members.map fun (id, t) => (id, simplifyTerm t)
+    let members' := members.map fun (id, t) => (id, simplifyTerm ctx t)
     -- Check for struct identity: {.a = s.a, .b = s.b, ...} => s
     -- CN ref: simplify.ml:498-506
     match members'.head? with
@@ -267,68 +295,72 @@ partial def simplifyTerm' (t : Term) (bt : BaseType) (loc : Loc) : AnnotTerm :=
   -- Struct member access: simplify then reduce
   -- CN ref: simplify.ml:509-520
   | .structMember obj member =>
-    let obj' := simplifyTerm obj
+    let obj' := simplifyTerm ctx obj
     simplifyStructMember obj' member bt loc
 
   -- Struct update: simplify children
   -- CN ref: simplify.ml:521-524
   | .structUpdate obj member value =>
-    let obj' := simplifyTerm obj
-    let val' := simplifyTerm value
+    let obj' := simplifyTerm ctx obj
+    let val' := simplifyTerm ctx value
     .mk (.structUpdate obj' member val') bt loc
 
   -- Record construction: simplify members
   -- CN ref: simplify.ml:525-527
   | .record members =>
-    let members' := members.map fun (id, t) => (id, simplifyTerm t)
+    let members' := members.map fun (id, t) => (id, simplifyTerm ctx t)
     .mk (.record members') bt loc
 
   -- Record member access: simplify then reduce
   -- CN ref: simplify.ml:528-530
   | .recordMember obj member =>
-    let obj' := simplifyTerm obj
+    let obj' := simplifyTerm ctx obj
     simplifyRecordMember obj' member bt loc
 
   -- Record update: simplify children
   -- CN ref: simplify.ml:531-534
   | .recordUpdate obj member value =>
-    let obj' := simplifyTerm obj
-    let val' := simplifyTerm value
+    let obj' := simplifyTerm ctx obj
+    let val' := simplifyTerm ctx value
     .mk (.recordUpdate obj' member val') bt loc
 
   -- EachI: simplify body
   -- CN ref: simplify.ml:484-488
   | .eachI lo var hi body =>
-    let body' := simplifyTerm body
+    let body' := simplifyTerm ctx body
     .mk (.eachI lo var hi body') bt loc
 
   -- Constructor: simplify args
   -- CN ref: simplify.ml:557-558
   | .constructor constr args =>
-    let args' := args.map fun (id, t) => (id, simplifyTerm t)
+    let args' := args.map fun (id, t) => (id, simplifyTerm ctx t)
     .mk (.constructor constr args') bt loc
 
   -- MemberShift: simplify pointer
   -- CN ref: simplify.ml:570-571
   | .memberShift ptr tag member =>
-    let ptr' := simplifyTerm ptr
+    let ptr' := simplifyTerm ctx ptr
     .mk (.memberShift ptr' tag member) bt loc
 
   -- ArrayShift: simplify children
   -- CN ref: simplify.ml:572-584
   | .arrayShift base ct index =>
-    let base' := simplifyTerm base
-    let index' := simplifyTerm index
+    let base' := simplifyTerm ctx base
+    let index' := simplifyTerm ctx index
     -- If index is 0, just return the base
     match getNumZ index'.term with
     | some z => if z == 0 then base' else .mk (.arrayShift base' ct index') bt loc
     | none => .mk (.arrayShift base' ct index') bt loc
 
-  -- SizeOf: leave as-is (we don't have memory layout info here)
-  -- DIVERGES-FROM-CN: CN's simplify.ml:585 evaluates SizeOf to a constant
-  -- using Memory.size_of_ctype. We leave it unevaluated since we don't have
-  -- memory layout information in the simplifier context.
-  | .sizeOf ct => .mk (.sizeOf ct) bt loc
+  -- SizeOf: evaluate to a concrete integer using memory layout
+  -- CN ref: simplify.ml:585 (Memory.size_of_ctype ct)
+  | .sizeOf ct =>
+    match ctx.typeEnv with
+    | some env =>
+      match sizeof_ env ct.ty with
+      | .ok n => .mk (.const (.z n)) bt loc
+      | .error _ => .mk (.sizeOf ct) bt loc
+    | none => .mk (.sizeOf ct) bt loc
 
   -- OffsetOf: leave as-is
   | .offsetOf tag member => .mk (.offsetOf tag member) bt loc
@@ -336,7 +368,7 @@ partial def simplifyTerm' (t : Term) (bt : BaseType) (loc : Loc) : AnnotTerm :=
   -- WrapI: simplify child, fold constant
   -- CN ref: simplify.ml:559-566
   | .wrapI ity value =>
-    let val' := simplifyTerm value
+    let val' := simplifyTerm ctx value
     match getNumZ val'.term with
     | some z => numLitNorm bt z loc
     | none => .mk (.wrapI ity val') bt loc
@@ -344,91 +376,91 @@ partial def simplifyTerm' (t : Term) (bt : BaseType) (loc : Loc) : AnnotTerm :=
   -- Cast: simplify child, eliminate identity casts
   -- CN ref: simplify.ml:199-206 (cast_reduce)
   | .cast targetBt value =>
-    let val' := simplifyTerm value
+    let val' := simplifyTerm ctx value
     if BaseType.beq targetBt val'.bt then val'
     else .mk (.cast targetBt val') bt loc
 
   -- Nil, cons, head, tail: simplify children
   | .nil elemBt => .mk (.nil elemBt) bt loc
   | .cons head tail =>
-    let h' := simplifyTerm head
-    let t' := simplifyTerm tail
+    let h' := simplifyTerm ctx head
+    let t' := simplifyTerm ctx tail
     .mk (.cons h' t') bt loc
   | .head list =>
-    let list' := simplifyTerm list
+    let list' := simplifyTerm ctx list
     .mk (.head list') bt loc
   | .tail list =>
-    let list' := simplifyTerm list
+    let list' := simplifyTerm ctx list
     .mk (.tail list') bt loc
 
   -- Representable, good, aligned: simplify children
   -- CN ref: simplify.ml:586-588
   | .representable ct value =>
-    let val' := simplifyTerm value
+    let val' := simplifyTerm ctx value
     .mk (.representable ct val') bt loc
   | .good ct value =>
-    let val' := simplifyTerm value
+    let val' := simplifyTerm ctx value
     .mk (.good ct val') bt loc
   | .aligned ptr align =>
-    let ptr' := simplifyTerm ptr
-    let align' := simplifyTerm align
+    let ptr' := simplifyTerm ctx ptr
+    let align' := simplifyTerm ctx align
     .mk (.aligned ptr' align') bt loc
 
   -- Map operations: simplify children
   -- CN ref: simplify.ml:589-624
   | .mapConst keyBt value =>
-    let val' := simplifyTerm value
+    let val' := simplifyTerm ctx value
     .mk (.mapConst keyBt val') bt loc
   | .mapSet map key value =>
-    let map' := simplifyTerm map
-    let key' := simplifyTerm key
-    let val' := simplifyTerm value
+    let map' := simplifyTerm ctx map
+    let key' := simplifyTerm ctx key
+    let val' := simplifyTerm ctx value
     .mk (.mapSet map' key' val') bt loc
   | .mapGet map key =>
-    let map' := simplifyTerm map
-    let key' := simplifyTerm key
-    simplifyMapGet map' key' bt loc
+    let map' := simplifyTerm ctx map
+    let key' := simplifyTerm ctx key
+    simplifyMapGet ctx map' key' bt loc
   | .mapDef var body =>
-    let body' := simplifyTerm body
+    let body' := simplifyTerm ctx body
     .mk (.mapDef var body') bt loc
 
   -- Apply: simplify args
   -- CN ref: simplify.ml:625-634
   | .apply fn args =>
-    let args' := args.map simplifyTerm
+    let args' := args.map (simplifyTerm ctx)
     .mk (.apply fn args') bt loc
 
   -- Let: simplify children
   | .let_ var binding body =>
-    let bind' := simplifyTerm binding
-    let body' := simplifyTerm body
+    let bind' := simplifyTerm ctx binding
+    let body' := simplifyTerm ctx body
     .mk (.let_ var bind' body') bt loc
 
   -- Match: simplify children
   | .match_ scrutinee cases =>
-    let scr' := simplifyTerm scrutinee
-    let cases' := cases.map fun (p, t) => (p, simplifyTerm t)
+    let scr' := simplifyTerm ctx scrutinee
+    let cases' := cases.map fun (p, t) => (p, simplifyTerm ctx t)
     .mk (.match_ scr' cases') bt loc
 
   -- CopyAllocId, hasAllocId: simplify children
   | .copyAllocId addr loc_ =>
-    let addr' := simplifyTerm addr
-    let loc_' := simplifyTerm loc_
+    let addr' := simplifyTerm ctx addr
+    let loc_' := simplifyTerm ctx loc_
     .mk (.copyAllocId addr' loc_') bt loc
   | .hasAllocId ptr =>
-    let ptr' := simplifyTerm ptr
+    let ptr' := simplifyTerm ctx ptr
     .mk (.hasAllocId ptr') bt loc
 
   -- Option operations: simplify children
   | .cnNone innerBt => .mk (.cnNone innerBt) bt loc
   | .cnSome value =>
-    let val' := simplifyTerm value
+    let val' := simplifyTerm ctx value
     .mk (.cnSome val') bt loc
   | .isSome opt =>
-    let opt' := simplifyTerm opt
+    let opt' := simplifyTerm ctx opt
     .mk (.isSome opt') bt loc
   | .getOpt opt =>
-    let opt' := simplifyTerm opt
+    let opt' := simplifyTerm ctx opt
     .mk (.getOpt opt') bt loc
 
 /-- Simplify a binary operation (children already simplified).
@@ -742,13 +774,13 @@ partial def simplifyRecordMember (obj : AnnotTerm) (member : Identifier) (bt : B
 
 /-- Simplify MapGet: reduce map lookups through MapDef and MapSet.
     CN ref: simplify.ml:598-618 -/
-partial def simplifyMapGet (map : AnnotTerm) (index : AnnotTerm) (bt : BaseType) (loc : Loc) : AnnotTerm :=
+partial def simplifyMapGet (ctx : SimCtxt) (map : AnnotTerm) (index : AnnotTerm) (bt : BaseType) (loc : Loc) : AnnotTerm :=
   match map.term with
   -- MapDef: substitute the index for the variable
   -- CN ref: simplify.ml:602-604
   | .mapDef (s, _) body =>
     let substituted := body.subst (Subst.single s index)
-    simplifyTerm substituted
+    simplifyTerm ctx substituted
   -- MapSet: check if index matches
   -- CN ref: simplify.ml:605-610
   | .mapSet innerMap index' value =>
@@ -757,7 +789,7 @@ partial def simplifyMapGet (map : AnnotTerm) (index : AnnotTerm) (bt : BaseType)
       -- If both are distinct integer constants, look deeper
       match getNumZ index.term, getNumZ index'.term with
       | some z1, some z2 =>
-        if z1 != z2 then simplifyMapGet innerMap index bt loc
+        if z1 != z2 then simplifyMapGet ctx innerMap index bt loc
         else .mk (.mapGet map index) bt loc
       | _, _ => .mk (.mapGet map index) bt loc
   | _ => .mk (.mapGet map index) bt loc
@@ -776,17 +808,17 @@ end
 /-! ## Logical Constraint Simplification
 
 Corresponds to: LogicalConstraints.simp in cn/lib/simplify.ml:650-661
-Audited: 2026-02-18
+Audited: 2026-02-20
 -/
 
 /-- Simplify a logical constraint.
     CN ref: simplify.ml, LogicalConstraints.simp
-    Audited: 2026-02-18 -/
-def simplifyConstraint (lc : LogicalConstraint) : LogicalConstraint :=
+    Audited: 2026-02-20 -/
+def simplifyConstraint (ctx : SimCtxt) (lc : LogicalConstraint) : LogicalConstraint :=
   match lc with
-  | .t term => .t (simplifyTerm term)
+  | .t term => .t (simplifyTerm ctx term)
   | .forall_ (q, qbt) body =>
-    let body' := simplifyTerm body
+    let body' := simplifyTerm ctx body
     -- If body simplifies to true, the forall is trivially satisfied
     -- CN ref: simplify.ml:659-661
     match body'.term with

@@ -10,7 +10,7 @@
   This module implements handlers for the predicate-free fragment:
   - `have`: Assert a constraint into the typing context + generate obligation
   - `assert_`: Generate a proof obligation only (no context addition)
-  - `splitCase`: Add a case-split hint as an assumption
+  - `splitCase`: Case-split hint — adds provable direction as assumption
   - `print`: Debug output (no-op)
   - `instantiate`: Instantiate a quantified resource (requires QPredicate support)
   - `extract`: Extract element from a quantified resource (requires QPredicate support)
@@ -259,33 +259,56 @@ def handleExtract (resourceName : ResourceName) (indexTerm : IndexTerm) (loc : L
     TypingM.addR updatedQPResource
     TypingM.addR elemResource
 
+/-- Negate a boolean index term.
+    Creates `not(t)` with base type bool. -/
+private def negTerm (t : IndexTerm) : IndexTerm :=
+  AnnotTerm.mk (.unop .not t) .bool t.loc
+
 /-- Handle a `split_case` ghost statement.
-    Provides case-split guidance to the solver by adding a constraint as an assumption.
+    Checks provability of the constraint and its negation, then adds the
+    determined constraint. If neither direction is provable, falls back to
+    adding the positive constraint.
 
     CN ref: check.ml:2262-2283
     ```ocaml
     | M_CN_split_case (loc, lc_it) ->
       let@ lc_it = ...check the expression... in
-      ...case split logic...
+      let lc = LC.T lc_it in
+      let@ provable_c = provable loc lc ... in
+      let@ provable_not_c = provable loc (LC.not_ lc) ... in
+      match provable_c, provable_not_c with
+      | `True, _ -> add_c lc
+      | _, `True -> add_c (LC.not_ lc)
+      | `False, `False -> (* fork continuation into both branches, merge *)
     ```
 
-    CN's split_case is more sophisticated: it checks provability of both the
-    constraint and its negation to select which branch to explore. For now,
-    we simplify this to just adding the constraint as an assumption.
+    DIVERGES-FROM-CN: CN's `False, False` case (check.ml:2275-2283) forks
+    the entire remaining continuation into two branches (one assuming c, one
+    assuming !c) and merges obligations from both. This requires continuation-
+    passing style — the split must wrap all downstream verification, not just
+    the constraint addition. We fall back to adding c as an assumption, which
+    is sound (the solver still checks all obligations) but less precise: we
+    may miss errors that only manifest under !c.
 
-    DIVERGES-FROM-CN: CN's split_case (check.ml:2262-2283) checks provable(c)
-    and provable(not c) to decide which branch to take. We add the constraint
-    directly as an assumption. This is sound but less precise (the solver may
-    have to consider both cases).
-
-    Audited: 2026-02-19 -/
+    Audited: 2026-02-20 -/
 def handleSplitCase (constraintTerm : IndexTerm) (loc : Loc) : TypingM Unit := do
-  -- Add constraint as assumption (simplified case split)
-  -- A full implementation would check provability of both directions
-  -- and branch accordingly (CN check.ml:2268-2283)
-  -- DIVERGES-FROM-CN: simplified to just adding the constraint
   let _ := loc  -- loc available for future use (inline solver queries)
-  TypingM.addC (.t constraintTerm)
+  let lc := LogicalConstraint.t constraintTerm
+  let notLc := LogicalConstraint.t (negTerm constraintTerm)
+  -- CN ref: check.ml:2268-2269 — check provable(c)
+  let provableC ← TypingM.provable lc
+  -- CN ref: check.ml:2270-2271 — check provable(!c)
+  let provableNotC ← TypingM.provable notLc
+  match provableC, provableNotC with
+  | .proved, _ =>
+    -- CN ref: check.ml:2273 — `True, _ -> add_c lc
+    TypingM.addC lc
+  | _, .proved =>
+    -- CN ref: check.ml:2274 — _, `True -> add_c (LC.not_ lc)
+    TypingM.addC notLc
+  | _, _ =>
+    -- DIVERGES-FROM-CN: add c as assumption (see docstring above)
+    TypingM.addC lc
 
 /-- Handle a `print` ghost statement.
     Debug output during type checking. Currently a no-op.

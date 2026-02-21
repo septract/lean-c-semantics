@@ -563,8 +563,10 @@ private partial def tryExtractQPIndex (qvar : Sym) (template concrete : IndexTer
     - Handling movable_indices for extracting individual elements
 
     Our simplified version handles the common case of a single matching QPredicate.
-    It includes alpha-renaming and P resource absorption (merging extracted elements
-    back into the QPredicate).
+    It includes alpha-renaming, P resource absorption (merging extracted elements
+    back into the QPredicate), and a nothing_more_needed check (forall q,
+    requested_permission(q) => matched_permission(q)) to verify full permission
+    coverage via an SMT obligation.
     Audited: 2026-02-20 -/
 partial def qpredicateRequest (requested : QPredicate) : TypingM (Option (QPredicate × Output)) := do
   let resources ← TypingM.getResources
@@ -650,6 +652,24 @@ partial def qpredicateRequest (requested : QPredicate) : TypingM (Option (QPredi
       if pIdx < acc then acc - 1 else acc
     -- Consume the (possibly merged) QPredicate
     TypingM.removeResourceAt adjustedIdx
+    -- Phase 3: nothing_more_needed check
+    -- CN ref: resourceInference.ml:365-375
+    -- After finding and consuming a matching QPredicate, verify that the matched
+    -- QPredicate's permission fully covers the requested permission:
+    --   forall q, requested_permission(q) => matched_permission(q)
+    -- This ensures no additional permission is needed beyond what was matched.
+    -- Both permissions already use the same quantifier variable (requested.q.1)
+    -- after alpha-renaming in Phase 1.
+    if !termSyntacticEq requested.permission currentQP.permission then
+      let loc := requested.permission.loc
+      -- Build: requested_permission(q) => matched_permission(q)
+      -- which is equivalent to: !requested_permission(q) || matched_permission(q)
+      -- SMT-LIB implication: (=> reqPerm matchedPerm)
+      let implication : IndexTerm := AnnotTerm.mk
+        (.binop .implies requested.permission currentQP.permission) .bool loc
+      let obligation : LogicalConstraint :=
+        .forall_ (requested.q.1, requested.q.2) implication
+      TypingM.requireConstraint obligation loc "QPredicate permission coverage (nothing_more_needed)"
     return some (currentQP, currentOutput)
   | _, _, _ =>
     -- No matching QPredicate found

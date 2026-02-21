@@ -354,6 +354,9 @@ It sets up the lazy muCore transformation by:
     - `cParams`: C-level parameter types from funinfo (sym × Ctype), giving actual value types
     - `retTy`: Core return type of the function
     - `loc`: Source location for error reporting
+    - `maxFileSymId`: Maximum symbol ID across all parsed symbols in the Core file.
+      Fresh symbols are generated starting from maxFileSymId + 1 to avoid collisions.
+      Corresponds to: CN initializes its fresh counter to max(all_parsed_symbol_ids) + 1.
 
     Corresponds to: WProc.check_procedure in wellTyped.ml lines 2467-2520 -/
 def checkFunctionWithParams
@@ -370,6 +373,7 @@ def checkFunctionWithParams
     (loopAttributes : Core.LoopAttributes := [])
     (saveArgCTypes : List (Nat × List (Option Core.Sym × Core.Ctype)) := [])
     (globals : List (Core.Sym × Core.GlobDecl) := [])
+    (maxFileSymId : Nat := 0)
     : IO TypeCheckResult := do
   -- For trusted specs, skip verification
   if spec.trusted then
@@ -386,10 +390,10 @@ def checkFunctionWithParams
     --
     -- Fresh ID strategy (matching CN's approach):
     -- CN uses a global counter for fresh IDs that never collides with Cerberus IDs.
-    -- We compute the max param ID and start our fresh counter from there.
-    -- This ensures fresh symbols (like `return`) get unique IDs.
-    let maxParamId := params.foldl (init := 0) fun acc (sym, _) => max acc sym.id
-    let initialFreshId := maxParamId + 1
+    -- We use maxFileSymId (max of all parsed symbol IDs in the Core file) to start
+    -- our fresh counter, ensuring no collisions with any parsed symbol.
+    -- Corresponds to: CN's Sym.fresh_make_uniq initializing counter from max parsed ID.
+    let initialFreshId := maxFileSymId + 1
 
     let setupResult : Except String (Context × ParamValueMap × Nat × List (Sym × BaseType) × List (String × Core.Ctype)) :=
       params.zip cParams |>.foldlM
@@ -528,9 +532,10 @@ def checkFunctionWithParams
       catch _ => pure none
 
       -- Step 9: Create initial state with ParamValueMap, LabelDefs, solver, and obligations
+      -- freshCounter starts past all resolve-phase IDs (resolve uses nextFreshId+500 range)
       let initialState : TypingState := {
         context := initialCtx
-        freshCounter := nextFreshId + 1000  -- Leave room for resolution IDs
+        freshCounter := nextFreshId + 1000
         paramValues := paramValueMap
         labelDefs := muProc.labels  -- Label definitions from transformation
         functionSpecs := functionSpecs  -- Pre-built function types for ccall

@@ -358,6 +358,45 @@ instance : Inhabited File := ⟨{}⟩
 /-- Create an empty Core file (internal helper) -/
 def File.empty : File := {}
 
+/-- Compute the maximum symbol ID across all symbols in the file.
+    Used to initialize fresh symbol counters so that generated symbols
+    never collide with parsed symbols.
+
+    Scans: funs keys, stdlib keys, globs keys, tagDefs keys, funinfo keys,
+    funinfo parameter symbols, FunDecl parameter symbols, and main symbol.
+
+    Corresponds to: CN initializes its fresh counter to max(all_parsed_symbol_ids) + 1
+    (see Sym.fresh_make_uniq in cn/lib/sym.ml). -/
+def File.maxSymId (file : File) : Nat :=
+  let m := 0
+  -- main symbol
+  let m := match file.main with | some s => max m s.id | none => m
+  -- funs: function symbol IDs + param symbol IDs
+  let m := file.funs.foldl (init := m) fun acc (sym, decl) =>
+    let acc := max acc sym.id
+    match decl with
+    | .fun_ _ params _ => params.foldl (fun a (s, _) => max a s.id) acc
+    | .proc _ _ _ params _ => params.foldl (fun a (s, _) => max a s.id) acc
+    | .procDecl _ _ _ => acc
+    | .builtinDecl _ _ _ => acc
+  -- stdlib: same structure as funs
+  let m := file.stdlib.foldl (init := m) fun acc (sym, decl) =>
+    let acc := max acc sym.id
+    match decl with
+    | .fun_ _ params _ => params.foldl (fun a (s, _) => max a s.id) acc
+    | .proc _ _ _ params _ => params.foldl (fun a (s, _) => max a s.id) acc
+    | .procDecl _ _ _ => acc
+    | .builtinDecl _ _ _ => acc
+  -- globs: global variable symbol IDs
+  let m := file.globs.foldl (init := m) fun acc (sym, _) => max acc sym.id
+  -- tagDefs: struct/union tag symbol IDs
+  let m := file.tagDefs.foldl (init := m) fun acc (sym, _) => max acc sym.id
+  -- funinfo: function symbol IDs + parameter symbol IDs
+  let m := file.funinfo.fold (init := m) fun acc sym info =>
+    let acc := max acc sym.id
+    info.params.foldl (fun a fp => match fp.sym with | some s => max a s.id | none => a) acc
+  m
+
 /-- Look up function info by symbol name (internal helper)
     Note: This is a workaround because pointer values in JSON are exported as strings,
     losing the symbol ID. We look up by name only, which works in practice since

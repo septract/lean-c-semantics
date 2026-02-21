@@ -369,6 +369,9 @@ def buildFunctionType (spec : FunctionSpec)
 
     Corresponds to: CN's initialization of Global.fun_decls -/
 def buildFunctionSpecMap (file : Core.File) : FunctionSpecMap :=
+  -- Use file-wide max symbol ID to avoid collisions with any parsed symbol.
+  -- Corresponds to: CN initializes fresh counter from max(all_parsed_symbol_ids) + 1.
+  let maxFileSymId := file.maxSymId
   let entries := file.funinfo.toList.filterMap fun (sym, funInfo) =>
     if funInfo.cnMagic.isEmpty then none
     else
@@ -386,12 +389,11 @@ def buildFunctionSpecMap (file : Core.File) : FunctionSpecMap :=
             funInfo.params.filterMap fun fp =>
               fp.sym.map fun s => (s, ctypeToOutputBaseType fp.ty)
           let returnBt := ctypeToOutputBaseType funInfo.returnType
-          let maxParamId := cParams.foldl (init := 0) fun acc (s, _) => max acc s.id
           -- Build C type map for pointer arithmetic elaboration
           let paramCTypes : List (String × Core.Ctype) :=
             funInfo.params.filterMap fun fp =>
               fp.sym.bind fun s => s.name.map fun name => (name, fp.ty)
-          let resolveResult := (resolveFunctionSpec spec cParams returnBt (maxParamId + 1) paramCTypes file.tagDefs file.globs).toOption
+          let resolveResult := (resolveFunctionSpec spec cParams returnBt (maxFileSymId + 1) paramCTypes file.tagDefs file.globs).toOption
           match resolveResult with
           | none => none  -- Skip unresolvable specs
           | some resolvedSpec =>
@@ -476,7 +478,7 @@ def runJsonTest (jsonPath : String) (expectFail : Bool := false) : IO UInt32 := 
             match findFunctionInfo file sym.name with
             | some info =>
               -- Full verification: check body against spec with parameters bound
-              let result ← checkFunctionWithParams spec info.body info.params info.cParams info.retTy info.cRetTy Core.Loc.t.unknown functionSpecs file.funinfo file.tagDefs file.loopAttributes file.saveArgCTypes file.globs
+              let result ← checkFunctionWithParams spec info.body info.params info.cParams info.retTy info.cRetTy Core.Loc.t.unknown functionSpecs file.funinfo file.tagDefs file.loopAttributes file.saveArgCTypes file.globs (maxFileSymId := file.maxSymId)
               if result.success then
                 -- Discharge conditional failures via SMT
                 let mut cfFailed := false
@@ -681,7 +683,7 @@ def runJsonTestWithVerify (jsonPath : String) (expectFail : Bool := false) : IO 
             match findFunctionInfo file sym.name with
             | some info =>
               -- Type check first
-              let tcResult ← checkFunctionWithParams spec info.body info.params info.cParams info.retTy info.cRetTy Core.Loc.t.unknown functionSpecs file.funinfo file.tagDefs file.loopAttributes file.saveArgCTypes file.globs
+              let tcResult ← checkFunctionWithParams spec info.body info.params info.cParams info.retTy info.cRetTy Core.Loc.t.unknown functionSpecs file.funinfo file.tagDefs file.loopAttributes file.saveArgCTypes file.globs (maxFileSymId := file.maxSymId)
               if !tcResult.success then
                 verifyFail := verifyFail + 1
                 IO.println "  TYPECHECK FAIL"
