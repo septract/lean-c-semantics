@@ -17,6 +17,20 @@
 
   If the solver returns "unsat", the obligation is discharged.
 
+  ## Note: literalT for SMT-LIB2 Indexed Identifiers
+
+  SMT-LIB2 indexed identifiers like `(_ extract 3 0)` must be applied as a unit:
+  `((_ extract 3 0) val)`. However, lean-smt's `appToList` flattens nested `appT`
+  nodes, so `appT (mkApp3 _ extract 3 0) val` would serialize incorrectly as
+  `(_ extract 3 0 val)`. We use `literalT` to embed the indexed identifier as an
+  opaque string atom, preventing flattening: `appT (literalT "(_ extract 3 0)") val`
+  correctly produces `((_ extract 3 0) val)`.
+
+  The helpers `mkIndexedApp1`, `mkAsLiteral`, and `mkIsTester` centralize this
+  workaround. Use them instead of raw `literalT` for any new indexed identifiers.
+  A proper fix would require extending lean-smt with first-class indexed identifier
+  support.
+
   Audited: 2026-01-27 (pragmatic pipeline using lean-smt)
 -/
 
@@ -36,6 +50,35 @@ open CerbLean.CN.TypeChecking.Resolve (ctypeToOutputBaseType)
 open CerbLean.Memory (TypeEnv structOffsets sizeof)
 open Smt (Term)
 open Smt.Translate (Command)
+
+/-! ## SMT-LIB2 Indexed Identifier Helpers
+
+SMT-LIB2 indexed identifiers like `(_ extract 3 0)` must be applied as a unit:
+`((_ extract 3 0) val)`. lean-smt's `appToList` flattens nested `appT` nodes,
+so building these with `mkApp2/mkApp3` and then applying via `appT` produces
+incorrect output like `(_ extract 3 0 val)`. These helpers use `literalT` to
+embed the indexed identifier as an opaque atom, preventing flattening.
+
+A proper fix would require extending lean-smt with first-class indexed identifier
+support. Until then, these helpers centralize the workaround. -/
+
+/-- Build an SMT-LIB2 indexed identifier applied to one argument.
+    E.g., `mkIndexedApp1 "int2bv" #["32"] val` → `((_ int2bv 32) val)` -/
+def mkIndexedApp1 (op : String) (indices : Array String) (arg : Smt.Term) : Smt.Term :=
+  let indexStr := indices.foldl (init := "") fun acc i => acc ++ " " ++ i
+  Term.appT (Term.literalT s!"(_ {op}{indexStr})") arg
+
+/-- Build an SMT-LIB2 `(as ...)` type-qualified expression as a term.
+    E.g., `mkAsExpr "cn_none" "(cn_option Int)"` → `(as cn_none (cn_option Int))`
+    Used as an argument (not applied), so `literalT` prevents parent flattening
+    from breaking the internal structure. -/
+def mkAsLiteral (symbol : String) (sort : String) : Smt.Term :=
+  Term.literalT s!"(as {symbol} {sort})"
+
+/-- Build an SMT-LIB2 `(_ is Constructor)` tester applied to an argument.
+    E.g., `mkIsTester "AiA" ptr` → `((_ is AiA) ptr)` -/
+def mkIsTester (constructor : String) (arg : Smt.Term) : Smt.Term :=
+  mkIndexedApp1 "is" #[constructor] arg
 
 /-! ## Symbol Name Generation -/
 
@@ -462,7 +505,7 @@ def constToTerm : Const → TranslateResult
     let allocIdTerm := match m.allocId with
       | none =>
         -- (as cn_none (cn_option Int)) — typed none (solver.ml:540)
-        Term.literalT "(as cn_none (cn_option Int))"
+        mkAsLiteral "cn_none" "(cn_option Int)"
       | some z =>
         -- (cn_some z) (solver.ml:541)
         Term.appT (Term.symbolT "cn_some") (Term.literalT (toString z))
@@ -516,7 +559,7 @@ partial def bvClzTerm (resultW : Nat) (w : Nat) (e : Smt.Term) : Smt.Term :=
   let eq0 (width : Nat) (val : Smt.Term) :=
     Term.mkApp2 (Term.symbolT "=") val (mkBitVecLiteral width 0)
   let mkExtract (hi lo : Nat) (val : Smt.Term) :=
-    Term.appT (Term.literalT s!"(_ extract {hi} {lo})") val
+    mkIndexedApp1 "extract" #[toString hi, toString lo] val
   let rec count (w : Nat) (e : Smt.Term) : Smt.Term :=
     if w ≤ 1 then
       Term.mkApp3 (Term.symbolT "ite") (eq0 w e) (mkResult 1) (mkResult 0)
@@ -538,7 +581,7 @@ partial def bvCtzTerm (resultW : Nat) (w : Nat) (e : Smt.Term) : Smt.Term :=
   let eq0 (width : Nat) (val : Smt.Term) :=
     Term.mkApp2 (Term.symbolT "=") val (mkBitVecLiteral width 0)
   let mkExtract (hi lo : Nat) (val : Smt.Term) :=
-    Term.appT (Term.literalT s!"(_ extract {hi} {lo})") val
+    mkIndexedApp1 "extract" #[toString hi, toString lo] val
   let rec count (w : Nat) (e : Smt.Term) : Smt.Term :=
     if w ≤ 1 then
       Term.mkApp3 (Term.symbolT "ite") (eq0 w e) (mkResult 1) (mkResult 0)
@@ -914,8 +957,7 @@ partial def termToSmtTerm (env : Option TypeEnv) : Types.Term → TranslateResul
             .ok (Term.appT extract valTm)
         | .integer =>
           -- Int -> BitVec: use int2bv
-          let int2bv := Term.literalT s!"(_ int2bv {targetW})"
-          .ok (Term.appT int2bv valTm)
+          .ok (mkIndexedApp1 "int2bv" #[toString targetW] valTm)
         | _ =>
           -- For other source types (e.g., already the right type), identity
           let _ := targetSign  -- suppress unused warning
@@ -942,9 +984,7 @@ partial def termToSmtTerm (env : Option TypeEnv) : Types.Term → TranslateResul
           .ok (Term.appT extract valTm)
       | .integer, .bits _ tw =>
         -- Int → BitVec: use int2bv (indexed identifier)
-        -- Use literalT because Smt library's appToList doesn't special-case int2bv
-        let int2bv := Term.literalT s!"(_ int2bv {tw})"
-        .ok (Term.appT int2bv valTm)
+        .ok (mkIndexedApp1 "int2bv" #[toString tw] valTm)
       | .loc, .bits _ tw =>
         -- Loc → BitVec: extract address via addr_of, then possibly resize
         -- Corresponds to: solver.ml lines 965-972
@@ -1022,8 +1062,7 @@ partial def termToSmtTerm (env : Option TypeEnv) : Types.Term → TranslateResul
     -- Corresponds to: solver.ml line 877
     match annotTermToSmtTerm env ptr with
     | .ok p =>
-      let isAiA := Term.literalT "(_ is AiA)"
-      .ok (Term.appT isAiA p)
+      .ok (mkIsTester "AiA" p)
     | .unsupported r => .unsupported r
   | .sizeOf ct =>
     -- sizeOf(ctype) as a concrete integer

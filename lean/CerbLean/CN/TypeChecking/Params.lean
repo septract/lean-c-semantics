@@ -267,11 +267,22 @@ private def buildLoopLabelType
     | none => []
 
   -- Step 4: Parse and resolve invariant constraints
-  -- Extend the resolve context with loop variable names so invariants
-  -- can reference them (e.g., `i <= n` where `i` is a loop variable).
-  -- Loop variables get their VALUE types (from C types), not pointer types.
-  let loopVarEntries := info.params.zip argCTypes |>.filterMap fun ((sym, _), (_, ct)) =>
-    sym.name.map fun name => (name, sym, Resolve.ctypeToOutputBaseType ct)
+  -- Pre-compute output symbols for each loop variable. These correspond to the
+  -- loaded values that resource consumption will bind (not the pointer symbols).
+  -- Constraints reference these output symbols, matching CN's make_label_args:
+  -- AT { Computational(ptr) { L { Resource(val, Owned(ptr)) { Constraint(val >= 0) } } } }
+  let loopVarOutputs := info.params.zip argCTypes |>.map fun ((sym, _bt), (_argSymOpt, ct)) =>
+    let outputBt := Resolve.ctypeToOutputBaseType ct
+    -- QUALITY: ideally use a proper fresh counter instead of ID offset.
+    -- Using large offset to avoid collisions with other symbols.
+    let outputSym : Sym := { id := sym.id + 1000000, name := sym.name.map (· ++ "_out") }
+    (sym, ct, outputSym, outputBt)
+
+  -- Resolve context maps variable NAMES to their loaded VALUE symbols (output symbols),
+  -- not the pointer symbols. This ensures `i <= n` in an invariant refers to the
+  -- loaded value of `i`, not the stack slot pointer.
+  let loopVarEntries := loopVarOutputs.filterMap fun (sym, _, outputSym, outputBt) =>
+    sym.name.map fun name => (name, outputSym, outputBt)
   let extendedCtx := { resolveCtx with
     nameToSymType := resolveCtx.nameToSymType ++ loopVarEntries
   }
@@ -297,13 +308,10 @@ private def buildLoopLabelType
   -- Add Owned resources for each loop variable
   -- Corresponds to: make_label_args ownership in core_to_mucore.ml:712-717
   -- Each loop variable is a pointer to a stack slot with an Owned<ct>(Init) resource
-  let latWithResources := info.params.zip argCTypes |>.foldr (init := latWithConstraints)
-    fun ((sym, _bt), (_argSymOpt, ct)) acc =>
+  -- Uses the SAME output symbols as the constraints above.
+  let latWithResources := loopVarOutputs.foldr (init := latWithConstraints)
+    fun (sym, ct, outputSym, outputBt) acc =>
       let ptrTerm := AnnotTerm.mk (.sym sym) .loc info.loc
-      let outputBt := Resolve.ctypeToOutputBaseType ct
-      -- QUALITY: ideally use a proper fresh counter instead of ID offset.
-      -- Using large offset to avoid collisions with other symbols.
-      let outputSym : Sym := { id := sym.id + 1000000, name := sym.name.map (· ++ "_out") }
       .resource outputSym (mkOwnedRequest ct ptrTerm) outputBt
         { loc := info.loc, desc := s!"loop var {sym.name.getD ""} ownership" } acc
 
