@@ -108,6 +108,37 @@ inductive BaseType where
   | option (innerType : BaseType)
   deriving Repr, Inhabited
 
+/-! ## BaseType Equality
+
+BaseType is recursive (record, map, list, tuple, set, option contain BaseType),
+so it cannot derive BEq. We provide a structural equality function.
+Corresponds to: BT.equal in cn/lib/baseTypes.ml
+-/
+
+/-- Structural equality for BaseType.
+    Corresponds to: BT.equal in baseTypes.ml -/
+partial def BaseType.beq : BaseType → BaseType → Bool
+  | .unit, .unit => true
+  | .bool, .bool => true
+  | .integer, .integer => true
+  | .memByte, .memByte => true
+  | .bits s1 w1, .bits s2 w2 => s1 == s2 && w1 == w2
+  | .real, .real => true
+  | .allocId, .allocId => true
+  | .loc, .loc => true
+  | .ctype, .ctype => true
+  | .struct_ t1, .struct_ t2 => t1.id == t2.id
+  | .datatype t1, .datatype t2 => t1.id == t2.id
+  | .record m1, .record m2 => m1.length == m2.length &&
+      (m1.zip m2).all fun ((id1, bt1), (id2, bt2)) => id1 == id2 && BaseType.beq bt1 bt2
+  | .map k1 v1, .map k2 v2 => BaseType.beq k1 k2 && BaseType.beq v1 v2
+  | .list bt1, .list bt2 => BaseType.beq bt1 bt2
+  | .tuple ts1, .tuple ts2 => ts1.length == ts2.length &&
+      (ts1.zip ts2).all fun (t1, t2) => BaseType.beq t1 t2
+  | .set bt1, .set bt2 => BaseType.beq bt1 bt2
+  | .option bt1, .option bt2 => BaseType.beq bt1 bt2
+  | _, _ => false
+
 /-! ## Type Abbreviations
 
 Common bitvector types matching CN conventions.

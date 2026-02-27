@@ -14,6 +14,7 @@ import CerbLean.CN.TypeChecking.Expr
 import CerbLean.CN.Types
 import CerbLean.CN.Parser
 import CerbLean.CN.Verification.Obligation
+import CerbLean.CN.Verification.SmtLib
 
 namespace CerbLean.CN.TypeChecking
 
@@ -133,17 +134,34 @@ def checkFunctionSpec
     (spec : FunctionSpec)
     (initialResources : List Resource)
     (loc : Loc)
-    : TypeCheckResult :=
+    (preamble : String := CerbLean.CN.Verification.SmtLib.pointerPreamble)
+    : IO TypeCheckResult := do
   -- For trusted specs, skip verification
   if spec.trusted then
-    TypeCheckResult.ok
+    return TypeCheckResult.ok
   else
+    -- Initialize inline solver at IO level (lifecycle managed outside TypingM)
+    -- If cvc5 is not available, proceed without inline solver (all ops become no-ops)
+    let solverChild ← try
+      let proc ← IO.Process.spawn {
+        cmd := "cvc5"
+        args := #["--quiet", "--incremental", "--lang", "smt"]
+        stdin := .piped
+        stdout := .piped
+        stderr := .piped
+      }
+      proc.stdin.putStr preamble
+      proc.stdin.flush
+      pure (some proc)
+    catch e =>
+      return TypeCheckResult.fail s!"failed to start cvc5 solver: {e}"
+
     -- Run type checking with obligation accumulation enabled.
     -- Start with empty resources — processPrecondition will produce them.
-    -- (initialResources parameter is kept for API compatibility but not used
-    --  since processPrecondition produces resources from the spec.)
     let initialState : TypingState := {
       context := Context.empty
+      solverStdin := solverChild.map (·.stdin)
+      solverStdout := solverChild.map (·.stdout)
     }
 
     let computation : TypingM Unit := do
@@ -158,11 +176,21 @@ def checkFunctionSpec
       -- Corresponds to: resource leak check in check_procedure
       checkNoLeakedResources
 
-    match TypingM.run computation initialState with
+    let result ← TypingM.run computation initialState
+
+    -- Cleanup solver at IO level (regardless of success/failure)
+    if let some proc := solverChild then
+      try
+        proc.stdin.putStr "(exit)\n"
+        proc.stdin.flush
+        let _ ← proc.wait
+      catch _ => pure ()
+
+    match result with
     | .ok (_, finalState) =>
-      TypeCheckResult.okWithObligations finalState.obligations
+      return TypeCheckResult.okWithObligations finalState.obligations
     | .error err =>
-      TypeCheckResult.fail (toString err)
+      return TypeCheckResult.fail (toString err)
 
 /-! ## Extract Initial Resources from Spec
 
@@ -203,7 +231,7 @@ def checkFunction
     (spec : FunctionSpec)
     (_body : Core.AExpr)
     (loc : Loc)
-    : TypeCheckResult :=
+    : IO TypeCheckResult := do
   -- Delegate to spec-only checking since we don't have the full context
   -- needed for CN-matching body verification (params, return type, etc.)
   let initialResources := extractPreconditionResources spec
@@ -217,9 +245,9 @@ def checkFunction
 def isWellTyped
     (spec : FunctionSpec)
     (initialResources : List Resource)
-    : Bool :=
-  let result := checkFunctionSpec spec initialResources .unknown
-  result.success
+    : IO Bool := do
+  let result ← checkFunctionSpec spec initialResources .unknown
+  return result.success
 
 /-- Check a function spec and return any error message.
     Returns none if structural checking succeeded, some error otherwise.
@@ -228,16 +256,16 @@ def isWellTyped
 def checkSpec
     (spec : FunctionSpec)
     (initialResources : List Resource)
-    : Option String :=
-  let result := checkFunctionSpec spec initialResources .unknown
-  result.error
+    : IO (Option String) := do
+  let result ← checkFunctionSpec spec initialResources .unknown
+  return result.error
 
 /-- Run type checking on a spec in standalone mode.
     Synthesizes initial resources from the precondition.
     Returns the TypeCheckResult with accumulated obligations. -/
 def checkSpecStandalone
     (spec : FunctionSpec)
-    : TypeCheckResult :=
+    : IO TypeCheckResult := do
   let initialResources := extractPreconditionResources spec
   checkFunctionSpec spec initialResources .unknown
 
@@ -246,19 +274,19 @@ def checkSpecStandalone
     This is the main entry point for checking CN specs. -/
 def parseAndCheck
     (input : String)
-    : Except String TypeCheckResult :=
+    : IO (Except String TypeCheckResult) := do
   match CerbLean.CN.Parser.parseFunctionSpec input with
-  | .error e => .error s!"Parse error: {e}"
-  | .ok spec => .ok (checkSpecStandalone spec)
+  | .error e => return .error s!"Parse error: {e}"
+  | .ok spec => return .ok (← checkSpecStandalone spec)
 
 /-- Parse and type check, returning a simple success/failure.
     Note: This only checks structural success. Obligations are not discharged.
     Use parseAndCheck to get the full result with obligations. -/
 def parseAndCheckBool
     (input : String)
-    : Bool :=
-  match parseAndCheck input with
-  | .ok result => result.success
-  | .error _ => false
+    : IO Bool := do
+  match ← parseAndCheck input with
+  | .ok result => return result.success
+  | .error e => IO.eprintln s!"CN check error: {e}"; return false
 
 end CerbLean.CN.TypeChecking

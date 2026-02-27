@@ -132,24 +132,29 @@ Processes a full argument type (AT):
 
     The spine processes:
     - Computational args: check type, evaluate, substitute
-    - Ghost args: check type, substitute
+    - Ghost args: check type, substitute (from separate gargs list)
     - L (logical part): delegate to spine_l
 
     The `innerSubst` parameter controls how substitution propagates to the
     inner type α. For label types (α = False_), it's identity. For function
     types (α = ReturnType), it's ReturnType.subst.
 
+    Ghost args are provided as already-evaluated IndexTerms (not APexprs),
+    matching CN where gargs are IT.t values passed separately from
+    computational args.
+
     Corresponds to:
       let spine rt_subst rt_pp loc situation args gargs_opt ftyp k = ... -/
 partial def spine {α : Type} (loc : Loc) (situation : CallSituation)
     (innerSubst : Subst → α → α)
-    (args : List APexpr) (at_ : AT α) (k : α → TypingM Unit) : TypingM Unit := do
-  aux [] args at_ k
+    (args : List APexpr) (gargs : List IndexTerm) (at_ : AT α)
+    (k : α → TypingM Unit) : TypingM Unit := do
+  aux [] args gargs at_ k
 where
-  aux (argsAcc : List IndexTerm) (args : List APexpr) (at_ : AT α)
-      (k : α → TypingM Unit) : TypingM Unit := do
-    match args, at_ with
-    | arg :: restArgs, .computational s bt _info rest =>
+  aux (argsAcc : List IndexTerm) (args : List APexpr) (gargs : List IndexTerm)
+      (at_ : AT α) (k : α → TypingM Unit) : TypingM Unit := do
+    match args, gargs, at_ with
+    | arg :: restArgs, _, .computational s bt _info rest =>
       -- Computational argument: check and substitute
       -- Corresponds to: check.ml lines 1163-1173
       -- Pass expected type to checkPexprK for type-aware literal creation
@@ -157,14 +162,23 @@ where
         -- Substitute arg value for parameter in rest of type
         let σ := Subst.single s argVal
         let rest' := AT.subst innerSubst σ rest
-        aux (argsAcc ++ [argVal]) restArgs rest' k) (some bt)
+        aux (argsAcc ++ [argVal]) restArgs gargs rest' k) (some bt)
 
-    | _, .ghost _s _bt _info _rest =>
-      -- Ghost arguments require matching against ghost arg expressions.
-      -- CN processes these by position; silently skipping would cause misalignment.
-      TypingM.fail (.other s!"Ghost arguments not yet implemented (at {repr loc})")
+    | _, garg :: restGargs, .ghost s bt _info rest =>
+      -- Ghost argument: check type and substitute
+      -- Corresponds to: check.ml lines 1174-1176
+      -- CN: let@ garg = WellTyped.check_term (fst info) bt garg in
+      --     aux args_acc args gargs (subst rt_subst (make_subst [(s, garg)]) ftyp) k
+      -- WellTyped.check_term verifies the term's base type matches expected bt.
+      if !BaseType.beq garg.bt bt then
+        TypingM.fail (.other s!"Ghost argument type mismatch at {repr loc}: expected {repr bt}, got {repr garg.bt}")
+      -- Substitute ghost value for parameter in rest of type
+      -- Ghost args do NOT accumulate into argsAcc (only computational args do)
+      let σ := Subst.single s garg
+      let rest' := AT.subst innerSubst σ rest
+      aux argsAcc args restGargs rest' k
 
-    | [], .L lat =>
+    | [], [], .L lat =>
       -- All args processed, now process logical part
       -- Corresponds to: check.ml lines 1177-1187
 
@@ -180,12 +194,24 @@ where
       -- Process the logical part
       spineL loc situation lat k
 
-    | _ :: _, .L _ =>
-      -- Too many args provided
+    | _ :: _, _, .L _ =>
+      -- Too many computational args provided
+      -- Corresponds to: check.ml lines 1188-1191
       TypingM.fail (.other s!"Too many arguments provided at {repr loc}")
 
-    | [], .computational _ _ _ _ =>
-      -- Not enough args provided
+    | _, _ :: _, .L _ =>
+      -- Too many ghost args provided
+      -- Corresponds to: check.ml lines 1192-1195
+      TypingM.fail (.other s!"Too many ghost arguments provided at {repr loc}")
+
+    | _, [], .ghost _ _ _ _ =>
+      -- Not enough ghost args provided
+      -- Corresponds to: check.ml lines 1192-1195
+      TypingM.fail (.other s!"Not enough ghost arguments provided at {repr loc}")
+
+    | [], _, .computational _ _ _ _ =>
+      -- Not enough computational args provided
+      -- Corresponds to: check.ml lines 1188-1191
       TypingM.fail (.other s!"Not enough arguments provided at {repr loc}")
 
 /-! ## Calltype_lt: Label Type Calling
@@ -206,14 +232,13 @@ Calls spine with a label type and label kind.
     2. Processes the postcondition (resources and constraints)
     3. The continuation receives False (uninhabited) - never called
 
-    Parameters:
-    - loc: Source location for error messages
-    - args: Arguments to the label (for return labels, the return value)
-    - entry: Label context entry (contains label type and kind)
-    - k: Continuation (receives False - never actually called for terminal labels) -/
-def calltypeLt (loc : Loc) (args : List APexpr) (entry : LabelEntry)
-    (k : False_ → TypingM Unit) : TypingM Unit := do
-  spine loc (.labelCall entry.kind) (fun _ x => x) args entry.lt k
+    The `gargs` parameter carries ghost argument values (from cn_ghost declarations
+    or loop invariant ghost bindings). CN passes these separately from computational args.
+
+    Audited: 2026-02-20 against cn/lib/check.ml lines 1207-1208 -/
+def calltypeLt (loc : Loc) (args : List APexpr) (gargs : List IndexTerm)
+    (entry : LabelEntry) (k : False_ → TypingM Unit) : TypingM Unit := do
+  spine loc (.labelCall entry.kind) (fun _ x => x) args gargs entry.lt k
 
 /-! ## Subtype: Postcondition Checking
 
@@ -253,15 +278,13 @@ The inner substitution is ReturnType.subst (substitutes in the LRT).
     Processes the function's arguments via spine, consuming precondition
     resources and returning the ReturnType (which contains the postcondition).
 
-    Parameters:
-    - loc: Source location for error messages
-    - fsym: The function being called
-    - args: Argument expressions
-    - ft: The function's pre-built argument type (AT ReturnType)
-    - k: Continuation receiving the ReturnType -/
+    The `gargs` parameter carries ghost argument values (from cn_ghost declarations).
+    CN passes these separately from computational args.
+
+    Audited: 2026-02-19 against cn/lib/check.ml lines 1203-1204 -/
 def calltypeFt (loc : Loc) (fsym : Sym) (args : List APexpr)
-    (ft : AT ReturnType) (k : ReturnType → TypingM Unit) : TypingM Unit :=
-  spine loc (.functionCall fsym) ReturnType.subst args ft k
+    (gargs : List IndexTerm) (ft : AT ReturnType) (k : ReturnType → TypingM Unit) : TypingM Unit :=
+  spine loc (.functionCall fsym) ReturnType.subst args gargs ft k
 
 /-! ## Bind Logical Return: Postcondition Processing
 

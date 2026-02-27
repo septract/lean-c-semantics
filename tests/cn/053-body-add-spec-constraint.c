@@ -3,9 +3,9 @@
 // Isolates: combination of body arithmetic + spec arithmetic
 void inc(int *p)
 /*@ requires take v = Owned<int>(p);
-             v >= 0;
+             v >= 0i32; v <= 2147483646i32;
     ensures take v2 = Owned<int>(p);
-            v2 == v + 1; @*/
+            v2 == v + 1i32; @*/
 {
     *p = *p + 1;
 }

@@ -73,9 +73,19 @@ Corresponds to: LRT.subst in cn/lib/logicalReturnTypes.ml
 Used to substitute the return symbol with the actual return value.
 -/
 
-/-- Substitute in a clause -/
+/-- Substitute in a clause.
+    Corresponds to: LRT.subst Resource case in logicalReturnTypes.ml:25-40
+    Note: In CN's LRT, the Resource case has a continuation (rest of LRT),
+    and alpha-renaming of `n` applies to that continuation. In our flat Clause
+    representation there is no continuation, so alpha-renaming of `n` is not
+    needed here -- it is handled at the LRT level (LRT.subst) or by the caller
+    (Postcondition.subst iterating over clauses). We only substitute in the
+    resource fields. -/
 def Clause.subst (σ : Subst) : Clause → Clause
-  | .resource n r => .resource n r  -- TODO: subst in resource if needed
+  | .resource n r =>
+    let request' := r.request.subst σ
+    let output' := { r.output with value := r.output.value.subst σ }
+    .resource n { r with request := request', output := output' }
   | .constraint assertion => .constraint (assertion.subst σ)
   | .letBinding n v => .letBinding n (v.subst σ)
 
@@ -105,6 +115,21 @@ structure FunctionSpec where
   ensures : Postcondition
   /-- Whether the function is marked as trusted (no verification) -/
   trusted : Bool := false
+  /-- Global variable names declared with `accesses`.
+      Corresponds to: accesses clause in CN function specs.
+      CN ref: c_parser.mly accesses production -/
+  accesses : List String := []
+  /-- Ghost parameter declarations from `cn_ghost type name, ...`.
+      These are logical-only parameters that appear in the spec but not
+      in the C function signature. They introduce existentially quantified
+      variables in the precondition.
+      CN ref: c_parser.mly cn_ghost production, core_to_mucore.ml ghost handling -/
+  ghostParams : List (Sym × BaseType) := []
+  /-- Resolved global accesses: (name, fresh value symbol, base type).
+      Populated by resolution; used by Params.lean to generate Owned resources.
+      Each entry maps a global variable name to a fresh symbol representing
+      the value stored at that global's address. -/
+  resolvedAccesses : List (String × Sym × BaseType) := []
   deriving Inhabited
 
 /-! ## Raw CN Annotation

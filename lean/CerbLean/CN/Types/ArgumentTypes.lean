@@ -98,10 +98,23 @@ namespace LAT
     Corresponds to: LAT.subst in logicalArgumentTypes.ml -/
 partial def subst {α : Type} (innerSubst : Subst → α → α) (σ : Subst) : LAT α → LAT α
   | .define_ name value info rest =>
-    -- Note: should alpha-rename if name is in σ.relevant, but we simplify
-    .define_ name (value.subst σ) info (subst innerSubst σ rest)
+    -- Alpha-rename bound variable if it conflicts with substitution
+    -- Corresponds to: logicalArgumentTypes.ml lines 53-55 (suitably_alpha_rename)
+    let (name', rest') := if σ.relevant.contains name.id then
+      let name' := freshSymFor name σ.relevant
+      let renameσ := Subst.single name (AnnotTerm.mk (.sym name') value.bt value.loc)
+      (name', subst innerSubst renameσ rest)
+    else (name, rest)
+    .define_ name' (value.subst σ) info (subst innerSubst σ rest')
   | .resource name req bt info rest =>
-    .resource name (req.subst σ) bt info (subst innerSubst σ rest)
+    -- Alpha-rename bound variable if it conflicts with substitution
+    -- Corresponds to: logicalArgumentTypes.ml lines 57-59
+    let (name', rest') := if σ.relevant.contains name.id then
+      let name' := freshSymFor name σ.relevant
+      let renameσ := Subst.single name (AnnotTerm.mk (.sym name') bt default)
+      (name', subst innerSubst renameσ rest)
+    else (name, rest)
+    .resource name' (req.subst σ) bt info (subst innerSubst σ rest')
   | .constraint lc info rest =>
     .constraint (lc.subst σ) info (subst innerSubst σ rest)
   | .I inner => .I (innerSubst σ inner)
@@ -167,9 +180,23 @@ namespace AT
     Corresponds to: AT.subst in argumentTypes.ml -/
 partial def subst {α : Type} (innerSubst : Subst → α → α) (σ : Subst) : AT α → AT α
   | .computational name bt info rest =>
-    .computational name bt info (subst innerSubst σ rest)
+    -- Alpha-rename bound variable if it conflicts with substitution
+    -- Corresponds to: argumentTypes.ml lines 30-32 (suitably_alpha_rename)
+    let (name', rest') := if σ.relevant.contains name.id then
+      let name' := freshSymFor name σ.relevant
+      let renameσ := Subst.single name (AnnotTerm.mk (.sym name') bt default)
+      (name', subst innerSubst renameσ rest)
+    else (name, rest)
+    .computational name' bt info (subst innerSubst σ rest')
   | .ghost name bt info rest =>
-    .ghost name bt info (subst innerSubst σ rest)
+    -- Alpha-rename bound variable if it conflicts with substitution
+    -- Corresponds to: argumentTypes.ml lines 34-36
+    let (name', rest') := if σ.relevant.contains name.id then
+      let name' := freshSymFor name σ.relevant
+      let renameσ := Subst.single name (AnnotTerm.mk (.sym name') bt default)
+      (name', subst innerSubst renameσ rest)
+    else (name, rest)
+    .ghost name' bt info (subst innerSubst σ rest')
   | .L lat => .L (LAT.subst innerSubst σ lat)
 
 /-- Create an argument type from a function spec (return type).
@@ -230,9 +257,22 @@ namespace LRT
     Corresponds to: LRT.subst in logicalReturnTypes.ml -/
 partial def subst (σ : Subst) : LRT → LRT
   | .define name value info rest =>
-    .define name (value.subst σ) info (subst σ rest)
+    -- Alpha-rename bound variable if it conflicts with substitution
+    -- Corresponds to: logicalReturnTypes.ml suitably_alpha_rename
+    let (name', rest') := if σ.relevant.contains name.id then
+      let name' := freshSymFor name σ.relevant
+      let renameσ := Subst.single name (AnnotTerm.mk (.sym name') value.bt value.loc)
+      (name', LRT.subst renameσ rest)
+    else (name, rest)
+    .define name' (value.subst σ) info (LRT.subst σ rest')
   | .resource name req bt info rest =>
-    .resource name (req.subst σ) bt info (subst σ rest)
+    -- Alpha-rename bound variable if it conflicts with substitution
+    let (name', rest') := if σ.relevant.contains name.id then
+      let name' := freshSymFor name σ.relevant
+      let renameσ := Subst.single name (AnnotTerm.mk (.sym name') bt default)
+      (name', LRT.subst renameσ rest)
+    else (name, rest)
+    .resource name' (req.subst σ) bt info (LRT.subst σ rest')
   | .constraint lc info rest =>
     .constraint (lc.subst σ) info (subst σ rest)
   | .I => .I
@@ -279,10 +319,16 @@ namespace ReturnType
 /-- Substitute in a ReturnType.
     Corresponds to: ReturnTypes.subst in returnTypes.ml
 
-    Only substitutes in the LRT (postcondition), not the sym/bt.
-    The sym is a binder (will be renamed in bind_logical_return). -/
+    Alpha-renames the return symbol if it conflicts with the substitution,
+    then substitutes in the LRT (postcondition).
+    CN ref: returnTypes.ml:16-19 (subst with suitably_alpha_rename) -/
 def subst (σ : Subst) (rt : ReturnType) : ReturnType :=
-  { rt with lrt := rt.lrt.subst σ }
+  let (sym', lrt') := if σ.relevant.contains rt.sym.id then
+    let sym' := freshSymFor rt.sym σ.relevant
+    let renameσ := Subst.single rt.sym (AnnotTerm.mk (.sym sym') rt.bt default)
+    (sym', rt.lrt.subst renameσ)
+  else (rt.sym, rt.lrt)
+  { rt with sym := sym', lrt := LRT.subst σ lrt' }
 
 end ReturnType
 
@@ -372,6 +418,21 @@ namespace LabelContext
 def get? (ctx : LabelContext) (sym : Sym) : Option LabelEntry :=
   ctx.lookup sym.id
 
+/-- Get the loop ID from a label's annotations if it has an LAloop annotation.
+    Corresponds to: get_label_annot + match LAloop in CN -/
+private def getLoopIdFromAnnots (annots : Core.Annots) : Option Nat :=
+  annots.findSome? fun
+    | .label (.loop id) => some id
+    | _ => none
+
+/-- Get the label kind from a label's annotations.
+    Corresponds to: get_label_annot in annot.lem -/
+private def getLabelKindFromAnnots (annots : Core.Annots) : LabelKind :=
+  match annots.findSome? (fun | .label a => some a | _ => none) with
+  | some (Core.LabelAnnot.return_) => .return_
+  | some (Core.LabelAnnot.loop _) => .loop
+  | _ => .other
+
 /-- Create label context from function spec and label definitions.
     Corresponds to: WProc.label_context in wellTyped.ml line 2474
 
@@ -393,9 +454,12 @@ def get? (ctx : LabelContext) (sym : Sym) : Option LabelEntry :=
     Parameters:
     - spec: Function specification (contains return symbol and postcondition)
     - returnBt: Base type of the return value
-    - labelDefs: Label definitions from muCore transformation -/
+    - labelDefs: Label definitions from muCore transformation
+    - loopLabelTypes: Pre-built label types for loop labels, keyed by label sym ID.
+      Built by the caller (Params.lean) using loop_attributes and saveArgCTypes. -/
 def ofLabelDefs (spec : FunctionSpec) (returnBt : BaseType)
-    (labelDefs : Core.MuCore.LabelDefs) : LabelContext :=
+    (labelDefs : Core.MuCore.LabelDefs)
+    (loopLabelTypes : List (Nat × LT) := []) : LabelContext :=
   labelDefs.filterMap fun (symId, labelDef) =>
     match labelDef with
     | .return_ loc =>
@@ -404,11 +468,28 @@ def ofLabelDefs (spec : FunctionSpec) (returnBt : BaseType)
       let lt := LT.ofFunctionSpec spec returnBt
       some (symId, { lt := lt, kind := .return_, loc := loc })
     | .label info =>
-      -- Regular label: for now, create a simple label type
-      -- Full implementation would derive from label's own type
-      -- TODO: Implement WLabel.typ equivalent for regular labels
-      let lt : LT := .L LAT.terminalValue
-      some (symId, { lt := lt, kind := .other, loc := info.loc })
+      -- Determine label kind from annotations
+      let kind := getLabelKindFromAnnots info.annots
+      match kind with
+      | .loop =>
+        -- Loop label: use pre-built label type if available
+        -- Corresponds to: Loop case in WProc.label_context (wellTyped.ml:2483-2486)
+        match loopLabelTypes.lookup symId with
+        | some lt => some (symId, { lt := lt, kind := .loop, loc := info.loc })
+        | none =>
+          -- Fallback: create label type with correct number of computational args
+          -- but no resource/constraint clauses.
+          -- DIVERGES-FROM-CN: CN's make_label_args also produces Owned resources
+          -- and invariant constraints. We build a minimal type with just args.
+          let lt := info.params.foldr (init := (.L LAT.terminalValue : LT)) fun (sym, _bt) acc =>
+            .computational sym .loc { loc := info.loc, desc := s!"loop var {sym.name.getD ""}" } acc
+          some (symId, { lt := lt, kind := .loop, loc := info.loc })
+      | _ =>
+        -- Non-loop non-return label: create a simple label type with args
+        -- Corresponds to: Non_inlined case in WProc.label_context
+        let lt := info.params.foldr (init := (.L LAT.terminalValue : LT)) fun (sym, _bt) acc =>
+          .computational sym .loc { loc := info.loc, desc := s!"label var {sym.name.getD ""}" } acc
+        some (symId, { lt := lt, kind := .other, loc := info.loc })
 
 end LabelContext
 

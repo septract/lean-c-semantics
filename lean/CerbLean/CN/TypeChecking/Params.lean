@@ -40,6 +40,7 @@ import CerbLean.Core
 import CerbLean.Core.Ctype
 import CerbLean.Core.MuCore
 import CerbLean.CN.Types
+import CerbLean.CN.Parser
 import CerbLean.CN.TypeChecking.Check
 import CerbLean.CN.TypeChecking.Expr
 import CerbLean.CN.TypeChecking.Resolve
@@ -184,6 +185,165 @@ def tryCtypeToCN (ct : Core.Ctype) : Option BaseType :=
   -- Use the same logic as Resolve.ctypeToOutputBaseType
   some (Resolve.ctypeToOutputBaseType ct)
 
+/-! ## Loop Label Type Building
+
+Build proper label types for loop labels. Each loop label needs:
+1. Computational args with Loc type (pointers to stack slots)
+2. Owned<T> resource for each arg (matches what Create+Store produced)
+3. Constraint clauses from the loop invariant
+
+Corresponds to: make_label_args in core_to_mucore.ml lines 697-742
+-/
+
+/-- Extract cerb::magic text from a LoopAttribute's attributes.
+    Corresponds to: get_cerb_magic_attr in annot.lem -/
+private def getLoopMagicText (la : Core.LoopAttribute) : List String :=
+  la.attributes.attrs.foldl (init := []) fun acc attr =>
+    match attr.ns, attr.id with
+    | some "cerb", "magic" => acc ++ attr.args.map (·.arg)
+    | _, _ => acc
+
+/-- Parse invariant constraints from a magic text string.
+    The format is: " inv expr1; expr2; expr3; "
+    Returns parsed constraint AnnotTerms. -/
+private def parseInvariantConstraints (text : String) : Except String (List AnnotTerm) := do
+  -- Strip leading whitespace and "inv" keyword
+  let text := text.trim
+  let text := if text.startsWith "inv " then text.drop 4
+              else if text.startsWith "inv\n" then text.drop 4
+              else text
+  -- Split on semicolons and parse each constraint
+  let parts := text.splitOn ";"
+  parts.foldlM (init := []) fun acc part =>
+    let part := part.trim
+    if part.isEmpty then pure acc
+    else match CN.Parser.runParser CN.Parser.expr part with
+      | .ok term => pure (acc ++ [term])
+      | .error e => .error s!"failed to parse invariant expression '{part}': {e}"
+
+/-- Build an Owned<ct>(Init) resource request for a pointer.
+    Corresponds to: Translate.ownership in core_to_mucore.ml line 713 -/
+private def mkOwnedRequest (ct : Core.Ctype) (ptrTerm : AnnotTerm) : Request :=
+  .p { name := .owned (some ct) .init, pointer := ptrTerm, iargs := [] }
+
+/-- Build a pre-built loop label type for a single loop label.
+    Corresponds to: make_label_args in core_to_mucore.ml lines 697-742
+
+    The label type has:
+    - Computational args (one per loop variable, type = Loc)
+    - LAT with Owned resources (one per loop variable)
+    - LAT with invariant constraints (from the loop annotation)
+    - Terminal LAT.I False_.false_
+
+    Parameters:
+    - info: The label definition info (params, annotations)
+    - loopAttributes: Loop attributes from the Core File
+    - saveArgCTypes: C types for save args from the parser
+    - symId: The label's symbol ID
+    - resolveCtx: Context for resolving invariant expression symbols -/
+private def buildLoopLabelType
+    (info : Core.MuCore.LabelInfo)
+    (loopAttributes : Core.LoopAttributes)
+    (saveArgCTypes : List (Nat × List (Option Core.Sym × Core.Ctype)))
+    (symId : Nat)
+    (resolveCtx : Resolve.ResolveContext)
+    : Except String LT := do
+  -- Step 1: Get the loop ID from annotations
+  let loopIdOpt := info.annots.findSome? fun
+    | .label (.loop id) => some id
+    | _ => none
+
+  -- Step 2: Get the C types for the args from saveArgCTypes
+  let argCTypes ← match saveArgCTypes.lookup symId with
+    | some cts => pure cts
+    | none => .error s!"no C types found for loop label {symId}"
+
+  -- Step 3: Get invariant text from loop_attributes
+  let invariantTexts := match loopIdOpt with
+    | some loopId =>
+      match loopAttributes.lookup loopId with
+      | some la => getLoopMagicText la
+      | none => []
+    | none => []
+
+  -- Step 4: Parse and resolve invariant constraints
+  -- Pre-compute output symbols for each loop variable. These correspond to the
+  -- loaded values that resource consumption will bind (not the pointer symbols).
+  -- Constraints reference these output symbols, matching CN's make_label_args:
+  -- AT { Computational(ptr) { L { Resource(val, Owned(ptr)) { Constraint(val >= 0) } } } }
+  let loopVarOutputs := info.params.zip argCTypes |>.map fun ((sym, _bt), (_argSymOpt, ct)) =>
+    let outputBt := Resolve.ctypeToOutputBaseType ct
+    -- QUALITY: ideally use a proper fresh counter instead of ID offset.
+    -- Using large offset to avoid collisions with other symbols.
+    let outputSym : Sym := { id := sym.id + 1000000, name := sym.name.map (· ++ "_out") }
+    (sym, ct, outputSym, outputBt)
+
+  -- Resolve context maps variable NAMES to their loaded VALUE symbols (output symbols),
+  -- not the pointer symbols. This ensures `i <= n` in an invariant refers to the
+  -- loaded value of `i`, not the stack slot pointer.
+  let loopVarEntries := loopVarOutputs.filterMap fun (sym, _, outputSym, outputBt) =>
+    sym.name.map fun name => (name, outputSym, outputBt)
+  let extendedCtx := { resolveCtx with
+    nameToSymType := resolveCtx.nameToSymType ++ loopVarEntries
+  }
+
+  let rawConstraints ← invariantTexts.foldlM (init := []) fun acc text => do
+    let parsed ← parseInvariantConstraints text
+    pure (acc ++ parsed)
+
+  -- Resolve constraint symbols against the extended resolve context
+  let resolvedConstraints ← rawConstraints.mapM fun constraint =>
+    match Resolve.resolveAnnotTerm extendedCtx constraint none with
+    | .ok resolved => pure resolved
+    | .error e => .error s!"failed to resolve invariant constraint: {repr e}"
+
+  -- Step 5: Build the LAT (logical argument type) part
+  -- Start with the terminal value
+  let baseLat : LAT False_ := LAT.terminalValue
+
+  -- Add invariant constraints
+  let latWithConstraints := resolvedConstraints.foldr (init := baseLat) fun constraint acc =>
+    .constraint (.t constraint) { loc := info.loc, desc := "loop invariant" } acc
+
+  -- Add Owned resources for each loop variable
+  -- Corresponds to: make_label_args ownership in core_to_mucore.ml:712-717
+  -- Each loop variable is a pointer to a stack slot with an Owned<ct>(Init) resource
+  -- Uses the SAME output symbols as the constraints above.
+  let latWithResources := loopVarOutputs.foldr (init := latWithConstraints)
+    fun (sym, ct, outputSym, outputBt) acc =>
+      let ptrTerm := AnnotTerm.mk (.sym sym) .loc info.loc
+      .resource outputSym (mkOwnedRequest ct ptrTerm) outputBt
+        { loc := info.loc, desc := s!"loop var {sym.name.getD ""} ownership" } acc
+
+  -- Step 6: Build the AT (argument type) with computational args
+  -- Each arg gets type Loc (pointer) matching what Erun passes
+  -- Corresponds to: make_label_args Computational ((s, Loc()), ...) in core_to_mucore.ml:736
+  pure (info.params.foldr (init := (.L latWithResources : LT)) fun (sym, _bt) acc =>
+    .computational sym .loc { loc := info.loc, desc := s!"loop var {sym.name.getD ""}" } acc)
+
+/-- Build loop label types for all loop labels in a function.
+    Returns a list of (label_sym_id, label_type) pairs.
+
+    Corresponds to: Loop case in WProc.label_context (wellTyped.ml:2483-2486) -/
+private def buildLoopLabelTypes
+    (labelDefs : Core.MuCore.LabelDefs)
+    (loopAttributes : Core.LoopAttributes)
+    (saveArgCTypes : List (Nat × List (Option Core.Sym × Core.Ctype)))
+    (resolveCtx : Resolve.ResolveContext)
+    : Except String (List (Nat × LT)) :=
+  labelDefs.foldlM (init := []) fun acc (symId, labelDef) =>
+    match labelDef with
+    | .label info =>
+      -- Check if this is a loop label
+      let isLoop := info.annots.any fun
+        | .label (.loop _) => true
+        | _ => false
+      if isLoop then do
+        let lt ← buildLoopLabelType info loopAttributes saveArgCTypes symId resolveCtx
+        pure (acc ++ [(symId, lt)])
+      else pure acc
+    | _ => pure acc
+
 /-! ## Main Function: Check Function With Parameters
 
 This is the main entry point for checking a function with its parameters.
@@ -212,6 +372,9 @@ It sets up the lazy muCore transformation by:
     - `cParams`: C-level parameter types from funinfo (sym × Ctype), giving actual value types
     - `retTy`: Core return type of the function
     - `loc`: Source location for error reporting
+    - `maxFileSymId`: Maximum symbol ID across all parsed symbols in the Core file.
+      Fresh symbols are generated starting from maxFileSymId + 1 to avoid collisions.
+      Corresponds to: CN initializes its fresh counter to max(all_parsed_symbol_ids) + 1.
 
     Corresponds to: WProc.check_procedure in wellTyped.ml lines 2467-2520 -/
 def checkFunctionWithParams
@@ -224,10 +387,15 @@ def checkFunctionWithParams
     (loc : Core.Loc)
     (functionSpecs : FunctionSpecMap := {})
     (funInfoMap : Core.FunInfoMap := {})
-    : TypeCheckResult :=
+    (tagDefs : Core.TagDefs := [])
+    (loopAttributes : Core.LoopAttributes := [])
+    (saveArgCTypes : List (Nat × List (Option Core.Sym × Core.Ctype)) := [])
+    (globals : List (Core.Sym × Core.GlobDecl) := [])
+    (maxFileSymId : Nat := 0)
+    : IO TypeCheckResult := do
   -- For trusted specs, skip verification
   if spec.trusted then
-    TypeCheckResult.ok
+    return TypeCheckResult.ok
   else
     -- Step 1: Get parameter IDs and scan for aliases
     let paramIds := params.map (·.1.id)
@@ -240,15 +408,15 @@ def checkFunctionWithParams
     --
     -- Fresh ID strategy (matching CN's approach):
     -- CN uses a global counter for fresh IDs that never collides with Cerberus IDs.
-    -- We compute the max param ID and start our fresh counter from there.
-    -- This ensures fresh symbols (like `return`) get unique IDs.
-    let maxParamId := params.foldl (init := 0) fun acc (sym, _) => max acc sym.id
-    let initialFreshId := maxParamId + 1
+    -- We use maxFileSymId (max of all parsed symbol IDs in the Core file) to start
+    -- our fresh counter, ensuring no collisions with any parsed symbol.
+    -- Corresponds to: CN's Sym.fresh_make_uniq initializing counter from max parsed ID.
+    let initialFreshId := maxFileSymId + 1
 
-    let setupResult : Except String (Context × ParamValueMap × Nat × List (Sym × BaseType)) :=
+    let setupResult : Except String (Context × ParamValueMap × Nat × List (Sym × BaseType) × List (String × Core.Ctype)) :=
       params.zip cParams |>.foldlM
-        (init := (Context.empty, ({} : ParamValueMap), initialFreshId, []))
-        fun (ctx, pvm, nextId, cnParamAcc) ((coreSym, _coreBt), (_, ctype)) =>
+        (init := (Context.empty, ({} : ParamValueMap), initialFreshId, [], []))
+        fun (ctx, pvm, nextId, cnParamAcc, cTypeAcc) ((coreSym, _coreBt), (_, ctype)) =>
           -- Use C type to get the actual value type
           match tryCtypeToCN ctype with
           | some cnBt =>
@@ -273,14 +441,19 @@ def checkFunctionWithParams
             -- Accumulate CN-level params for resolution (using coreSym for ID, cnBt for type)
             let cnParamAcc' := (coreSym, cnBt) :: cnParamAcc
 
-            Except.ok (ctx', pvm'', nextId, cnParamAcc')
+            -- Accumulate C types for pointer arithmetic elaboration
+            let cTypeAcc' := match coreSym.name with
+              | some name => (name, ctype) :: cTypeAcc
+              | none => cTypeAcc
+
+            Except.ok (ctx', pvm'', nextId, cnParamAcc', cTypeAcc')
           | none =>
             Except.error s!"Unsupported parameter type for {coreSym.name.getD "<unknown>"}: {repr ctype}"
 
     match setupResult with
     | .error msg =>
-      TypeCheckResult.fail msg
-    | .ok (paramCtx, paramValueMap, nextFreshId, cnParams) =>
+      return TypeCheckResult.fail msg
+    | .ok (paramCtx, paramValueMap, nextFreshId, cnParams, paramCTypes) =>
       -- Step 3: Convert return type to CN BaseType
       -- Corresponds to: WProc extracting return_bt from function type
       -- Prefer C return type (gives Bits types) over Core return type (gives unbounded Integer)
@@ -292,7 +465,7 @@ def checkFunctionWithParams
           | some bt => .ok bt
           | none => .error s!"Unsupported return type: {repr retTy}"
       match returnBtResult with
-      | .error msg => TypeCheckResult.fail msg
+      | .error msg => return TypeCheckResult.fail msg
       | .ok returnBt =>
 
       -- Step 4: Transform body to muCore form
@@ -304,34 +477,126 @@ def checkFunctionWithParams
       -- This is the CN-matching approach: resolve names to symbols before type checking.
       -- Corresponds to: CN's Cabs_to_ail.desugar_cn_* functions
       -- Pass return type so 'return' symbol gets the correct type
-      let resolveResult := (Resolve.resolveFunctionSpec spec cnParams.reverse returnBt nextFreshId).mapError fun e =>
+      let resolveResult := (Resolve.resolveFunctionSpec spec cnParams.reverse returnBt nextFreshId paramCTypes tagDefs globals).mapError fun e =>
         match e with
         | .symbolNotFound name => s!"Symbol not found: {name}"
         | .integerTooLarge n => s!"Integer too large for any CN type: {n}"
+        | .unknownPointeeType msg => s!"Pointer arithmetic error: {msg}"
+        | .other msg => s!"Resolution error: {msg}"
       match resolveResult with
-      | .error msg => TypeCheckResult.fail msg
-      | .ok resolvedSpec =>
+      | .error msg => return TypeCheckResult.fail msg
+      | .ok resolvedSpec0 =>
+      -- Step 5b: Inject `accesses` global resources into the spec.
+      -- `accesses g` generates implicit `take g = Owned<T>(&g)` in both requires
+      -- and ensures (the function borrows the global's resource).
+      -- Corresponds to: CN's handling of `accesses` in core_to_mucore.ml:718-723
+      let resolvedSpecResult : Except String _ := resolvedSpec0.resolvedAccesses.foldlM (init := resolvedSpec0) fun spec (globalName, valueSym, globalBt) =>
+        match globals.find? (fun (sym, _) => sym.name == some globalName) with
+        | some (globalSym, globDecl) =>
+          let globalCt := match globDecl with
+            | .def_ _ cTy _ => cTy
+            | .decl _ cTy => cTy
+          let ptrTerm : IndexTerm := AnnotTerm.mk (.sym globalSym) .loc Core.Loc.t.unknown
+          let clause : Clause := .resource valueSym {
+            request := .p {
+              name := .owned (some globalCt) .init
+              pointer := ptrTerm
+              iargs := []
+            }
+            output := { value := AnnotTerm.mk (.sym valueSym) globalBt Core.Loc.t.unknown }
+          }
+          .ok { spec with
+            requires := { clauses := clause :: spec.requires.clauses }
+            ensures := { clauses := clause :: spec.ensures.clauses }
+          }
+        | none => .error s!"unknown global '{globalName}' in accesses clause"
+      let resolvedSpec ← match resolvedSpecResult with
+        | .ok v => pure v
+        | .error msg => return TypeCheckResult.fail msg
+
       -- Step 6: Create label context from label definitions
       -- Corresponds to: WProc.label_context in wellTyped.ml line 2474
       -- Maps each label symbol to its type (LT) and kind (return, loop, other)
-      let labels := LabelContext.ofLabelDefs resolvedSpec returnBt muProc.labels
+      -- Build loop label types using invariant text from loop_attributes and
+      -- arg C types from saveArgCTypes.
+      -- The resolve context for invariant expressions includes function params
+      -- (so invariants can reference `n`, `p`, etc.)
+      let loopResolveCtx : Resolve.ResolveContext := {
+        nameToSymType := cnParams.reverse.filterMap fun (sym, bt) =>
+          sym.name.map fun name => (name, sym, bt)
+        nextFreshId := nextFreshId + 500
+        tagDefs := tagDefs
+      }
+      let loopLabelTypes ← match buildLoopLabelTypes muProc.labels loopAttributes saveArgCTypes loopResolveCtx with
+        | .ok v => pure v
+        | .error msg => return TypeCheckResult.fail msg
+      let labels := LabelContext.ofLabelDefs resolvedSpec returnBt muProc.labels loopLabelTypes
 
       -- Step 7: Initial context (resources will be added by processPrecondition)
       let initialCtx := paramCtx
 
-      -- Step 8: Create initial state with ParamValueMap, LabelDefs, and obligation accumulation
+      -- Step 8: Initialize inline solver (managed at IO level)
+      -- The preamble includes pointer datatype and struct declarations.
+      -- Corresponds to: init_solver in typing.ml + Solver.make → declare_solver_basics
+      let structPreamble ← match CerbLean.CN.Verification.SmtLib.generateStructPreamble
+        { tagDefs := tagDefs : CerbLean.Memory.TypeEnv } with
+        | .ok s => pure s
+        | .error msg => return TypeCheckResult.fail msg
+      let preamble := CerbLean.CN.Verification.SmtLib.pointerPreamble ++ structPreamble
+      let solverChild ← try
+        let proc ← IO.Process.spawn {
+          cmd := "cvc5"
+          args := #["--quiet", "--incremental", "--lang", "smt"]
+          stdin := .piped
+          stdout := .piped
+          stderr := .piped
+        }
+        proc.stdin.putStr preamble
+        proc.stdin.flush
+        pure (some proc)
+      catch e =>
+        return TypeCheckResult.fail s!"failed to start cvc5 solver: {e}"
+
+      -- Step 9: Create initial state with ParamValueMap, LabelDefs, solver, and obligations
+      -- freshCounter starts past all resolve-phase IDs (resolve uses nextFreshId+500 range)
       let initialState : TypingState := {
         context := initialCtx
-        freshCounter := nextFreshId + 1000  -- Leave room for resolution IDs
+        freshCounter := nextFreshId + 1000
         paramValues := paramValueMap
         labelDefs := muProc.labels  -- Label definitions from transformation
         functionSpecs := functionSpecs  -- Pre-built function types for ccall
         funInfoMap := funInfoMap  -- C-level function signatures for cfunction/params_length
+        tagDefs := tagDefs  -- Struct/union definitions for resource unpacking
+        solverStdin := solverChild.map (·.stdin)    -- Inline solver for provable queries (H5)
+        solverStdout := solverChild.map (·.stdout)
       }
 
-      -- Step 9: Run type checking on transformed body
+      -- Step 10: Run type checking on transformed body
       -- Corresponds to: check_expr_top in check.ml lines 2317-2330
       let computation : TypingM Unit := do
+        -- Declare all parameter variables to the inline solver.
+        -- Parameters were added to paramCtx directly (not via TypingM.addA which
+        -- calls solverDeclare), so we need to declare them explicitly here.
+        -- Corresponds to: init_solver declaring function params in typing.ml
+        for (sym, btOrVal, _) in initialCtx.computational do
+          TypingM.solverDeclare sym btOrVal.bt
+
+        -- Declare ghost parameters as logical variables in the context and solver.
+        -- Ghost params are logical-only (cn_ghost) and need to be available for
+        -- constraint evaluation in the precondition and postcondition.
+        -- Corresponds to: CN's add_logical for ghost params in compile.ml
+        for (ghostSym, ghostBt) in resolvedSpec.ghostParams do
+          TypingM.addL ghostSym ghostBt loc s!"ghost param {ghostSym.name.getD ""}"
+
+        -- Add global address symbols to computational context so that
+        -- `pure(g)` in the function body can resolve the global's address.
+        -- The Owned resources are already in the spec clauses (injected in step 5b).
+        for (globalName, _, _) in resolvedSpec.resolvedAccesses do
+          match globals.find? (fun (sym, _) => sym.name == some globalName) with
+          | some (globalSym, _) =>
+            TypingM.addA globalSym .loc loc s!"global address {globalName}"
+          | none => pure ()
+
         -- Process precondition: add resources to context, bind outputs
         processPrecondition resolvedSpec.requires loc
 
@@ -340,13 +605,23 @@ def checkFunctionWithParams
         -- fallthrough via Spine.subtype (for void functions)
         checkExprTop loc labels resolvedSpec returnBt muProc.body
 
-      match TypingM.run computation initialState with
+      let result ← TypingM.run computation initialState
+
+      -- Cleanup solver at IO level (regardless of success/failure)
+      if let some proc := solverChild then
+        try
+          proc.stdin.putStr "(exit)\n"
+          proc.stdin.flush
+          let _ ← proc.wait
+        catch _ => pure ()
+
+      match result with
       | .ok (_, finalState) =>
         -- Convert conditional failures to (Obligation, errorString) pairs
         let cfs := finalState.conditionalFailures.map fun cf =>
           (cf.obligation, toString cf.originalError)
-        TypeCheckResult.okWithAll finalState.obligations cfs
+        return TypeCheckResult.okWithAll finalState.obligations cfs
       | .error err =>
-        TypeCheckResult.fail (toString err)
+        return TypeCheckResult.fail (toString err)
 
 end CerbLean.CN.TypeChecking

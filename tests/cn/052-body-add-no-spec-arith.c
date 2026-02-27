@@ -2,6 +2,7 @@
 // Isolates: body-side binop type propagation without spec arithmetic
 void inc_ptr(int *p)
 /*@ requires take v = Owned<int>(p);
+             v <= 2147483646i32;
     ensures take v2 = Owned<int>(p); @*/
 {
     *p = *p + 1;

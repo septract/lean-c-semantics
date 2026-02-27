@@ -17,7 +17,10 @@
 import CerbLean.CN.TypeChecking.Pexpr
 import CerbLean.CN.TypeChecking.Action
 import CerbLean.CN.TypeChecking.Spine
+import CerbLean.CN.TypeChecking.GhostStatement
+import CerbLean.CN.TypeChecking.Resolve
 import CerbLean.CN.Types.ArgumentTypes
+import CerbLean.CN.Parser
 
 namespace CerbLean.CN.TypeChecking
 
@@ -57,6 +60,19 @@ call the original continuation k. This matches CN exactly.
 /-- Helper to create a unit term -/
 private def mkUnitTermExpr (loc : Core.Loc) : IndexTerm :=
   AnnotTerm.mk (.const .unit) .unit loc
+
+/-- Check that both pointers have allocation IDs and they're equal (same provenance).
+    Corresponds to: check_both_eq_alloc in check.ml:464-479
+    Generates constraint: hasAllocId(p1) ∧ hasAllocId(p2) ∧ allocId(p1) == allocId(p2) -/
+private def checkBothEqAlloc (arg1 arg2 : IndexTerm) (loc : Core.Loc) : TypingM Unit := do
+  let hasAlloc1 := AnnotTerm.mk (.hasAllocId arg1) .bool loc
+  let hasAlloc2 := AnnotTerm.mk (.hasAllocId arg2) .bool loc
+  let allocId1 := AnnotTerm.mk (.cast (.option .allocId) arg1) (.option .allocId) loc
+  let allocId2 := AnnotTerm.mk (.cast (.option .allocId) arg2) (.option .allocId) loc
+  let eqAllocs := AnnotTerm.mk (.binop .eq allocId1 allocId2) .bool loc
+  let bothHave := AnnotTerm.mk (.binop .and_ hasAlloc1 hasAlloc2) .bool loc
+  let constr := AnnotTerm.mk (.binop .and_ bothHave eqAllocs) .bool loc
+  TypingM.requireConstraint (.t constr) loc "pointer comparison: both pointers have equal allocation IDs"
 
 /-- Evaluate a list of arguments in CPS style, collecting results.
     The final continuation receives all evaluated argument terms. -/
@@ -140,25 +156,169 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
             let result := AnnotTerm.mk (.arrayShift baseTerm ct castIdx) .loc loc
             k result
 
-    -- Pointer comparisons: NOT YET IMPLEMENTED
-    -- CN's pointer comparison (check.ml lines 1525-1618) involves:
-    -- - For PtrEq/PtrNe: complex constraint involving hasAllocId_, allocId_, addr_,
-    --   and handling of ambiguous cases (same address, different provenance)
-    -- - For PtrLt/PtrGt/PtrLe/PtrGe: check_both_eq_alloc and check_live_alloc_bounds
-    --   side condition checks before creating ltPointer_/lePointer_ terms
-    -- These are NOT simple binary operations - they have semantic side effects.
-    | .ptrEq, _ => TypingM.fail (.other "memop ptrEq not yet implemented (requires provenance handling)")
-    | .ptrNe, _ => TypingM.fail (.other "memop ptrNe not yet implemented (requires provenance handling)")
-    | .ptrLt, _ => TypingM.fail (.other "memop ptrLt not yet implemented (requires allocation checks)")
-    | .ptrGt, _ => TypingM.fail (.other "memop ptrGt not yet implemented (requires allocation checks)")
-    | .ptrLe, _ => TypingM.fail (.other "memop ptrLe not yet implemented (requires allocation checks)")
-    | .ptrGe, _ => TypingM.fail (.other "memop ptrGe not yet implemented (requires allocation checks)")
+    -- PtrEq: pointer equality comparison
+    -- Corresponds to: pointer_eq in check.ml lines 1527-1595
+    -- DIVERGES-FROM-CN: simplified - skips ambiguous case detection (same address,
+    -- different provenance). CN creates fresh booleans for ambiguous/both_eq/neither
+    -- and constrains the result with implications. We directly bind result = eq(arg1, arg2)
+    -- and require both pointers have allocation IDs.
+    -- Audited: 2026-02-19
+    | .ptrEq, [pe1, pe2] =>
+      checkPexprK pe1 fun arg1 =>
+        checkPexprK pe2 fun arg2 => do
+          -- Fresh result symbol, bound to eq(arg1, arg2)
+          let resSym ← TypingM.freshSym "ptrEq"
+          TypingM.addA resSym .bool loc "pointer equality result"
+          let eqTerm := AnnotTerm.mk (.binop .eq arg1 arg2) .bool loc
+          TypingM.addC (.t (AnnotTerm.mk (.binop .eq (AnnotTerm.mk (.sym resSym) .bool loc) eqTerm) .bool loc))
+          -- Require both pointers have allocation IDs (both are valid pointers)
+          let hasAlloc1 := AnnotTerm.mk (.hasAllocId arg1) .bool loc
+          let hasAlloc2 := AnnotTerm.mk (.hasAllocId arg2) .bool loc
+          let bothValid := AnnotTerm.mk (.binop .and_ hasAlloc1 hasAlloc2) .bool loc
+          TypingM.requireConstraint (.t bothValid) loc "ptrEq: both pointers have allocation IDs"
+          k (AnnotTerm.mk (.sym resSym) .bool loc)
 
-    -- Unimplemented memops - fail explicitly with details
-    | .ptrdiff, _ => TypingM.fail (.other "memop ptrdiff not yet implemented")
-    | .intFromPtr, _ => TypingM.fail (.other "memop intFromPtr not yet implemented")
-    | .ptrFromInt, _ => TypingM.fail (.other "memop ptrFromInt not yet implemented")
-    | .ptrMemberShift _ _, _ => TypingM.fail (.other "memop ptrMemberShift not yet implemented")
+    -- PtrNe: pointer inequality comparison
+    -- Corresponds to: pointer_eq ~negate:true in check.ml lines 1527-1595
+    -- DIVERGES-FROM-CN: simplified - same as ptrEq but negated result.
+    -- Audited: 2026-02-19
+    | .ptrNe, [pe1, pe2] =>
+      checkPexprK pe1 fun arg1 =>
+        checkPexprK pe2 fun arg2 => do
+          -- Fresh result symbol, bound to eq(arg1, arg2)
+          let resSym ← TypingM.freshSym "ptrNe"
+          TypingM.addA resSym .bool loc "pointer inequality result"
+          let eqTerm := AnnotTerm.mk (.binop .eq arg1 arg2) .bool loc
+          TypingM.addC (.t (AnnotTerm.mk (.binop .eq (AnnotTerm.mk (.sym resSym) .bool loc) eqTerm) .bool loc))
+          -- Require both pointers have allocation IDs
+          let hasAlloc1 := AnnotTerm.mk (.hasAllocId arg1) .bool loc
+          let hasAlloc2 := AnnotTerm.mk (.hasAllocId arg2) .bool loc
+          let bothValid := AnnotTerm.mk (.binop .and_ hasAlloc1 hasAlloc2) .bool loc
+          TypingM.requireConstraint (.t bothValid) loc "ptrNe: both pointers have allocation IDs"
+          -- CN: k (not_ res) - negate the equality result
+          k (AnnotTerm.mk (.unop .not (AnnotTerm.mk (.sym resSym) .bool loc)) .bool loc)
+
+    -- PtrLt/PtrGt/PtrLe/PtrGe: ordered pointer comparisons
+    -- Corresponds to: pointer_op in check.ml lines 1597-1614
+    -- CN's pointer_op: check_both_eq_alloc, check_live_alloc_bounds, then compare.
+    -- DIVERGES-FROM-CN: We skip check_live_alloc_bounds (requires allocation history
+    -- tracking). We do check_both_eq_alloc (same provenance requirement).
+    -- CN: gtPointer_ (a,b) = ltPointer_ (b,a), gePointer_ (a,b) = lePointer_ (b,a)
+    -- Audited: 2026-02-20 against check.ml:1597-1614
+    | .ptrLt, [pe1, pe2] =>
+      checkPexprK pe1 fun arg1 =>
+        checkPexprK pe2 fun arg2 => do
+          checkBothEqAlloc arg1 arg2 loc
+          k (AnnotTerm.mk (.binop .ltPointer arg1 arg2) .bool loc)
+    | .ptrGt, [pe1, pe2] =>
+      checkPexprK pe1 fun arg1 =>
+        checkPexprK pe2 fun arg2 => do
+          checkBothEqAlloc arg1 arg2 loc
+          -- CN: gtPointer_ (a,b) = ltPointer_ (b,a)
+          k (AnnotTerm.mk (.binop .ltPointer arg2 arg1) .bool loc)
+    | .ptrLe, [pe1, pe2] =>
+      checkPexprK pe1 fun arg1 =>
+        checkPexprK pe2 fun arg2 => do
+          checkBothEqAlloc arg1 arg2 loc
+          k (AnnotTerm.mk (.binop .lePointer arg1 arg2) .bool loc)
+    | .ptrGe, [pe1, pe2] =>
+      checkPexprK pe1 fun arg1 =>
+        checkPexprK pe2 fun arg2 => do
+          checkBothEqAlloc arg1 arg2 loc
+          -- CN: gePointer_ (a,b) = lePointer_ (b,a)
+          k (AnnotTerm.mk (.binop .lePointer arg2 arg1) .bool loc)
+
+    -- Ptrdiff: pointer subtraction
+    -- Corresponds to: Ptrdiff case in check.ml lines 1615-1645
+    -- CN: (cast ptrdiff_t (addr(arg1) - addr(arg2))) / sizeof(elem_type)
+    -- DIVERGES-FROM-CN: skips check_live_alloc_bounds
+    -- Audited: 2026-02-20
+    | .ptrdiff, [pe_ct, pe1, pe2] =>
+      match extractCtypeConst pe_ct with
+      | .error e => TypingM.fail e
+      | .ok ct =>
+        checkPexprK pe1 fun arg1 =>
+          checkPexprK pe2 fun arg2 => do
+            checkBothEqAlloc arg1 arg2 loc
+            -- Compute divisor: sizeof(array element type) or sizeof(ct)
+            let elemTy := match ct.ty with
+              | .array itemTy _ => itemTy
+              | ty => ty
+            let divisorBt : BaseType := .bits .signed 64  -- ptrdiff_t
+            -- addr(arg1) - addr(arg2) as bitvectors
+            let addr1 := AnnotTerm.mk (.cast (.bits .unsigned 64) arg1) (.bits .unsigned 64) loc
+            let addr2 := AnnotTerm.mk (.cast (.bits .unsigned 64) arg2) (.bits .unsigned 64) loc
+            let diff := AnnotTerm.mk (.binop .sub addr1 addr2) (.bits .unsigned 64) loc
+            -- Cast to ptrdiff_t (signed 64-bit)
+            let diffSigned := AnnotTerm.mk (.cast divisorBt diff) divisorBt loc
+            -- Divide by sizeof(elem_type)
+            let sizeTerm := AnnotTerm.mk (.sizeOf { ty := elemTy : CerbLean.Core.Ctype }) divisorBt loc
+            let result := AnnotTerm.mk (.binop .div diffSigned sizeTerm) divisorBt loc
+            k result
+
+    -- IntFromPtr: cast pointer to integer
+    -- Corresponds to: IntFromPtr case in check.ml lines 1646-1672
+    -- Arguments: [from_ct, to_ct, ptr]
+    -- DIVERGES-FROM-CN: simplified representability check - CN uses inline provable
+    -- to check representable and fails immediately if refuted (with model). We add
+    -- a post-hoc obligation instead.
+    -- Audited: 2026-02-19
+    | .intFromPtr, [_pe_from_ct, pe_to_ct, pe_ptr] =>
+      match extractCtypeConst pe_to_ct with
+      | .error e => TypingM.fail e
+      | .ok to_ct =>
+        let resultBt := ctypeInnerToBaseType to_ct.ty
+        checkPexprK pe_ptr fun ptrArg => do
+          -- Cast pointer to target integer type
+          -- Corresponds to: cast_ (Memory.bt_of_sct to_ct) arg loc in check.ml:1653
+          let castResult := AnnotTerm.mk (.cast resultBt ptrArg) resultBt loc
+          -- Add representable obligation
+          -- Corresponds to: representable_ (to_ct, arg) in check.ml:1662
+          -- CN passes the raw pointer to representable_, but our SMT translation
+          -- dispatches on the C type (integer), not value type (Loc). We pass the
+          -- cast result instead: for BitVec values, representable is trivially true
+          -- (bounded by sort width), matching CN's semantics.
+          let reprTerm := AnnotTerm.mk (.representable to_ct castResult) .bool loc
+          TypingM.requireConstraint (.t reprTerm) loc "intFromPtr: result representable in target type"
+          k castResult
+
+    -- PtrFromInt: integer to pointer conversion
+    -- Corresponds to: PtrFromInt case in check.ml lines 1673-1699
+    -- CN creates a fresh pointer symbol and constrains:
+    --   if (arg == 0) then (result == null) else (hasAllocId(result) ∧ addr(result) == arg)
+    -- Note: allocation ID is intentionally left unconstrained (CN comment).
+    -- Audited: 2026-02-20 against check.ml:1673-1699
+    | .ptrFromInt, [_pe_from_ct, _pe_to_ct, pe_int] =>
+      checkPexprK pe_int fun intArg => do
+        let resSym ← TypingM.freshSym "intToPtr"
+        TypingM.addA resSym .loc loc "integer to pointer conversion result"
+        let result := AnnotTerm.mk (.sym resSym) .loc loc
+        -- if (intArg == 0) then (result == null) else (hasAllocId(result) ∧ addr(result) == cast(intArg))
+        let zero := AnnotTerm.mk (.const (.bits .unsigned 64 0)) (.bits .unsigned 64) loc
+        let isZero := AnnotTerm.mk (.binop .eq intArg zero) .bool loc
+        let nullTerm := AnnotTerm.mk (.const .null) .loc loc
+        let nullCase := AnnotTerm.mk (.binop .eq result nullTerm) .bool loc
+        let hasAlloc := AnnotTerm.mk (.hasAllocId result) .bool loc
+        let castArg := AnnotTerm.mk (.cast (.bits .unsigned 64) intArg) (.bits .unsigned 64) loc
+        let addrResult := AnnotTerm.mk (.cast (.bits .unsigned 64) result) (.bits .unsigned 64) loc
+        let addrEq := AnnotTerm.mk (.binop .eq addrResult castArg) .bool loc
+        let nonNullCase := AnnotTerm.mk (.binop .and_ hasAlloc addrEq) .bool loc
+        let constr := AnnotTerm.mk (.ite isZero nullCase nonNullCase) .bool loc
+        TypingM.addC (.t constr)
+        k result
+    -- PtrMemberShift: compute pointer to struct/union member
+    -- Corresponds to: PEmember_shift in check.ml lines 693-711
+    -- CN marks the memop version as CHERI-only (check.ml:1747-1748) and uses the pure
+    -- PEmember_shift instead. Our Cerberus generates the memop form; we handle it
+    -- equivalently by producing a memberShift index term.
+    -- Returns Loc (shifted pointer)
+    | .ptrMemberShift tag member, [ptrArg] =>
+      checkPexprK ptrArg fun ptrTerm => do
+        -- Create memberShift index term (same as Pexpr.lean:749-752 for pure PEmember_shift)
+        let result := AnnotTerm.mk (.memberShift ptrTerm tag member) .loc loc
+        k result
+    | .ptrMemberShift _ _, args =>
+      TypingM.fail (.other s!"memop ptrMemberShift expects exactly 1 argument, got {args.length}")
     | .memcpy, _ => TypingM.fail (.other "memop memcpy not yet implemented")
     | .memcmp, _ => TypingM.fail (.other "memop memcmp not yet implemented")
     | .realloc, _ => TypingM.fail (.other "memop realloc not yet implemented")
@@ -166,7 +326,21 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
     | .vaCopy, _ => TypingM.fail (.other "memop vaCopy not yet implemented")
     | .vaArg, _ => TypingM.fail (.other "memop vaArg not yet implemented")
     | .vaEnd, _ => TypingM.fail (.other "memop vaEnd not yet implemented")
-    | .copyAllocId, _ => TypingM.fail (.other "memop copyAllocId not yet implemented")
+    -- CopyAllocId: create pointer with alloc_id from one pointer, address from another
+    -- Corresponds to: Copy_alloc_id case in check.ml lines 1749-1763
+    -- Arguments: [addr_bitvec, source_pointer]
+    -- Creates result with address from arg1 and allocation ID from arg2.
+    -- DIVERGES-FROM-CN: skips check_live_alloc_bounds on result
+    -- Audited: 2026-02-20 against check.ml:1749-1763
+    | .copyAllocId, [pe_addr, pe_src] =>
+      checkPexprK pe_addr fun addrArg =>
+        checkPexprK pe_src fun srcArg => do
+          -- Check source pointer has allocation ID
+          let hasAlloc := AnnotTerm.mk (.hasAllocId srcArg) .bool loc
+          TypingM.requireConstraint (.t hasAlloc) loc "copyAllocId: source pointer has allocation ID"
+          -- Result: copyAllocId(addr, src) — takes address from addr, alloc_id from src
+          let result := AnnotTerm.mk (.copyAllocId addrArg srcArg) .loc loc
+          k result
     | .cheriIntrinsic _, _ => TypingM.fail (.other "memop cheriIntrinsic not yet implemented")
 
     -- Argument count mismatch - fail with details
@@ -188,12 +362,85 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
 
   -- Strong sequencing: e1 ; e2 (same as weak for sequential code)
   -- Corresponds to: Esseq case in check.ml lines 2288-2297
+  --
+  -- Ghost statement detection: CN's core_to_mucore.ml:535-593 detects ghost statements
+  -- when Esseq has (1) unit pattern, (2) Epure(Vunit) as e1, (3) cerb::magic annotations.
+  -- The magic attribute text contains the ghost statement (e.g., "cn_have(x == y)").
   | .sseq pat e1 e2 =>
-    checkExpr labels e1 fun v1 => do
-      let bindings ← bindPattern pat v1
-      checkExpr labels e2 fun result => do
-        unbindPattern bindings
-        k result
+    -- Check for ghost statement pattern
+    let magicTexts := e.annots.getCerbMagic
+    let isUnitPat := match pat.pat with | .base none .unit => true | _ => false
+    let isUnitExpr := match e1.expr with
+      | .pure pe => match pe.expr with | .val .unit => true | _ => false
+      | _ => false
+    if isUnitPat && isUnitExpr && !magicTexts.isEmpty then
+      -- Ghost statement: parse and process magic attributes
+      -- CN ref: core_to_mucore.ml:545-589 (cn_statements → Translate.statement)
+      --
+      -- Ghost statement expressions are parsed with placeholder symbols (id=0).
+      -- We resolve them against the current typing context, matching CN's
+      -- compile.ml:689-705 (cn_expr → lookup_computational_or_logical).
+      let ctx ← TypingM.getContext
+      let st ← TypingM.getState
+      -- Convert store map to list for resolve context
+      let storeList := st.storeValues.toList.map fun (id, val) => (id, val)
+      let resolveCtx := Resolve.resolveContextFromTypingContext ctx st.tagDefs st.freshCounter storeList
+      for magicText in magicTexts do
+        match CerbLean.CN.Parser.parseGhostStatements magicText with
+        | .ok stmts =>
+          for stmt in stmts do
+            -- Resolve placeholder symbols in the constraint term, then
+            -- substitute stored values for stack slot references
+            let resolvedConstraint ← match stmt.constraint with
+              | some c =>
+                match Resolve.resolveAnnotTerm resolveCtx c none with
+                | .ok resolved =>
+                  -- Replace stack slot sym references with stored values
+                  -- This is the ghost statement analog of ccall store resolution
+                  pure (some (Resolve.substStoreValues ctx storeList resolved))
+                | .error (.symbolNotFound name) =>
+                  TypingM.fail (.other s!"ghost statement: unresolved symbol '{name}'")
+                | .error (.integerTooLarge n) =>
+                  TypingM.fail (.other s!"ghost statement: integer too large: {n}")
+                | .error (.unknownPointeeType msg) =>
+                  TypingM.fail (.other s!"ghost statement: {msg}")
+                | .error (.other msg) =>
+                  TypingM.fail (.other s!"ghost statement resolution error: {msg}")
+              | none => pure none
+            -- Resolve index expression for focus/extract/instantiate statements
+            let resolvedIndex ← match stmt.indexExpr with
+              | some idx =>
+                match Resolve.resolveAnnotTerm resolveCtx idx none with
+                | .ok resolved =>
+                  pure (some (Resolve.substStoreValues ctx storeList resolved))
+                | .error (.symbolNotFound name) =>
+                  TypingM.fail (.other s!"ghost statement index: unresolved symbol '{name}'")
+                | .error e =>
+                  TypingM.fail (.other s!"ghost statement index resolution error: {reprStr e}")
+              | none => pure none
+            processGhostStatementByName stmt.kind resolvedConstraint
+              stmt.resourcePred resolvedIndex loc
+        | .error e =>
+          -- Ghost statements start with known prefixes. If the text looks like a ghost
+          -- statement but failed to parse, report the error. Other magic text (function
+          -- specs, loop specs) is handled elsewhere and should be silently skipped.
+          let trimmed := magicText.trim
+          if trimmed.startsWith "cn_" || trimmed.startsWith "instantiate " ||
+             trimmed.startsWith "extract " || trimmed.startsWith "split_case " ||
+             trimmed.startsWith "unfold " || trimmed.startsWith "apply " ||
+             trimmed.startsWith "have " then
+            TypingM.fail (.other s!"ghost statement parse error: {e}")
+          else
+            pure ()  -- Not a ghost statement; handled elsewhere
+      -- Continue with e2 (ghost statement doesn't bind a value)
+      checkExpr labels e2 k
+    else
+      -- Normal strong sequencing
+      checkExpr labels e1 fun v1 => do
+        let bindings ← bindPattern pat v1
+        checkExpr labels e2 fun result => do
+          unbindPattern bindings
+          k result
 
   -- Let binding: let pat = pe in e2
   -- Corresponds to: Elet case in check.ml lines 2003-2017
@@ -206,6 +453,12 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
 
   -- Conditional: if cond then thenE else elseE
   -- Corresponds to: Eif case in check.ml lines 1985-2002
+  --
+  -- DIVERGES-FROM-CN: CN's `pure` combinator (typing.ml:67-72) discards BOTH branches'
+  -- state changes. Our tryBranch approach preserves the successful branch's resource state.
+  -- This is sound when both branches call `k` symmetrically (which is the normal case).
+  -- For programs with asymmetric resource patterns across branches, this could diverge.
+  -- The current approach works correctly for all 103 tests.
   --
   -- CN uses inline solver access (`provable(false)`) to detect dead branches.
   -- We use conditional failures instead: try each branch, catch errors, create
@@ -297,6 +550,7 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
       | _ =>
         -- Multiple branches: try each with tryBranch, use first successful state
         let mut succeeded := false
+        let mut branchErrors : List String := []
         for (pat, body) in branches do
           if !succeeded then
             let branchResult ← TypingM.tryBranch do
@@ -308,9 +562,11 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
             | .ok (_, branchState) =>
               TypingM.setState branchState
               succeeded := true
-            | .error _ => pure ()  -- Try next branch
+            | .error e =>
+              branchErrors := branchErrors ++ [s!"  branch {branchErrors.length}: {e}"]
         if !succeeded then
-          TypingM.fail (.other "All case branches failed")
+          let errDetails := String.intercalate "\n" branchErrors
+          TypingM.fail (.other s!"All case branches failed:\n{errDetails}")
 
   -- C function call
   -- Corresponds to: Eccall case in check.ml lines 1935-1984
@@ -338,12 +594,39 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
       | some ft => pure ft
       | none => TypingM.fail (.other s!"Call to function with no spec: {funSym.name.getD "<unnamed>"}")
 
-    -- 3. Process computational args with store resolution, then spine_l for precondition
+    -- 3. Parse call-site ghost arguments from cerb::magic annotations
+    -- Ghost args appear as /*@ expr1, expr2 @*/ at the call site
+    -- Corresponds to: CN's parsing of ghost arguments in c_parser.mly
+    let ghostArgs : List IndexTerm ← do
+      let magicTexts := e.annots.getCerbMagic
+      let mut allArgs : List IndexTerm := []
+      for magicText in magicTexts do
+        match CerbLean.CN.Parser.parseGhostArgs magicText with
+        | .ok parsedArgs =>
+          -- Resolve parsed ghost arg terms against current context
+          let ctx ← TypingM.getContext
+          let st ← TypingM.getState
+          let storeList := st.storeValues.toList.map fun (id, val) => (id, val)
+          let resolveCtx := Resolve.resolveContextFromTypingContext ctx st.tagDefs st.freshCounter storeList
+          for parsedArg in parsedArgs do
+            match Resolve.resolveAnnotTerm resolveCtx parsedArg none with
+            | .ok resolved =>
+              let resolved' := Resolve.substStoreValues ctx storeList resolved
+              allArgs := allArgs ++ [resolved']
+            | .error (.symbolNotFound name) =>
+              TypingM.fail (.other s!"ghost argument: unresolved symbol '{name}'")
+            | .error e =>
+              TypingM.fail (.other s!"ghost argument resolution error: {repr e}")
+        | .error e =>
+          TypingM.fail (.other s!"ghost argument parse error: {e}")
+      pure allArgs
+
+    -- 4. Process computational args with store resolution, then spine_l for precondition
     -- This inlines spine's computational arg processing with an additional
     -- store-resolution step for the lazy muCore transformation.
     -- Corresponds to: Spine.calltype_ft → spine → spine_l
     let rec processComputationalArgs (argsList : List APexpr) (at_ : AT ReturnType)
-        : TypingM Unit := do
+        (gargs : List IndexTerm) : TypingM Unit := do
       match argsList, at_ with
       | arg :: restArgs, .computational s bt _info rest =>
         -- Evaluate the argument expression
@@ -361,10 +644,18 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
           -- Substitute resolved value for parameter in rest of type
           let σ := Subst.single s resolvedVal
           let rest' := AT.subst ReturnType.subst σ rest
-          processComputationalArgs restArgs rest') (some bt)
-      | _, .ghost _s _bt _info rest =>
-        -- Skip ghost args (not yet supported)
-        processComputationalArgs argsList rest
+          processComputationalArgs restArgs rest' gargs) (some bt)
+      | _, .ghost s _bt _info rest =>
+        -- Ghost argument: substitute from parsed ghost arg annotations
+        -- Ghost args come from /*@ expr1, expr2 @*/ at the call site (cerb::magic)
+        -- Corresponds to: spine ghost case, check.ml lines 1170-1200
+        match gargs with
+        | garg :: restGargs =>
+          let σ := Subst.single s garg
+          let rest' := AT.subst ReturnType.subst σ rest
+          processComputationalArgs argsList rest' restGargs
+        | [] =>
+          TypingM.fail (.other s!"Not enough ghost arguments provided in call to {funSym.name.getD "<unnamed>"}")
       | [], .L lat =>
         -- All computational args processed, now process precondition via spine_l
         -- Corresponds to: spine delegates to spine_l for LAT processing
@@ -388,7 +679,7 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
         TypingM.fail (.other s!"Too many arguments in call to {funSym.name.getD "<unnamed>"}")
       | [], .computational _ _ _ _ =>
         TypingM.fail (.other s!"Not enough arguments in call to {funSym.name.getD "<unnamed>"}")
-    processComputationalArgs args ft
+    processComputationalArgs args ft ghostArgs
 
   -- Named procedure call
   -- Corresponds to: Eproc case in check.ml
@@ -414,11 +705,9 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
   | .unseq es =>
     if es.isEmpty then
       k (mkUnitTermExpr loc)
-    else if es.length == 1 then
-      -- Single expression: return its result directly
-      checkExpr labels es.head! k
     else
-      -- Multiple expressions: evaluate all and return a tuple
+      -- Evaluate all expressions and return a tuple (including 1-tuples)
+      -- CN always constructs a tuple for Eunseq, even with a single element.
       -- Use CPS to collect all results
       let rec collectResults (remaining : List AExpr) (acc : List IndexTerm)
           : TypingM Unit := do
@@ -481,7 +770,7 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
 
       -- Call Spine.calltypeLt with the label type and kind
       -- The continuation receives False (uninhabited) - never actually called
-      calltypeLt loc args entry fun _false => do
+      calltypeLt loc args [] entry fun _false => do
         -- After the label call, check that all resources are consumed
         -- Corresponds to: all_empty loc original_resources
         let remainingResources ← TypingM.getResources

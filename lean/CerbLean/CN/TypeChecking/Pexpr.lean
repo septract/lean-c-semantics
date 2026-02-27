@@ -482,7 +482,7 @@ partial def bindPattern (pat : APattern) (value : IndexTerm) : TypingM PatternBi
     -- the value's type when the pattern annotation is insufficient.
     let cnBt := match coreBaseTypeToCN bt with
       | some t => t
-      | none => value.bt  -- Pattern annotation insufficient; use actual value type
+      | none => value.bt  -- Pattern annotation insufficient (e.g., `loaded integer`); use value's type
     TypingM.addAValue sym value loc s!"pattern binding {sym.name.getD ""}"
     return { boundVars := [(sym, cnBt)] }
   | .base none _ =>
@@ -649,27 +649,117 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
     return AnnotTerm.mk (.unop .not t) .bool loc
 
   -- Conditional
-  -- Propagate expected type to both branches.
-  -- Process both branches, then cross-propagate types: if one branch produced
-  -- a more specific type (e.g., bits signed 32 vs integer from undef), re-check
-  -- the weaker branch with the stronger type as expectedBt. This ensures dead
-  -- branches (undef) get the correct type annotation for SMT translation.
+  -- Corresponds to: PEif in cn/lib/check.ml lines 1034-1056
+  -- CN passes path conditions to each branch:
+  --   check_pexpr (c :: path_cs) e1     -- then branch gets condition
+  --   check_pexpr (not_ c :: path_cs) e2  -- else branch gets negated condition
+  -- CN's `provable` wraps checks with: (and path_cs) => constraint
+  -- In our post-hoc model, we add path conditions as constraints so that
+  -- obligations generated inside branches (e.g., PEundef unreachability)
+  -- have the branch condition in their assumptions.
+  --
+  -- **Lazy muCore**: When the else branch is PEundef, this is a Core IR safety
+  -- guard pattern (e.g., PtrValidForDeref → ptr, else undef). CN's muCore
+  -- transformation (core_to_mucore.ml) strips these guards entirely — the type
+  -- checker never sees PEundef from guards. We match this by skipping the undef
+  -- branch and returning only the then-branch result.
+  -- Note: When the THEN branch is undef (e.g., division by zero), we do NOT strip
+  -- it — those are genuine safety checks handled by the four-way pattern.
   | .if_ cond thenE elseE =>
     let peCond : APexpr := ⟨[], some .boolean, cond⟩
     let peThen : APexpr := ⟨[], pe.ty, thenE⟩
     let peElse : APexpr := ⟨[], pe.ty, elseE⟩
     let tCond ← checkPexpr peCond (some .bool)
+    -- Lazy muCore: strip guard patterns where the ELSE branch is PEundef.
+    -- CN's muCore transformation removes these entirely (core_to_mucore.ml).
+    -- Pattern: ite(PtrValidForDeref, value, undef) → value
+    -- Safety is guaranteed by the resource system (Owned<T>(ptr) implies
+    -- pointer validity), not by the PtrValidForDeref guard.
+    --
+    -- NOTE: We do NOT strip when THEN is undef (e.g., ite(y==0, undef, x/y)).
+    -- Those represent genuine safety checks (division by zero, etc.) that must
+    -- go through the normal four-way pattern to detect reachable undefined behavior.
+    match elseE with
+    | .undef _ _ =>
+      -- Guard pattern: ite(check, value, undef) → just return value
+      -- Corresponds to: core_to_mucore.ml stripping PtrValidForDeref guards
+      let tThen ← checkPexpr peThen expectedBt
+      return tThen
+    | _ =>
+    -- Normal conditional (not a guard pattern).
+    -- CN's four-way pruning pattern (check.ml lines 1039-1056):
+    -- Query both provable(c) and provable(¬c) up front, then match:
+    --   (proved, proved)  → inconsistent context, return default
+    --   (proved, _)       → only then-branch
+    --   (_, proved)       → only else-branch
+    --   (_, _)            → check both with path conditions
+    -- CN trusts the inline solver for path decisions and does NOT emit
+    -- backing obligations for pruned branches (the solver is treated as
+    -- a sound oracle for the path condition check).
+    let savedConstraints ← TypingM.getConstraints
+    let notCond := AnnotTerm.mk (.unop .not tCond) .bool loc
+    let condResult ← TypingM.provable (.t tCond)
+    let negResult ← TypingM.provable (.t notCond)
+    match condResult, negResult with
+    | .proved, .proved =>
+      -- Inconsistent context: both c and ¬c are provable.
+      -- Any term is valid here; CN returns default_ (check.ml:1044-1046).
+      -- Corresponds to: return (default_ expect loc)
+      let bt ← match expectedBt with
+        | some bt => pure bt
+        | none => requireCoreBaseTypeToCN pe.ty "PEif inconsistent context"
+      return AnnotTerm.mk (.const (.default bt)) bt loc
+    | .proved, _ =>
+      -- Condition is provable: only check then-branch.
+      -- Corresponds to: check_pexpr path_cs e1 (check.ml:1049)
+      TypingM.solverPush
+      TypingM.addC (.t tCond)
+      let tThen ← checkPexpr peThen expectedBt
+      TypingM.modifyContext (fun ctx => { ctx with constraints := savedConstraints })
+      TypingM.solverPop
+      return tThen
+    | _, .proved =>
+      -- Negation is provable: only check else-branch.
+      -- Corresponds to: check_pexpr path_cs e2 (check.ml:1052)
+      TypingM.solverPush
+      TypingM.addC (.t notCond)
+      let tElse ← checkPexpr peElse expectedBt
+      TypingM.modifyContext (fun ctx => { ctx with constraints := savedConstraints })
+      TypingM.solverPop
+      return tElse
+    | _, _ =>
+    -- Neither provable: check both branches with path conditions.
+    -- Corresponds to: check_pexpr (c :: path_cs) e1 / (not_ c :: path_cs) e2
+    TypingM.solverPush
+    TypingM.addC (.t tCond)
     let tThen ← checkPexpr peThen expectedBt
+    TypingM.modifyContext (fun ctx => { ctx with constraints := savedConstraints })
+    TypingM.solverPop
+    TypingM.solverPush
+    TypingM.addC (.t notCond)
     let tElse ← checkPexpr peElse expectedBt
-    -- Cross-propagate: if types differ and one is more specific, re-check
+    TypingM.modifyContext (fun ctx => { ctx with constraints := savedConstraints })
+    TypingM.solverPop
+    -- Cross-propagation (our enhancement, not in CN):
+    -- When branch types differ (e.g., Bits vs Integer), re-check the less-specific
+    -- branch with the more-specific type to get better type inference.
+    -- CN's PEif (check.ml:1034-1056) does not re-check branches for type refinement.
     let (tThen, tElse) ← match tThen.bt, tElse.bt with
       | .bits _ _, .integer =>
         -- Then has precise bits type, re-check else with that type
+        TypingM.solverPush
+        TypingM.addC (.t notCond)
         let tElse' ← checkPexpr peElse (some tThen.bt)
+        TypingM.modifyContext (fun ctx => { ctx with constraints := savedConstraints })
+        TypingM.solverPop
         pure (tThen, tElse')
       | .integer, .bits _ _ =>
         -- Else has precise bits type, re-check then with that type
+        TypingM.solverPush
+        TypingM.addC (.t tCond)
         let tThen' ← checkPexpr peThen (some tElse.bt)
+        TypingM.modifyContext (fun ctx => { ctx with constraints := savedConstraints })
+        TypingM.solverPop
         pure (tThen', tElse)
       | _, _ => pure (tThen, tElse)
     return AnnotTerm.mk (.ite tCond tThen tElse) tThen.bt loc
@@ -816,8 +906,85 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
             TypingM.fail (.other s!"ivalignof: cannot compute alignment for {repr ct.ty} (requires type environment)")
         | _ => TypingM.fail (.other "ivalignof requires ctype constant argument")
       | _ => TypingM.fail (.other "ivalignof requires exactly 1 argument")
+    | .ivOR | .ivXOR | .ivAND =>
+      -- ivOR/ivXOR/ivAND(ctype, x, y) - bitwise binary operations
+      -- Corresponds to: CivAND | CivOR | CivXOR in cn/lib/check.ml lines 638-660
+      -- First arg is ctype, used to determine result base type via Memory.bt_of_sct
+      match args with
+      | [ctypeArg, arg2, arg3] =>
+        let peCtypeArg : APexpr := ⟨[], some .ctype, ctypeArg⟩
+        let tCtype ← checkPexpr peCtypeArg (some .ctype)
+        let ct ← match tCtype.term with
+          | .const (.ctypeConst ct) => pure ct
+          | _ => TypingM.fail (.other s!"{repr c} requires ctype constant as first argument")
+        let resBt := ctypeToBaseTypeBits ct
+        let peArg2 : APexpr := ⟨[], pe.ty, arg2⟩
+        let peArg3 : APexpr := ⟨[], pe.ty, arg3⟩
+        let t2 ← checkPexpr peArg2 (some resBt)
+        let t3 ← checkPexpr peArg3 (some resBt)
+        let op := match c with
+          | .ivOR => BinOp.bwOr
+          | .ivXOR => BinOp.bwXor
+          | .ivAND => BinOp.bwAnd
+          | _ => unreachable!
+        return AnnotTerm.mk (.binop op t2 t3) resBt loc
+      | _ => TypingM.fail (.other s!"{repr c} requires exactly 3 arguments (ctype, arg1, arg2)")
+    | .ivCOMPL =>
+      -- ivCOMPL(ctype, x) - bitwise complement
+      -- Corresponds to: CivCOMPL in cn/lib/check.ml lines 621-637
+      -- First arg is ctype, used to determine result base type via Memory.bt_of_sct
+      match args with
+      | [ctypeArg, arg2] =>
+        let peCtypeArg : APexpr := ⟨[], some .ctype, ctypeArg⟩
+        let tCtype ← checkPexpr peCtypeArg (some .ctype)
+        let ct ← match tCtype.term with
+          | .const (.ctypeConst ct) => pure ct
+          | _ => TypingM.fail (.other "ivCOMPL requires ctype constant as first argument")
+        let resBt := ctypeToBaseTypeBits ct
+        let peArg : APexpr := ⟨[], pe.ty, arg2⟩
+        let t ← checkPexpr peArg (some resBt)
+        return AnnotTerm.mk (.unop .bwCompl t) resBt loc
+      | _ => TypingM.fail (.other "ivCOMPL requires exactly 2 arguments (ctype, arg)")
+    | .nil elemCoreBt =>
+      -- Cnil: empty list constructor
+      -- Corresponds to: Cnil in cn/lib/check.ml lines 554-563
+      -- Audited: 2026-02-19
+      -- CN gets item_bt from the expected type (must be List item_bt),
+      -- then checks Core base type annotation against it.
+      -- We derive the element type from expectedBt if available,
+      -- otherwise from the Core-level elemCoreBt annotation.
+      match args with
+      | [] =>
+        let elemBt ← match expectedBt with
+          | some (.list elemBt) => pure elemBt
+          | some other => TypingM.fail (.other s!"Cnil: expected list type, got {repr other}")
+          | none =>
+            -- Fall back to Core type annotation on the Nil constructor
+            match coreBaseTypeToCN elemCoreBt with
+            | some bt => pure bt
+            | none => TypingM.fail (.other s!"Cnil: cannot determine element type from Core annotation {repr elemCoreBt}")
+        return AnnotTerm.mk (.nil elemBt) (.list elemBt) loc
+      | _ => TypingM.fail (.other s!"Cnil: expected 0 arguments, got {args.length}")
+    | .cons =>
+      -- Ccons: list cons constructor
+      -- Corresponds to: Ccons in cn/lib/check.ml lines 571-576
+      -- Audited: 2026-02-19
+      -- CN checks both args, then returns cons_(vt1, vt2) where the
+      -- result type is get_bt vt2 (the tail's type, which is List elemBt).
+      match args with
+      | [headArg, tailArg] =>
+        let peHead : APexpr := ⟨[], none, headArg⟩
+        let peTail : APexpr := ⟨[], none, tailArg⟩
+        -- Check head first, then tail with list type hint
+        let tHead ← checkPexpr peHead
+        let tailExpected := expectedBt.orElse (fun _ => some (.list tHead.bt))
+        let tTail ← checkPexpr peTail tailExpected
+        -- Result type comes from the tail (List elemBt)
+        -- Corresponds to: cons_ (it, it') loc = IT (Cons (it, it'), get_bt it', loc)
+        return AnnotTerm.mk (.cons tHead tTail) tTail.bt loc
+      | _ => TypingM.fail (.other s!"Ccons: expected 2 arguments, got {args.length}")
     | _ =>
-      -- Other constructors (nil, cons, array, etc.) are not supported
+      -- Other constructors (array, etc.) are not supported
       -- Do not create symbolic terms - fail explicitly
       TypingM.fail (.other s!"Unsupported constructor in expression: {repr c}")
 
@@ -977,6 +1144,31 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
           | _ => TypingM.fail (.other "params_nth: index is not a concrete integer")
         | none => TypingM.fail (.other "params_nth: first argument is not a concrete list")
       | _ => TypingM.fail (.other "params_nth: expected 2 arguments")
+    -- ctype_width: bit width of a C type (size_of_ctype * 8)
+    -- Corresponds to: check.ml lines 851-858 (PEcall "ctype_width")
+    -- Audited: 2026-02-19
+    -- CN evaluates the ctype argument, computes Memory.size_of_ctype * 8,
+    -- and returns as a num_lit_ at the expected bits type.
+    else if fnName == some "ctype_width" then
+      match args with
+      | [ctypeArg] =>
+        let peCt : APexpr := ⟨[], some .ctype, ctypeArg⟩
+        let tCt ← checkPexpr peCt (some .ctype)
+        match tCt.term with
+        | .const (.ctypeConst ct) =>
+          -- CN: Z.of_int (Memory.size_of_ctype ct * 8)
+          -- We use sizeOf to represent the byte size, then multiply by 8
+          -- However, CN evaluates this to a concrete integer. We represent
+          -- the width symbolically using sizeOf since we may not know the
+          -- concrete size at type-check time (e.g., structs).
+          -- Result type: CN uses Memory.size_bt = Bits(Unsigned, 64)
+          let resBt : BaseType := .bits .unsigned 64
+          -- Create: sizeOf(ct) * 8
+          let sizeOfTerm := AnnotTerm.mk (.sizeOf ct) resBt loc
+          let eight := AnnotTerm.mk (.const (.bits .unsigned 64 8)) resBt loc
+          return AnnotTerm.mk (.binop .mul sizeOfTerm eight) resBt loc
+        | _ => TypingM.fail (.other "ctype_width: argument is not a ctype constant")
+      | _ => TypingM.fail (.other s!"ctype_width: expected 1 argument, got {args.length}")
     else
       -- General function call
       let argTerms ← args.mapM fun arg => do
@@ -1030,22 +1222,27 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
     return AnnotTerm.mk (.struct_ tag memberTerms) resBt loc
 
   -- Undefined behavior marker
-  | .undef _uloc _ub =>
-    -- In CN, undef represents a path that leads to undefined behavior.
-    -- When we encounter it in a conditional branch, it means that branch
-    -- should not be taken. We return a symbolic term representing undefined.
-    -- The CN verifier will ensure this value is never actually used
-    -- (i.e., the path condition leading here is unsatisfiable).
-    -- Prefer expectedBt (from surrounding context) over pe.ty, since Core's
-    -- type for undef is often `loaded integer` which lacks sign/width info.
-    -- For `loaded integer`, use `.integer` since the value is never used and
-    -- the Core IR only tells us it's some integer type (no sign/width).
+  -- Corresponds to: PEundef in cn/lib/check.ml lines 1067-1074
+  -- CN calls `provable (LC.T (bool_ false))` to check if the path is unreachable:
+  --   - If provable (path is dead): return default value
+  --   - If not provable (UB is reachable): fail with Undefined_behaviour error
+  --
+  -- **Known divergence**: CN fails immediately when `provable(false)` returns False.
+  -- We instead generate a post-hoc obligation and continue. This is intentional:
+  -- the inline solver doesn't always have enough context to prove branches dead
+  -- (e.g., a function precondition `y != 0` may not be in the right SMT form when
+  -- a division-by-zero guard is checked). By deferring to obligations, we let the
+  -- full obligation discharge (Phase 4) make the final soundness decision.
+  -- The tradeoff: we may explore more paths than CN does, but we never miss a
+  -- genuine UB that CN would catch (obligations still fail for live UB paths).
+  | .undef _uloc ub =>
+    let falseTerm := AnnotTerm.mk (.const (.bool false)) .bool loc
+    TypingM.requireConstraint (.t falseTerm) loc s!"undefined behavior ({repr ub}) must be unreachable"
+    -- Return a default value (matches CN's `default_ expect loc` for dead paths)
     let resBt ← match expectedBt with
       | some bt => pure bt
       | none => match pe.ty with
         | some (.loaded .integer) | some (.object .integer) =>
-          -- Core says integer but no sign/width — use unbounded integer
-          -- This is safe because undef values are never actually used
           pure .integer
         | _ => requireCoreBaseTypeToCN pe.ty "undef expression"
     return AnnotTerm.mk (.sym undefSym) resBt loc
@@ -1090,43 +1287,72 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
       -- Non-constant: wrap in cast (symbolic conversion)
       return AnnotTerm.mk (.cast targetBt argVal) targetBt argVal.loc
     | _, _ =>
-      -- Non-Bits target type: pass through
-      return argVal
+      TypingM.fail (.other s!"conv_int: target type {repr targetBt} is not Bits")
 
   -- Wrap integer (modular arithmetic)
-  | .wrapI ty _op e1 e2 =>
-    -- Wrap integer: compute the operation with modular wrapping
-    -- Use the IntegerType to determine the proper Bits type for operands
-    -- Corresponds to: CN's handling of integer operations with Bits types
+  -- Corresponds to: PEwrapI in cn/lib/check.ml lines 945-985
+  -- CN performs the arithmetic operation; for bitvector types, modular wrapping
+  -- is inherent in the bitvec semantics (no explicit wrapI_ wrapper needed).
+  | .wrapI ty op e1 e2 =>
     let opBt := integerTypeToBaseType ty
     let pe1 : APexpr := ⟨[], none, e1⟩
     let pe2 : APexpr := ⟨[], none, e2⟩
     let t1 ← checkPexpr pe1 (some opBt)
     let t2 ← checkPexpr pe2 (some t1.bt)
-    -- Return a symbolic operation (the wrapping is implicit in the type)
-    return AnnotTerm.mk (.binop .add t1 t2) t1.bt loc
-
-  -- Catch exceptional condition (overflow checking)
-  | .catchExceptionalCondition ty op e1 e2 =>
-    -- Exceptional condition check: evaluate operation, checking for overflow
-    -- Use the IntegerType to determine the proper Bits type for operands
-    -- This is critical: ensures that 0 in "0 - x" (negation) gets Bits type
-    -- Corresponds to: CN's handling of PEcatch_exceptional_condition
-    let opBt := integerTypeToBaseType ty
-    let pe1 : APexpr := ⟨[], none, e1⟩
-    let pe2 : APexpr := ⟨[], none, e2⟩
-    let t1 ← checkPexpr pe1 (some opBt)
-    let t2 ← checkPexpr pe2 (some t1.bt)
-    -- Map the Iop to CN binop
+    -- Map Iop to CN BinOp (matches CN's check.ml lines 966-983)
     let cnOp ← match op with
       | .add => pure BinOp.add
       | .sub => pure BinOp.sub
       | .mul => pure BinOp.mul
       | .div => pure BinOp.div
       | .rem_t => pure BinOp.rem
-      | .shl => TypingM.fail (.other "shift left (shl) not supported in CN catch_exceptional_condition")
-      | .shr => TypingM.fail (.other "shift right (shr) not supported in CN catch_exceptional_condition")
+      | .shl => TypingM.fail (.other "shift left (shl) not yet supported in PEwrapI")
+      | .shr => TypingM.fail (.other "shift right (shr) not yet supported in PEwrapI")
     return AnnotTerm.mk (.binop cnOp t1 t2) t1.bt loc
+
+  -- Catch exceptional condition (overflow checking)
+  -- Corresponds to: PEcatch_exceptional_condition in CN check.ml:986-1033
+  -- CN computes at extended precision (2*width + 4 bits) and checks representability.
+  -- We generate a verification obligation for the overflow check.
+  | .catchExceptionalCondition ty op e1 e2 =>
+    let opBt := integerTypeToBaseType ty
+    let pe1 : APexpr := ⟨[], none, e1⟩
+    let pe2 : APexpr := ⟨[], none, e2⟩
+    let t1 ← checkPexpr pe1 (some opBt)
+    let t2 ← checkPexpr pe2 (some t1.bt)
+    let cnOp ← match op with
+      | .add => pure BinOp.add
+      | .sub => pure BinOp.sub
+      | .mul => pure BinOp.mul
+      | .div => pure BinOp.div
+      | .rem_t => pure BinOp.rem
+      | .shl => TypingM.fail (.other "shift left (shl) not supported in catch_exceptional_condition")
+      | .shr => TypingM.fail (.other "shift right (shr) not supported in catch_exceptional_condition")
+    -- Direct result at target precision (this is what gets returned to the caller)
+    let directResult := AnnotTerm.mk (.binop cnOp t1 t2) opBt loc
+    -- Extended-precision overflow check (CN check.ml:1003-1030)
+    -- Compute at wider bitvector to detect overflow before modular wrapping
+    let (_sign, width) ← match opBt with
+      | .bits s w => pure (s, w)
+      | _ => TypingM.fail (.other "catchExceptionalCondition: non-Bits operand type")
+    let extWidth := 2 * width + 4
+    let extBt : BaseType := .bits .signed extWidth
+    -- Cast operands to extended precision (CN check.ml:1005: large x = cast_ large_bt x)
+    let ext1 := AnnotTerm.mk (.cast extBt t1) extBt loc
+    let ext2 := AnnotTerm.mk (.cast extBt t2) extBt loc
+    -- Compute at extended precision (won't overflow with 2w+4 bits)
+    let extResult := AnnotTerm.mk (.binop cnOp ext1 ext2) extBt loc
+    -- Check representability: minInt ≤ extResult ≤ maxInt
+    -- CN check.ml:296-306: is_representable_integer
+    let minVal := intTypeMin ty
+    let maxVal := intTypeMax ty
+    let minTerm := AnnotTerm.mk (.const (.bits .signed extWidth minVal)) extBt loc
+    let maxTerm := AnnotTerm.mk (.const (.bits .signed extWidth maxVal)) extBt loc
+    let lowerBound := AnnotTerm.mk (.binop .le minTerm extResult) .bool loc
+    let upperBound := AnnotTerm.mk (.binop .le extResult maxTerm) .bool loc
+    let rangeCheck := AnnotTerm.mk (.binop .and_ lowerBound upperBound) .bool loc
+    TypingM.requireConstraint (.t rangeCheck) loc "UB036: exceptional condition (overflow)"
+    return directResult
 
   -- Type predicates (is_scalar, is_integer, etc.)
   -- These require actual type checking, not constant returns
@@ -1188,11 +1414,9 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
     | none => TypingM.fail (.other s!"cfunction: no function info for {funSym.name.getD "?"}")
 
   -- Union constructor
-  | .union_ tag member value =>
-    let peVal : APexpr := ⟨[], none, value⟩
-    let tVal ← checkPexpr peVal
-    -- For now, treat union like struct with single member
-    return AnnotTerm.mk (.struct_ tag [(member, tVal)]) (.struct_ tag) loc
+  -- CN does NOT support unions (check.ml:200: error "todo: union types")
+  | .union_ _tag _member _value =>
+    TypingM.fail (.other "union constructors not supported (CN: check.ml:200)")
 
   -- Pure memory operations (for memory model)
   | .pureMemop _op args =>
@@ -1207,14 +1431,10 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
     TypingM.modifyState fun s => { s with freshCounter := s.freshCounter + 1 }
     return AnnotTerm.mk (.apply memopSym argTerms) resBt loc
 
-  -- Constrained values (for memory model)
-  | .constrained constraints =>
-    -- Constrained values: evaluate constraints symbolically
-    for (_, constraint) in constraints do
-      let peCon : APexpr := ⟨[], some .boolean, constraint⟩
-      let _ ← checkPexpr peCon
-    -- Return a unit value (constraints are side effects)
-    return AnnotTerm.mk (.const .unit) .unit loc
+  -- Constrained values: Core memory model construct, not a CN pure expression.
+  -- CN's type checker never sees these directly.
+  | .constrained _constraints =>
+    TypingM.fail (.other "constrained values not supported in CN verification (Core memory model construct)")
 
   -- BMC assume
   | .bmcAssume e =>
@@ -1247,7 +1467,11 @@ where
     | .array => { id := 0, name := some "Array" }
     | .specified => { id := 0, name := some "Specified" }
     | .unspecified => { id := 0, name := some "Unspecified" }
-    | _ => { id := 0, name := some "Unknown" }
+    -- Remaining constructors are compile-time operations, not CN pattern constructors
+    | .ivmax | .ivmin | .ivsizeof | .ivalignof
+    | .ivCOMPL | .ivAND | .ivOR | .ivXOR
+    | .fvfromint | .ivfromfloat =>
+      panic! s!"ctorToSym: unsupported constructor: {repr c}"
 
   /-- Get maximum value of integer type.
       Uses 2^(w-1)-1 for signed, 2^w-1 for unsigned. -/
