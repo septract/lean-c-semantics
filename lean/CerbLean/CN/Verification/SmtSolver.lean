@@ -97,7 +97,10 @@ def checkObligation
       st.proc.stdin.putStr solverBasicsPreamble
       -- Emit struct datatype declarations if TypeEnv is available
       match env with
-      | some e => st.proc.stdin.putStr (generateStructPreamble e)
+      | some e =>
+        match generateStructPreamble e with
+        | .ok s => st.proc.stdin.putStr s
+        | .error msg => throw (IO.userError s!"SmtSolver: {msg}")
       | none => pure ()
       st.proc.stdin.flush
       -- Emit all commands except checkSat (we'll call it separately)

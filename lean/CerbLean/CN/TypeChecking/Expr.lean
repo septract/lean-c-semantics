@@ -550,6 +550,7 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
       | _ =>
         -- Multiple branches: try each with tryBranch, use first successful state
         let mut succeeded := false
+        let mut branchErrors : List String := []
         for (pat, body) in branches do
           if !succeeded then
             let branchResult ← TypingM.tryBranch do
@@ -561,9 +562,11 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
             | .ok (_, branchState) =>
               TypingM.setState branchState
               succeeded := true
-            | .error _ => pure ()  -- Try next branch
+            | .error e =>
+              branchErrors := branchErrors ++ [s!"  branch {branchErrors.length}: {e}"]
         if !succeeded then
-          TypingM.fail (.other "All case branches failed")
+          let errDetails := String.intercalate "\n" branchErrors
+          TypingM.fail (.other s!"All case branches failed:\n{errDetails}")
 
   -- C function call
   -- Corresponds to: Eccall case in check.ml lines 1935-1984
@@ -614,7 +617,8 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
               TypingM.fail (.other s!"ghost argument: unresolved symbol '{name}'")
             | .error e =>
               TypingM.fail (.other s!"ghost argument resolution error: {repr e}")
-        | .error e => dbg_trace s!"Warning: failed to parse potential ghost args: {e}"; pure ()
+        | .error e =>
+          TypingM.fail (.other s!"ghost argument parse error: {e}")
       pure allArgs
 
     -- 4. Process computational args with store resolution, then spine_l for precondition

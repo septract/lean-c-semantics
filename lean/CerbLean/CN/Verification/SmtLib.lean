@@ -287,17 +287,14 @@ def generateStructDeclaration (tag : Sym) (members : List FieldDef) : Option Str
 /-- Generate SMT preamble for all struct definitions in a TypeEnv.
     Iterates tagDefs and generates declare-datatype for each struct.
     Corresponds to: CN_Structs.declare in solver.ml:1064-1066 -/
-def generateStructPreamble (env : TypeEnv) : String :=
-  env.tagDefs.foldl (init := "") fun acc (tag, _, td) =>
+def generateStructPreamble (env : TypeEnv) : Except String String :=
+  env.tagDefs.foldlM (init := "") fun acc (tag, _, td) =>
     match td with
     | .struct_ members _ =>
       match generateStructDeclaration tag members with
-      | some decl => acc ++ decl
-      | none =>
-        -- Audited: 2026-02-20. Report which struct was skipped due to unsupported field types.
-        dbg_trace s!"SmtLib: skipping struct declaration for {structSmtName tag} (unsupported field type)"
-        acc
-    | .union_ _ => acc  -- CN does not support unions (check.ml:200)
+      | some decl => .ok (acc ++ decl)
+      | none => .error s!"SmtLib: unsupported field type in struct {structSmtName tag}"
+    | .union_ _ => .ok acc  -- CN does not support unions (check.ml:200)
 
 /-! ## Type-to-Sort Translation
 
@@ -1567,12 +1564,14 @@ def obligationToSmtLib2 (ob : Obligation) (env : Option TypeEnv := none)
     : String × List String :=
   let (cmds, errors) := obligationToCommands ob env
   let queryStr := Command.cmdsAsQuery cmds
-  let structDecls := match env with
-    | some e => generateStructPreamble e
-    | none => ""
+  let (structDecls, structErrors) := match env with
+    | some e => match generateStructPreamble e with
+      | .ok s => (s, [])
+      | .error msg => ("", [msg])
+    | none => ("", [])
   let ufDecls := uninterpFunctionPreamble
   let withComment := s!"; Obligation: {ob.description}\n{solverBasicsPreamble}{ufDecls}{structDecls}{queryStr}"
-  (withComment, errors)
+  (withComment, errors ++ structErrors)
 
 /-- Serialize multiple obligations, each as a separate query -/
 def obligationsToSmtLib2 (obs : List Obligation) (env : Option TypeEnv := none)

@@ -359,8 +359,8 @@ partial def simplifyTerm' (ctx : SimCtxt) (t : Term) (bt : BaseType) (loc : Loc)
     | some env =>
       match sizeof_ env ct.ty with
       | .ok n => .mk (.const (.z n)) bt loc
-      | .error _ => .mk (.sizeOf ct) bt loc
-    | none => .mk (.sizeOf ct) bt loc
+      | .error e => panic! s!"simplifyTerm: sizeof_ failed for {repr ct.ty}: {e}"
+    | none => panic! s!"simplifyTerm: sizeOf encountered without typeEnv"
 
   -- OffsetOf: leave as-is
   | .offsetOf tag member => .mk (.offsetOf tag member) bt loc

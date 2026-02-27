@@ -153,7 +153,8 @@ def checkFunctionSpec
       proc.stdin.putStr preamble
       proc.stdin.flush
       pure (some proc)
-    catch _ => pure none
+    catch e =>
+      return TypeCheckResult.fail s!"failed to start cvc5 solver: {e}"
 
     -- Run type checking with obligation accumulation enabled.
     -- Start with empty resources — processPrecondition will produce them.

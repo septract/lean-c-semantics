@@ -206,7 +206,7 @@ private def getLoopMagicText (la : Core.LoopAttribute) : List String :=
 /-- Parse invariant constraints from a magic text string.
     The format is: " inv expr1; expr2; expr3; "
     Returns parsed constraint AnnotTerms. -/
-private def parseInvariantConstraints (text : String) : List AnnotTerm :=
+private def parseInvariantConstraints (text : String) : Except String (List AnnotTerm) := do
   -- Strip leading whitespace and "inv" keyword
   let text := text.trim
   let text := if text.startsWith "inv " then text.drop 4
@@ -214,12 +214,12 @@ private def parseInvariantConstraints (text : String) : List AnnotTerm :=
               else text
   -- Split on semicolons and parse each constraint
   let parts := text.splitOn ";"
-  parts.filterMap fun part =>
+  parts.foldlM (init := []) fun acc part =>
     let part := part.trim
-    if part.isEmpty then none
+    if part.isEmpty then pure acc
     else match CN.Parser.runParser CN.Parser.expr part with
-      | .ok term => some term
-      | .error e => dbg_trace s!"Warning: failed to parse invariant expression: {e}"; none
+      | .ok term => pure (acc ++ [term])
+      | .error e => .error s!"failed to parse invariant expression '{part}': {e}"
 
 /-- Build an Owned<ct>(Init) resource request for a pointer.
     Corresponds to: Translate.ownership in core_to_mucore.ml line 713 -/
@@ -247,16 +247,16 @@ private def buildLoopLabelType
     (saveArgCTypes : List (Nat × List (Option Core.Sym × Core.Ctype)))
     (symId : Nat)
     (resolveCtx : Resolve.ResolveContext)
-    : LT :=
+    : Except String LT := do
   -- Step 1: Get the loop ID from annotations
   let loopIdOpt := info.annots.findSome? fun
     | .label (.loop id) => some id
     | _ => none
 
   -- Step 2: Get the C types for the args from saveArgCTypes
-  let argCTypes := match saveArgCTypes.lookup symId with
-    | some cts => cts
-    | none => dbg_trace s!"Warning: no C types found for loop label {symId}"; []
+  let argCTypes ← match saveArgCTypes.lookup symId with
+    | some cts => pure cts
+    | none => .error s!"no C types found for loop label {symId}"
 
   -- Step 3: Get invariant text from loop_attributes
   let invariantTexts := match loopIdOpt with
@@ -267,14 +267,24 @@ private def buildLoopLabelType
     | none => []
 
   -- Step 4: Parse and resolve invariant constraints
-  let rawConstraints := invariantTexts.foldl (init := []) fun acc text =>
-    acc ++ parseInvariantConstraints text
+  -- Extend the resolve context with loop variable names so invariants
+  -- can reference them (e.g., `i <= n` where `i` is a loop variable).
+  -- Loop variables get their VALUE types (from C types), not pointer types.
+  let loopVarEntries := info.params.zip argCTypes |>.filterMap fun ((sym, _), (_, ct)) =>
+    sym.name.map fun name => (name, sym, Resolve.ctypeToOutputBaseType ct)
+  let extendedCtx := { resolveCtx with
+    nameToSymType := resolveCtx.nameToSymType ++ loopVarEntries
+  }
 
-  -- Resolve constraint symbols against the resolve context
-  let resolvedConstraints := rawConstraints.filterMap fun constraint =>
-    match Resolve.resolveAnnotTerm resolveCtx constraint none with
-    | .ok resolved => some resolved
-    | .error e => dbg_trace s!"Warning: failed to resolve invariant constraint: {repr e}"; none
+  let rawConstraints ← invariantTexts.foldlM (init := []) fun acc text => do
+    let parsed ← parseInvariantConstraints text
+    pure (acc ++ parsed)
+
+  -- Resolve constraint symbols against the extended resolve context
+  let resolvedConstraints ← rawConstraints.mapM fun constraint =>
+    match Resolve.resolveAnnotTerm extendedCtx constraint none with
+    | .ok resolved => pure resolved
+    | .error e => .error s!"failed to resolve invariant constraint: {repr e}"
 
   -- Step 5: Build the LAT (logical argument type) part
   -- Start with the terminal value
@@ -300,8 +310,8 @@ private def buildLoopLabelType
   -- Step 6: Build the AT (argument type) with computational args
   -- Each arg gets type Loc (pointer) matching what Erun passes
   -- Corresponds to: make_label_args Computational ((s, Loc()), ...) in core_to_mucore.ml:736
-  info.params.foldr (init := (.L latWithResources : LT)) fun (sym, _bt) acc =>
-    .computational sym .loc { loc := info.loc, desc := s!"loop var {sym.name.getD ""}" } acc
+  pure (info.params.foldr (init := (.L latWithResources : LT)) fun (sym, _bt) acc =>
+    .computational sym .loc { loc := info.loc, desc := s!"loop var {sym.name.getD ""}" } acc)
 
 /-- Build loop label types for all loop labels in a function.
     Returns a list of (label_sym_id, label_type) pairs.
@@ -312,19 +322,19 @@ private def buildLoopLabelTypes
     (loopAttributes : Core.LoopAttributes)
     (saveArgCTypes : List (Nat × List (Option Core.Sym × Core.Ctype)))
     (resolveCtx : Resolve.ResolveContext)
-    : List (Nat × LT) :=
-  labelDefs.filterMap fun (symId, labelDef) =>
+    : Except String (List (Nat × LT)) :=
+  labelDefs.foldlM (init := []) fun acc (symId, labelDef) =>
     match labelDef with
     | .label info =>
       -- Check if this is a loop label
       let isLoop := info.annots.any fun
         | .label (.loop _) => true
         | _ => false
-      if isLoop then
-        some (symId, buildLoopLabelType info loopAttributes saveArgCTypes symId resolveCtx)
-      else
-        none
-    | _ => none
+      if isLoop then do
+        let lt ← buildLoopLabelType info loopAttributes saveArgCTypes symId resolveCtx
+        pure (acc ++ [(symId, lt)])
+      else pure acc
+    | _ => pure acc
 
 /-! ## Main Function: Check Function With Parameters
 
@@ -472,7 +482,7 @@ def checkFunctionWithParams
       -- `accesses g` generates implicit `take g = Owned<T>(&g)` in both requires
       -- and ensures (the function borrows the global's resource).
       -- Corresponds to: CN's handling of `accesses` in core_to_mucore.ml:718-723
-      let resolvedSpec := resolvedSpec0.resolvedAccesses.foldl (init := resolvedSpec0) fun spec (globalName, valueSym, globalBt) =>
+      let resolvedSpecResult : Except String _ := resolvedSpec0.resolvedAccesses.foldlM (init := resolvedSpec0) fun spec (globalName, valueSym, globalBt) =>
         match globals.find? (fun (sym, _) => sym.name == some globalName) with
         | some (globalSym, globDecl) =>
           let globalCt := match globDecl with
@@ -487,11 +497,14 @@ def checkFunctionWithParams
             }
             output := { value := AnnotTerm.mk (.sym valueSym) globalBt Core.Loc.t.unknown }
           }
-          { spec with
+          .ok { spec with
             requires := { clauses := clause :: spec.requires.clauses }
             ensures := { clauses := clause :: spec.ensures.clauses }
           }
-        | none => dbg_trace s!"Warning: unknown global '{globalName}' in accesses clause"; spec
+        | none => .error s!"unknown global '{globalName}' in accesses clause"
+      let resolvedSpec ← match resolvedSpecResult with
+        | .ok v => pure v
+        | .error msg => return TypeCheckResult.fail msg
 
       -- Step 6: Create label context from label definitions
       -- Corresponds to: WProc.label_context in wellTyped.ml line 2474
@@ -506,7 +519,9 @@ def checkFunctionWithParams
         nextFreshId := nextFreshId + 500
         tagDefs := tagDefs
       }
-      let loopLabelTypes := buildLoopLabelTypes muProc.labels loopAttributes saveArgCTypes loopResolveCtx
+      let loopLabelTypes ← match buildLoopLabelTypes muProc.labels loopAttributes saveArgCTypes loopResolveCtx with
+        | .ok v => pure v
+        | .error msg => return TypeCheckResult.fail msg
       let labels := LabelContext.ofLabelDefs resolvedSpec returnBt muProc.labels loopLabelTypes
 
       -- Step 7: Initial context (resources will be added by processPrecondition)
@@ -515,8 +530,10 @@ def checkFunctionWithParams
       -- Step 8: Initialize inline solver (managed at IO level)
       -- The preamble includes pointer datatype and struct declarations.
       -- Corresponds to: init_solver in typing.ml + Solver.make → declare_solver_basics
-      let structPreamble := CerbLean.CN.Verification.SmtLib.generateStructPreamble
-        { tagDefs := tagDefs : CerbLean.Memory.TypeEnv }
+      let structPreamble ← match CerbLean.CN.Verification.SmtLib.generateStructPreamble
+        { tagDefs := tagDefs : CerbLean.Memory.TypeEnv } with
+        | .ok s => pure s
+        | .error msg => return TypeCheckResult.fail msg
       let preamble := CerbLean.CN.Verification.SmtLib.pointerPreamble ++ structPreamble
       let solverChild ← try
         let proc ← IO.Process.spawn {
@@ -529,7 +546,8 @@ def checkFunctionWithParams
         proc.stdin.putStr preamble
         proc.stdin.flush
         pure (some proc)
-      catch _ => pure none
+      catch e =>
+        return TypeCheckResult.fail s!"failed to start cvc5 solver: {e}"
 
       -- Step 9: Create initial state with ParamValueMap, LabelDefs, solver, and obligations
       -- freshCounter starts past all resolve-phase IDs (resolve uses nextFreshId+500 range)
