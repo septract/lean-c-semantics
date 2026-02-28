@@ -38,7 +38,7 @@ open CerbLean.Core (Sym Ctype IntegerType IntBaseKind)
 open CerbLean.CN.Types (IndexTerm Term Const PointerConst AnnotTerm Sign
                          BaseType LogicalConstraint Init QPredicate BinOp UnOp)
 open CerbLean.CN.Semantics (Location HeapValue HeapFragment Valuation
-                             interpOwned interpResources)
+                             interpResources)
 
 /-! ## Index Term Evaluation
 
@@ -133,22 +133,33 @@ satisfies separation-logic proposition `H` under valuation `ρ`.
     This is a `def` returning `Prop` (not an inductive) so it can be
     unfolded directly in proofs.
 
+    All cases are **lookup-based**: emptiness means all lookups return `none`,
+    ownership means exactly one location maps to the value and all others are
+    `none`. This makes the relation invariant under lookup-equivalence
+    (`HeapFragment.equiv`), which is required for the star-unit and
+    star-commutativity laws.
+
     The `star` case uses lookup-based heap equivalence (`HeapFragment.equiv`)
     instead of list equality. This makes commutativity trivial since lookup
     on `h1 ++ h2` and `h2 ++ h1` agrees when domains are disjoint. -/
 def models (ρ : Valuation) (H : SLProp) (h : HeapFragment) : Prop :=
   match H with
   | .emp =>
-    h.cells = []
+    ∀ loc, h.lookup loc = none
   | .owned ct initState ptr val =>
     ∃ loc v,
       evalIndexTerm ρ ptr = some (.pointer (some loc)) ∧
       evalIndexTerm ρ val = some v ∧
-      interpOwned ct loc initState v h
+      h.lookup loc = some v ∧
+      (∀ loc', loc' ≠ loc → h.lookup loc' = none) ∧
+      match initState with
+      | .init => CerbLean.CN.Semantics.valueMatchesType ct v
+      | .uninit => True
   | .block ct ptr =>
     ∃ loc v,
       evalIndexTerm ρ ptr = some (.pointer (some loc)) ∧
-      interpOwned ct loc .uninit v h
+      h.lookup loc = some v ∧
+      (∀ loc', loc' ≠ loc → h.lookup loc' = none)
   | .star P Q =>
     ∃ h1 h2,
       h1.disjoint h2 ∧
@@ -156,7 +167,7 @@ def models (ρ : Valuation) (H : SLProp) (h : HeapFragment) : Prop :=
       models ρ P h1 ∧
       models ρ Q h2
   | .pure c =>
-    evalConstraint ρ c ∧ h.cells = []
+    evalConstraint ρ c ∧ (∀ loc, h.lookup loc = none)
   | .ex var _ty body =>
     ∃ v, models ((var, v) :: ρ) body h
   | .pred _name _ptr _iargs _oarg =>
@@ -166,15 +177,15 @@ def models (ρ : Valuation) (H : SLProp) (h : HeapFragment) : Prop :=
 
 /-! ## Properties -/
 
-/-- `models ρ .emp h` iff the heap is empty. -/
+/-- `models ρ .emp h` iff every lookup returns `none`. -/
 theorem models_emp {ρ : Valuation} {h : HeapFragment} :
-    models ρ .emp h ↔ h.cells = [] := by
+    models ρ .emp h ↔ (∀ loc, h.lookup loc = none) := by
   unfold models
   exact Iff.rfl
 
-/-- Pure constraints produce an empty heap. -/
+/-- Pure constraints produce a heap where every lookup returns `none`. -/
 theorem models_pure {ρ : Valuation} {c : LogicalConstraint} {h : HeapFragment} :
-    models ρ (.pure c) h → h.cells = [] := by
+    models ρ (.pure c) h → (∀ loc, h.lookup loc = none) := by
   unfold models
   intro ⟨_, hempty⟩
   exact hempty
@@ -186,6 +197,88 @@ private theorem find?_none_of_not_in_dom {cells : List (Location × HeapValue)} 
   rw [List.find?_eq_none]
   intro x hx hbeq; apply h
   rw [List.mem_map]; exact ⟨x, hx, eq_of_beq hbeq⟩
+
+/-! ### HeapFragment Equivalence Lemmas -/
+
+/-- Equivalence is reflexive. -/
+private theorem HeapFragment.equiv_refl (h : HeapFragment) : h.equiv h :=
+  fun _ => rfl
+
+/-- Equivalence is symmetric. -/
+private theorem HeapFragment.equiv_symm {h1 h2 : HeapFragment}
+    (he : h1.equiv h2) : h2.equiv h1 :=
+  fun loc => (he loc).symm
+
+/-- Equivalence is transitive. -/
+private theorem HeapFragment.equiv_trans {h1 h2 h3 : HeapFragment}
+    (e12 : h1.equiv h2) (e23 : h2.equiv h3) : h1.equiv h3 :=
+  fun loc => (e12 loc).trans (e23 loc)
+
+/-- Append is associative (structural equality at the cells level). -/
+private theorem HeapFragment.append_assoc (h1 h2 h3 : HeapFragment) :
+    (h1 ++ h2) ++ h3 = h1 ++ (h2 ++ h3) :=
+  congrArg HeapFragment.mk (List.append_assoc _ _ _)
+
+/-- Equivalence is a left-congruence for append: if h1.equiv h2 then
+    (h1 ++ k).equiv (h2 ++ k). Uses case analysis on find? results. -/
+private theorem HeapFragment.equiv_append_right {h1 h2 : HeapFragment} (k : HeapFragment)
+    (he : h1.equiv h2) : (h1 ++ k).equiv (h2 ++ k) := by
+  intro loc
+  simp only [HeapFragment.lookup]
+  change (((h1.cells ++ k.cells).find? (·.1 == loc)).map Prod.snd =
+         ((h2.cells ++ k.cells).find? (·.1 == loc)).map Prod.snd)
+  rw [List.find?_append, List.find?_append]
+  have he_loc := he loc
+  simp only [HeapFragment.lookup] at he_loc
+  cases hf1 : h1.cells.find? (·.1 == loc) with
+  | none =>
+    cases hf2 : h2.cells.find? (·.1 == loc) with
+    | none => simp [Option.or]
+    | some p2 => simp [hf1, hf2] at he_loc
+  | some p1 =>
+    cases hf2 : h2.cells.find? (·.1 == loc) with
+    | none => simp [hf1, hf2] at he_loc
+    | some p2 => simp [Option.or, hf1, hf2] at he_loc ⊢; exact he_loc
+
+/-- Equivalence is a right-congruence for append: if h1.equiv h2 then
+    (k ++ h1).equiv (k ++ h2). -/
+private theorem HeapFragment.equiv_append_left (k : HeapFragment) {h1 h2 : HeapFragment}
+    (he : h1.equiv h2) : (k ++ h1).equiv (k ++ h2) := by
+  intro loc
+  simp only [HeapFragment.lookup]
+  change (((k.cells ++ h1.cells).find? (·.1 == loc)).map Prod.snd =
+         ((k.cells ++ h2.cells).find? (·.1 == loc)).map Prod.snd)
+  rw [List.find?_append, List.find?_append]
+  cases k.cells.find? (·.1 == loc) with
+  | some p => simp [Option.or]
+  | none =>
+    simp [Option.or]
+    have he_loc := he loc
+    simp only [HeapFragment.lookup] at he_loc
+    exact he_loc
+
+/-- If h.lookup loc = some v, then loc is in h's domain. -/
+private theorem HeapFragment.dom_of_lookup {h : HeapFragment} {loc : Location} {v : HeapValue}
+    (hl : h.lookup loc = some v) : loc ∈ h.dom := by
+  simp only [HeapFragment.lookup] at hl
+  match hf : h.cells.find? (·.1 == loc) with
+  | none => simp [hf] at hl
+  | some pair =>
+    have hmem := List.mem_of_find?_eq_some hf
+    have hbeq := @List.find?_some _ (·.1 == loc) pair _ hf
+    unfold HeapFragment.dom
+    have : pair.1 = loc := eq_of_beq hbeq
+    rw [← this]; exact List.mem_map_of_mem hmem
+
+/-- Disjointness is symmetric. -/
+private theorem HeapFragment.disjoint_symm {h1 h2 : HeapFragment}
+    (hd : h1.disjoint h2) : h2.disjoint h1 :=
+  fun loc hloc2 hloc1 => hd loc hloc1 hloc2
+
+/-- Dom of append is append of doms. -/
+private theorem HeapFragment.dom_append (h1 h2 : HeapFragment) :
+    (h1 ++ h2).dom = h1.dom ++ h2.dom :=
+  List.map_append ..
 
 /-- For disjoint heaps, lookup on h1 ++ h2 and h2 ++ h1 agree. -/
 private theorem union_lookup_comm (h1 h2 : HeapFragment) (hdisj : h1.disjoint h2) :
@@ -221,12 +314,89 @@ theorem models_star_comm {ρ : Valuation} {P Q : SLProp} {h : HeapFragment} :
   have hcomm := union_lookup_comm h1 h2 hdisj
   rw [hequiv loc, hcomm loc]
 
+/-- Given a membership in a domain, produce a cell witness and a non-none find?. -/
+private theorem lookup_some_of_mem_dom {h : HeapFragment} {loc : Location}
+    (hmem : loc ∈ h.dom) : ∃ v, h.lookup loc = some v := by
+  simp only [HeapFragment.dom, List.mem_map] at hmem
+  obtain ⟨⟨loc', v⟩, hcell, heq⟩ := hmem
+  simp at heq  -- (loc', v).fst = loc → loc' = loc
+  have his : (h.cells.find? (·.1 == loc)).isSome = true :=
+    List.find?_isSome.mpr ⟨(loc', v), hcell, by subst heq; simp⟩
+  match hf : h.cells.find? (·.1 == loc), his with
+  | some p, _ => exact ⟨p.2, by simp [HeapFragment.lookup, hf]⟩
+  | none, h => simp_all
+
+/-- Route a domain membership through an equiv: if loc ∈ dom of one side
+    of an equiv, it's in the domain of the other side. -/
+private theorem dom_of_equiv_dom {h1 h2 : HeapFragment}
+    (he : h1.equiv h2) {loc : Location} (hmem : loc ∈ h2.dom) :
+    loc ∈ h1.dom := by
+  obtain ⟨v, hv⟩ := lookup_some_of_mem_dom hmem
+  have := he loc ▸ hv
+  exact HeapFragment.dom_of_lookup this
+
 /-- Separating conjunction is associative (forward direction).
-    Deferred: requires proving that equiv is a congruence for append, and
-    that disjointness distributes across append. Standard SL property. -/
+    Given `(P ∗ Q) ∗ R`, reassociates to `P ∗ (Q ∗ R)`.
+    Witnesses: outer = (h_p, h_q ++ h_r), inner = (h_q, h_r). -/
 theorem models_star_assoc_forward {ρ : Valuation} {P Q R : SLProp} {h : HeapFragment} :
     models ρ (.star (.star P Q) R) h → models ρ (.star P (.star Q R)) h := by
-  sorry
+  unfold models
+  intro ⟨h_pq, h_r, d_pq_r, e_h, ⟨h_p, h_q, d_p_q, e_pq, mp, mq⟩, mr⟩
+  refine ⟨h_p, h_q ++ h_r, ?d_p_qr, ?e_h', mp, h_q, h_r, ?d_q_r,
+    HeapFragment.equiv_refl _, mq, mr⟩
+  case d_p_qr =>
+    -- h_p.disjoint (h_q ++ h_r)
+    intro loc hloc_p hloc_qr
+    rw [HeapFragment.dom_append] at hloc_qr
+    rcases List.mem_append.mp hloc_qr with hloc_q | hloc_r
+    · exact d_p_q loc hloc_p hloc_q
+    · -- loc ∈ h_p.dom → loc ∈ (h_p++h_q).dom → (via equiv) loc ∈ h_pq.dom → loc ∉ h_r.dom
+      have hmem_pq : loc ∈ (h_p ++ h_q).dom := by
+        rw [HeapFragment.dom_append]; exact List.mem_append_left _ hloc_p
+      exact d_pq_r loc (dom_of_equiv_dom e_pq hmem_pq) hloc_r
+  case e_h' =>
+    -- h.equiv (h_p ++ (h_q ++ h_r))
+    exact HeapFragment.equiv_trans e_h
+      (HeapFragment.equiv_trans
+        (HeapFragment.equiv_append_right h_r e_pq)
+        (by rw [HeapFragment.append_assoc]; exact HeapFragment.equiv_refl _))
+  case d_q_r =>
+    -- h_q.disjoint h_r
+    intro loc hloc_q hloc_r
+    have hmem_pq : loc ∈ (h_p ++ h_q).dom := by
+      rw [HeapFragment.dom_append]; exact List.mem_append_right _ hloc_q
+    exact d_pq_r loc (dom_of_equiv_dom e_pq hmem_pq) hloc_r
+
+/-- Separating conjunction is associative (backward direction).
+    Given `P ∗ (Q ∗ R)`, reassociates to `(P ∗ Q) ∗ R`.
+    Proved by composing star_comm and star_assoc_forward. -/
+theorem models_star_assoc_backward {ρ : Valuation} {P Q R : SLProp} {h : HeapFragment} :
+    models ρ (.star P (.star Q R)) h → models ρ (.star (.star P Q) R) h := by
+  -- P ∗ (Q ∗ R) → (Q ∗ R) ∗ P → Q ∗ (R ∗ P) → Q ∗ (P ∗ R) → (P ∗ R) ∗ Q → ...
+  -- Simpler: P ∗ (Q ∗ R) →[comm] (Q ∗ R) ∗ P →[assoc_fwd] Q ∗ (R ∗ P) →[comm inner] Q ∗ (P ∗ R)
+  --          →[comm] (P ∗ R) ∗ Q →[assoc_fwd] P ∗ (R ∗ Q) →[comm inner] P ∗ (Q ∗ R)
+  -- That's circular. Let's just do the direct proof.
+  unfold models
+  intro ⟨h_p, h_qr, d_p_qr, e_h, mp, h_q, h_r, d_q_r, e_qr, mq, mr⟩
+  refine ⟨h_p ++ h_q, h_r, ?_, ?_, ⟨h_p, h_q, ?_, HeapFragment.equiv_refl _, mp, mq⟩, mr⟩
+  · -- (h_p ++ h_q).disjoint h_r
+    intro loc hloc_pq hloc_r
+    rw [HeapFragment.dom_append] at hloc_pq
+    rcases List.mem_append.mp hloc_pq with hloc_p | hloc_q
+    · have hmem_qr : loc ∈ (h_q ++ h_r).dom := by
+        rw [HeapFragment.dom_append]; exact List.mem_append_right _ hloc_r
+      exact d_p_qr loc hloc_p (dom_of_equiv_dom e_qr hmem_qr)
+    · exact d_q_r loc hloc_q hloc_r
+  · -- h.equiv ((h_p ++ h_q) ++ h_r)
+    exact HeapFragment.equiv_trans e_h
+      (HeapFragment.equiv_trans
+        (HeapFragment.equiv_append_left h_p e_qr)
+        (by rw [← HeapFragment.append_assoc]; exact HeapFragment.equiv_refl _))
+  · -- h_p.disjoint h_q
+    intro loc hloc_p hloc_q
+    have hmem_qr : loc ∈ (h_q ++ h_r).dom := by
+      rw [HeapFragment.dom_append]; exact List.mem_append_left _ hloc_q
+    exact d_p_qr loc hloc_p (dom_of_equiv_dom e_qr hmem_qr)
 
 /-! ## Resource Conversion Compatibility -/
 
@@ -249,8 +419,8 @@ theorem models_owned_uninit_of_block {ρ : Valuation} {ct : Ctype}
     {ptr val : IndexTerm} {h : HeapFragment} :
     models ρ (.owned ct .uninit ptr val) h → models ρ (.block ct ptr) h := by
   unfold models
-  intro ⟨loc, v, hptr, _hval, howned⟩
-  exact ⟨loc, v, hptr, howned⟩
+  intro ⟨loc, v, hptr, _hval, hlookup, hother, _⟩
+  exact ⟨loc, v, hptr, hlookup, hother⟩
 
 /-- Block is equivalent to owned-uninit with some existential value.
     Forward direction deferred: requires constructing an IndexTerm that
@@ -271,6 +441,71 @@ theorem models_block_iff_owned_uninit {ρ : Valuation} {ct : Ctype}
     for all valuations. -/
 def SLProp.entails (H₁ H₂ : SLProp) : Prop :=
   ∀ ρ h, models ρ H₁ h → models ρ H₂ h
+
+/-- Entailment is reflexive. -/
+theorem SLProp.entails_refl (H : SLProp) : SLProp.entails H H :=
+  fun _ _ h => h
+
+/-- `models` is invariant under lookup-equivalence.
+    Since all cases of `models` are defined via `h.lookup`, replacing `h` with
+    a lookup-equivalent heap preserves the relation. -/
+theorem models_equiv {H : SLProp} {ρ : Valuation} {h1 h2 : HeapFragment}
+    (he : h1.equiv h2) : models ρ H h2 → models ρ H h1 := by
+  induction H generalizing ρ h1 h2 with
+  | emp =>
+    intro hemp loc; exact (he loc).trans (hemp loc)
+  | owned ct initState ptr val =>
+    intro ⟨loc, v, hptr, hval, hlookup, hother, hty⟩
+    exact ⟨loc, v, hptr, hval, (he loc).trans hlookup,
+      fun loc' hne => (he loc').trans (hother loc' hne), hty⟩
+  | block ct ptr =>
+    intro ⟨loc, v, hptr, hlookup, hother⟩
+    exact ⟨loc, v, hptr, (he loc).trans hlookup,
+      fun loc' hne => (he loc').trans (hother loc' hne)⟩
+  | star P Q _ihP _ihQ =>
+    intro ⟨h_p, h_q, hdisj, hequiv, mp, mq⟩
+    exact ⟨h_p, h_q, hdisj, HeapFragment.equiv_trans he hequiv, mp, mq⟩
+  | pure c =>
+    intro ⟨hc, hemp⟩
+    exact ⟨hc, fun loc => (he loc).trans (hemp loc)⟩
+  | ex var _ty body ih =>
+    intro ⟨v, hm⟩
+    exact ⟨v, ih he hm⟩
+  | pred => exact id
+  | each => exact id
+
+/-- Appending an empty heap on the right is lookup-equivalent. -/
+private theorem HeapFragment.equiv_append_empty {h1 h2 : HeapFragment}
+    (hemp : ∀ loc, h2.lookup loc = none) : h1.equiv (h1 ++ h2) := by
+  intro loc
+  simp only [HeapFragment.lookup]
+  change (h1.cells.find? (·.1 == loc)).map Prod.snd =
+         ((h1.cells ++ h2.cells).find? (·.1 == loc)).map Prod.snd
+  rw [List.find?_append]
+  cases h1.cells.find? (·.1 == loc) with
+  | some p => simp [Option.or]
+  | none =>
+    simp [Option.or]
+    have := hemp loc
+    simp only [HeapFragment.lookup] at this
+    match hf : h2.cells.find? (·.1 == loc) with
+    | none => simp [hf]
+    | some p => simp [hf] at this
+
+/-- `H ∗ emp` entails `H`: the right unit law for star. -/
+theorem models_star_emp {ρ : Valuation} {H : SLProp} {h : HeapFragment} :
+    models ρ (.star H .emp) h → models ρ H h := by
+  intro ⟨h1, h2, _hdisj, hequiv, mh, hemp⟩
+  -- h2 is empty (all lookups none from emp)
+  -- h.equiv (h1 ++ h2) and h1.equiv (h1 ++ h2) since h2 lookups are all none
+  -- So h.equiv h1, and models_equiv transfers mh from h1 to h
+  exact models_equiv (HeapFragment.equiv_trans hequiv
+    (HeapFragment.equiv_symm (HeapFragment.equiv_append_empty hemp))) mh
+
+/-- `emp ∗ H` entails `H`: the left unit law for star. -/
+theorem models_emp_star {ρ : Valuation} {H : SLProp} {h : HeapFragment} :
+    models ρ (.star .emp H) h → models ρ H h := by
+  exact fun hstar => models_star_emp (models_star_comm hstar)
 
 /-! ## HeapValue ↔ CN BaseType Compatibility -/
 
