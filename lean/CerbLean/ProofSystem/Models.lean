@@ -56,27 +56,29 @@ Returns `none` for unhandled term forms.
     - `Term.const (.z n)` — unbounded integer constant
     - `Term.const (.bits sign width n)` — fixed-width bitvector constant
     - `Term.const (.bool b)` — boolean constant (true=1, false=0)
-    Returns `none` for all other term forms. -/
-partial def evalIndexTerm (ρ : Valuation) (it : IndexTerm) : Option HeapValue :=
-  match it.term with
-  | .sym s => ρ.lookup s
-  | .const (.pointer ⟨allocId, addr⟩) =>
+    Returns `none` for all other term forms.
+
+    Note: matches on the AnnotTerm structure directly (not via `.term` projection)
+    so Lean can verify structural termination on recursive calls. -/
+def evalIndexTerm (ρ : Valuation) : IndexTerm → Option HeapValue
+  | ⟨.sym s, _, _⟩ => ρ.lookup s
+  | ⟨.const (.pointer ⟨allocId, addr⟩), _, _⟩ =>
     some (.pointer (some ⟨allocId.toNat, addr.toNat⟩))
-  | .const .null =>
+  | ⟨.const .null, _, _⟩ =>
     some (.pointer none)
-  | .const (.z n) =>
+  | ⟨.const (.z n), _, _⟩ =>
     -- Unbounded integer; use signed int as representative IntegerType
     some (.integer (.signed .int_) n)
-  | .const (.bits sign width n) =>
+  | ⟨.const (.bits sign width n), _, _⟩ =>
     -- Fixed-width bitvector; map Sign to IntegerType
     let ity := match sign with
       | .signed => IntegerType.signed (.intN width)
       | .unsigned => IntegerType.unsigned (.intN width)
     some (.integer ity n)
-  | .const (.bool b) =>
+  | ⟨.const (.bool b), _, _⟩ =>
     -- C convention: true = 1, false = 0
     some (.integer (.signed .int_) (if b then 1 else 0))
-  | .binop op left right =>
+  | ⟨.binop op left right, _, _⟩ =>
     match evalIndexTerm ρ left, evalIndexTerm ρ right with
     | some (.integer ity1 v1), some (.integer _ity2 v2) =>
       match op with
@@ -89,7 +91,7 @@ partial def evalIndexTerm (ρ : Valuation) (it : IndexTerm) : Option HeapValue :
       | .le => some (.integer (.signed .int_) (if v1 ≤ v2 then 1 else 0))
       | _ => none
     | _, _ => none
-  | .unop .not arg =>
+  | ⟨.unop .not arg, _, _⟩ =>
     match evalIndexTerm ρ arg with
     | some (.integer ity val) =>
       some (.integer ity (if val == 0 then 1 else 0))
@@ -177,10 +179,34 @@ theorem models_pure {ρ : Valuation} {c : LogicalConstraint} {h : HeapFragment} 
   intro ⟨_, hempty⟩
   exact hempty
 
+/-- If a location is not in a heap's domain, find? on its cells returns none. -/
+private theorem find?_none_of_not_in_dom {cells : List (Location × HeapValue)} {loc : Location}
+    (h : loc ∉ cells.map Prod.fst) :
+    cells.find? (·.1 == loc) = none := by
+  rw [List.find?_eq_none]
+  intro x hx hbeq; apply h
+  rw [List.mem_map]; exact ⟨x, hx, eq_of_beq hbeq⟩
+
 /-- For disjoint heaps, lookup on h1 ++ h2 and h2 ++ h1 agree. -/
 private theorem union_lookup_comm (h1 h2 : HeapFragment) (hdisj : h1.disjoint h2) :
     (h1 ++ h2).equiv (h2 ++ h1) := by
-  sorry  -- requires lemma about List.find? on appended lists with disjoint keys
+  intro loc
+  simp only [HeapFragment.lookup]
+  change (((h1.cells ++ h2.cells).find? (·.1 == loc)).map Prod.snd =
+         ((h2.cells ++ h1.cells).find? (·.1 == loc)).map Prod.snd)
+  rw [List.find?_append, List.find?_append]
+  cases hf1 : h1.cells.find? (·.1 == loc) with
+  | none =>
+    cases h2.cells.find? (·.1 == loc) <;> simp [Option.or]
+  | some pair =>
+    have hbeq := @List.find?_some _ (·.1 == loc) pair _ hf1
+    have hkey : pair.1 = loc := eq_of_beq hbeq
+    have hmem : pair ∈ h1.cells := List.mem_of_find?_eq_some hf1
+    have hdom : pair.1 ∈ h1.dom := by
+      unfold HeapFragment.dom; exact List.mem_map_of_mem hmem
+    have hnotdom : loc ∉ h2.dom := by rw [← hkey]; exact hdisj pair.1 hdom
+    have hf2 := find?_none_of_not_in_dom hnotdom
+    simp [Option.or, hf2]
 
 /-- Separating conjunction is commutative.
     With lookup-based equivalence, this follows from disjoint-union commutativity. -/
@@ -195,7 +221,9 @@ theorem models_star_comm {ρ : Valuation} {P Q : SLProp} {h : HeapFragment} :
   have hcomm := union_lookup_comm h1 h2 hdisj
   rw [hequiv loc, hcomm loc]
 
-/-- Separating conjunction is associative (forward direction). -/
+/-- Separating conjunction is associative (forward direction).
+    Deferred: requires proving that equiv is a congruence for append, and
+    that disjointness distributes across append. Standard SL property. -/
 theorem models_star_assoc_forward {ρ : Valuation} {P Q R : SLProp} {h : HeapFragment} :
     models ρ (.star (.star P Q) R) h → models ρ (.star P (.star Q R)) h := by
   sorry
@@ -204,22 +232,38 @@ theorem models_star_assoc_forward {ρ : Valuation} {P Q R : SLProp} {h : HeapFra
 
 /-- Compatibility lemma: `models` via `SLProp.ofResources` agrees with `interpResources`.
     States that the syntactic-to-semantic path through SLProp is equivalent to
-    direct semantic interpretation of resources. -/
+    direct semantic interpretation of resources.
+    Deferred: requires proving each SLProp.ofResource matches interpResource,
+    and that starAll composition matches the recursive interpResources split. -/
 theorem models_ofResources_iff (ρ : Valuation) (rs : List CerbLean.CN.Types.Resource)
     (h : HeapFragment) :
     models ρ (SLProp.ofResources rs) h ↔ interpResources rs ρ h := by
-  sorry  -- state it, prove later
+  sorry
 
 /-! ## Block-Owned Bridge -/
 
-/-- Block is equivalent to owned-uninit with some value.
-    `Block<ct>(ptr)` models the same heaps as `∃ val, Owned<ct>(uninit, ptr, val)`.
-    The backward direction drops the extra `evalIndexTerm ρ val = some v` witness.
-    The forward direction requires constructing an IndexTerm; sorried for now. -/
+/-- Block implies owned-uninit: the backward direction of the block-owned bridge.
+    If we have `Owned<ct>(uninit, ptr, val)` for some `val`, we can forget the
+    value witness to get `Block<ct>(ptr)`. -/
+theorem models_owned_uninit_of_block {ρ : Valuation} {ct : Ctype}
+    {ptr val : IndexTerm} {h : HeapFragment} :
+    models ρ (.owned ct .uninit ptr val) h → models ρ (.block ct ptr) h := by
+  unfold models
+  intro ⟨loc, v, hptr, _hval, howned⟩
+  exact ⟨loc, v, hptr, howned⟩
+
+/-- Block is equivalent to owned-uninit with some existential value.
+    Forward direction deferred: requires constructing an IndexTerm that
+    evaluates to a given HeapValue (i.e., a "representability" lemma). -/
 theorem models_block_iff_owned_uninit {ρ : Valuation} {ct : Ctype}
     {ptr : IndexTerm} {h : HeapFragment} :
     models ρ (.block ct ptr) h ↔ ∃ val, models ρ (.owned ct .uninit ptr val) h := by
-  sorry
+  constructor
+  · -- Forward: block → ∃ val, owned uninit — requires constructing an IndexTerm
+    sorry
+  · -- Backward: ∃ val, owned uninit → block
+    intro ⟨val, howned⟩
+    exact models_owned_uninit_of_block howned
 
 /-! ## Entailment -/
 

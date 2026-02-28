@@ -155,7 +155,7 @@ theorem incrTyped :
     · exact @HasType.action_store _ _ _ _ _ _ _ vNewTerm _ _ _ (.bits .signed 32)
         (@PureHasType.op _ [] none .add _ _
           (.bits .signed 32) (.bits .signed 32) (.bits .signed 32)
-          (PureHasType.sym sorry)   -- lookupVar vSym in context; sorry for BEq reduction
+          (PureHasType.sym (by rfl))   -- lookupVar vSym in extended context
           (PureHasType.val trivial) -- valueHasType (integer 1) (bits .signed 32) = True
           rfl)                      -- opResultType .add (bits s 32) (bits s 32) = some (bits s 32)
     -- Step 3: pure () — heap unchanged

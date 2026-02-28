@@ -30,6 +30,15 @@ structure Location where
   addr : Nat
   deriving Repr, BEq, Inhabited, DecidableEq, Hashable
 
+/-- Location's derived BEq agrees with propositional equality.
+    Required to connect `find?` (BEq-based) with `∈ dom` (Eq-based)
+    in heap disjointness proofs. -/
+instance : LawfulBEq Location where
+  eq_of_beq {a b} h := by
+    cases a with | mk a1 a2 => cases b with | mk b1 b2 =>
+    simp [BEq.beq, instBEqLocation.beq] at h; obtain ⟨h1, h2⟩ := h; congr
+  rfl {a} := by cases a with | mk a1 a2 => simp [BEq.beq, instBEqLocation.beq]
+
 /-! ## Heap Value
 
 Corresponds to: mem_value in cn/coq/Cn/CNMem.v
