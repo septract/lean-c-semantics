@@ -149,11 +149,11 @@ def models (ρ : Valuation) (H : SLProp) (h : HeapFragment) : Prop :=
   | .owned ct initState ptr val =>
     ∃ loc v,
       evalIndexTerm ρ ptr = some (.pointer (some loc)) ∧
-      evalIndexTerm ρ val = some v ∧
       h.lookup loc = some v ∧
       (∀ loc', loc' ≠ loc → h.lookup loc' = none) ∧
       match initState with
-      | .init => CerbLean.CN.Semantics.valueMatchesType ct v
+      | .init => evalIndexTerm ρ val = some v ∧
+                 CerbLean.CN.Semantics.valueMatchesType ct v
       | .uninit => True
   | .block ct ptr =>
     ∃ loc v,
@@ -403,8 +403,18 @@ theorem models_star_assoc_backward {ρ : Valuation} {P Q R : SLProp} {h : HeapFr
 /-- Compatibility lemma: `models` via `SLProp.ofResources` agrees with `interpResources`.
     States that the syntactic-to-semantic path through SLProp is equivalent to
     direct semantic interpretation of resources.
-    Deferred: requires proving each SLProp.ofResource matches interpResource,
-    and that starAll composition matches the recursive interpResources split. -/
+
+    **Deferred to Stage 5** (connecting proof system to CN type checker).
+    Requires:
+    1. Each `SLProp.ofResource r` matches `interpResource r` for a single resource
+    2. The `starAll` fold in `SLProp.ofResources` matches the recursive cons-cell
+       split in `interpResources`
+    3. Bridge between lookup-based `models` for `.owned` and structural `interpOwned`
+       (see `interpOwned_implies_lookup` in the test suite for the forward direction;
+       the reverse needs a well-formedness invariant on HeapFragment)
+
+    Not needed until we verify that CN's resource inference output plugs into
+    our HasType derivations. -/
 theorem models_ofResources_iff (ρ : Valuation) (rs : List CerbLean.CN.Types.Resource)
     (h : HeapFragment) :
     models ρ (SLProp.ofResources rs) h ↔ interpResources rs ρ h := by
@@ -419,18 +429,23 @@ theorem models_owned_uninit_of_block {ρ : Valuation} {ct : Ctype}
     {ptr val : IndexTerm} {h : HeapFragment} :
     models ρ (.owned ct .uninit ptr val) h → models ρ (.block ct ptr) h := by
   unfold models
-  intro ⟨loc, v, hptr, _hval, hlookup, hother, _⟩
+  intro ⟨loc, v, hptr, hlookup, hother, _⟩
   exact ⟨loc, v, hptr, hlookup, hother⟩
 
 /-- Block is equivalent to owned-uninit with some existential value.
-    Forward direction deferred: requires constructing an IndexTerm that
-    evaluates to a given HeapValue (i.e., a "representability" lemma). -/
+    Forward: the `val` IndexTerm is a dummy since for `.uninit` the `models`
+    definition does not require `evalIndexTerm ρ val = some v` (the value
+    evaluation constraint only applies to `.init`).
+    Backward: just drop the existential witness. -/
 theorem models_block_iff_owned_uninit {ρ : Valuation} {ct : Ctype}
     {ptr : IndexTerm} {h : HeapFragment} :
     models ρ (.block ct ptr) h ↔ ∃ val, models ρ (.owned ct .uninit ptr val) h := by
   constructor
-  · -- Forward: block → ∃ val, owned uninit — requires constructing an IndexTerm
-    sorry
+  · -- Forward: block → ∃ val, owned uninit
+    unfold models
+    intro ⟨loc, v, hptr, hlookup, hother⟩
+    -- Any IndexTerm works as the dummy val since .uninit doesn't evaluate it
+    exact ⟨⟨.const .unit, .unit, default⟩, loc, v, hptr, hlookup, hother, trivial⟩
   · -- Backward: ∃ val, owned uninit → block
     intro ⟨val, howned⟩
     exact models_owned_uninit_of_block howned
@@ -455,9 +470,9 @@ theorem models_equiv {H : SLProp} {ρ : Valuation} {h1 h2 : HeapFragment}
   | emp =>
     intro hemp loc; exact (he loc).trans (hemp loc)
   | owned ct initState ptr val =>
-    intro ⟨loc, v, hptr, hval, hlookup, hother, hty⟩
-    exact ⟨loc, v, hptr, hval, (he loc).trans hlookup,
-      fun loc' hne => (he loc').trans (hother loc' hne), hty⟩
+    intro ⟨loc, v, hptr, hlookup, hother, htail⟩
+    exact ⟨loc, v, hptr, (he loc).trans hlookup,
+      fun loc' hne => (he loc').trans (hother loc' hne), htail⟩
   | block ct ptr =>
     intro ⟨loc, v, hptr, hlookup, hother⟩
     exact ⟨loc, v, hptr, (he loc).trans hlookup,
