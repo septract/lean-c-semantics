@@ -89,6 +89,11 @@ def Clause.subst (σ : Subst) : Clause → Clause
   | .constraint assertion => .constraint (assertion.subst σ)
   | .letBinding n v => .letBinding n (v.subst σ)
 
+/-- Substitute in a precondition.
+    Corresponds to: AT.subst in argumentTypes.ml -/
+def Precondition.subst (σ : Subst) (pre : Precondition) : Precondition :=
+  { clauses := pre.clauses.map (Clause.subst σ) }
+
 /-- Substitute in a postcondition.
     Corresponds to: LRT.subst in logicalReturnTypes.ml -/
 def Postcondition.subst (σ : Subst) (post : Postcondition) : Postcondition :=
@@ -104,11 +109,20 @@ def Postcondition.subst (σ : Subst) (post : Postcondition) : Postcondition :=
 
     Audited: 2026-01-27 against cn/lib/returnTypes.ml, core_to_mucore.ml:1164 -/
 structure FunctionSpec where
+  /-- Formal parameter symbols and their CN base types.
+      Used by the proof system to construct the substitution that maps
+      formal parameters to actual argument terms.
+      Corresponds to: function parameter symbols from Core function defs -/
+  params : List (Sym × BaseType) := []
   /-- Symbol for the return value, used in postcondition constraints.
       This is created fresh during parsing and resolved when `return`
       appears in the ensures clause.
       Corresponds to: ret_s in core_to_mucore.ml line 1164 -/
   returnSym : Sym
+  /-- CN base type of the function's return value.
+      Used by the proof system to constrain the return type of proc/ccall rules.
+      Default `.unit` for backward compatibility (void functions). -/
+  returnType : BaseType := .unit
   /-- Precondition (requires) -/
   requires : Precondition
   /-- Postcondition (ensures) -/

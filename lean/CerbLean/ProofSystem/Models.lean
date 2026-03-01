@@ -122,6 +122,23 @@ def evalConstraint (ρ : Valuation) (c : LogicalConstraint) : Prop :=
   | .forall_ (s, _bt) body =>
     ∀ v, evalConstraint ((s, v) :: ρ) (.t body)
 
+/-! ## HeapValue ↔ CN BaseType Compatibility -/
+
+/-- Relates a `HeapValue` to a CN `BaseType`.
+    Used in soundness proofs to state that a value has the expected type.
+    This is the semantic counterpart of `valueHasType` (in HasType.lean),
+    which relates Core `Value` to `CNBaseType`. -/
+def heapValueHasType : HeapValue → CerbLean.CN.Types.BaseType → Prop
+  | .integer _ _, .integer => True
+  | .integer (.signed (.intN w)) _, .bits .signed w' => w = w'
+  | .integer (.unsigned (.intN w)) _, .bits .unsigned w' => w = w'
+  | .pointer _, .loc => True
+  | .struct_ _ _, .record _ => True  -- field-level checking deferred
+  | _, .unit => True  -- unit is trivially satisfied
+  | _, .bool => True  -- booleans represented as integers in C
+  | _, .ctype => True  -- ctype values trivially satisfied
+  | _, _ => False
+
 /-! ## Semantic Model Relation
 
 The main semantic function: `models ρ H h` holds when heap fragment `h`
@@ -153,7 +170,8 @@ def models (ρ : Valuation) (H : SLProp) (h : HeapFragment) : Prop :=
       (∀ loc', loc' ≠ loc → h.lookup loc' = none) ∧
       match initState with
       | .init => evalIndexTerm ρ val = some v ∧
-                 CerbLean.CN.Semantics.valueMatchesType ct v
+                 CerbLean.CN.Semantics.valueMatchesType ct v ∧
+                 heapValueHasType v val.bt
       | .uninit => True
   | .block ct ptr =>
     ∃ loc v,
@@ -201,7 +219,7 @@ private theorem find?_none_of_not_in_dom {cells : List (Location × HeapValue)} 
 /-! ### HeapFragment Equivalence Lemmas -/
 
 /-- Equivalence is reflexive. -/
-private theorem HeapFragment.equiv_refl (h : HeapFragment) : h.equiv h :=
+theorem HeapFragment.equiv_refl (h : HeapFragment) : h.equiv h :=
   fun _ => rfl
 
 /-- Equivalence is symmetric. -/
@@ -258,7 +276,7 @@ private theorem HeapFragment.equiv_append_left (k : HeapFragment) {h1 h2 : HeapF
     exact he_loc
 
 /-- If h.lookup loc = some v, then loc is in h's domain. -/
-private theorem HeapFragment.dom_of_lookup {h : HeapFragment} {loc : Location} {v : HeapValue}
+theorem HeapFragment.dom_of_lookup {h : HeapFragment} {loc : Location} {v : HeapValue}
     (hl : h.lookup loc = some v) : loc ∈ h.dom := by
   simp only [HeapFragment.lookup] at hl
   match hf : h.cells.find? (·.1 == loc) with
@@ -398,6 +416,44 @@ theorem models_star_assoc_backward {ρ : Valuation} {P Q R : SLProp} {h : HeapFr
       rw [HeapFragment.dom_append]; exact List.mem_append_left _ hloc_q
     exact d_p_qr loc hloc_p (dom_of_equiv_dom e_qr hmem_qr)
 
+/-! ## Substitution and Valuation
+
+Substitution in SLProp should commute with valuation extension: if the
+substitution σ maps symbol s to term t, and the valuation ρ maps s to the
+heap value that t evaluates to, then modeling the substituted SLProp under ρ
+is equivalent to modeling the original SLProp under the extended valuation.
+
+This is the key semantic lemma needed for soundness of the proc/save/run
+rules. It bridges the syntactic substitution in SLProp (used by the typing
+rules) with the semantic valuation extension (used by the models relation).
+-/
+
+open CerbLean.CN.Types (Subst)
+
+/-- Substitution in SLProp commutes with valuation extension (forward direction).
+    If σ maps each symbol s_i to term t_i, and ρ already binds each s_i to
+    the value that t_i evaluates to under ρ, then `H.subst σ` models the
+    same heaps as `H` does. Deprecated in favor of `models_subst_iff`. -/
+theorem models_subst (σ : Subst) (ρ : Valuation) (H : SLProp) (h : HeapFragment)
+    (hσ : ∀ sid term, (sid, term) ∈ σ.mapping →
+      ∃ s, s.id = sid ∧ ρ.lookup s = evalIndexTerm ρ term) :
+    models ρ (H.subst σ) h → models ρ H h := by
+  sorry
+
+/-- Substitution in SLProp commutes with valuation extension (bidirectional).
+    If σ maps each symbol s_i to term t_i, and ρ already binds each s_i to
+    the value that t_i evaluates to under ρ, then `H.subst σ` and `H`
+    model exactly the same heaps.
+
+    This is the key semantic lemma needed for soundness of the proc/save/run
+    rules. It bridges the syntactic substitution in SLProp (used by the typing
+    rules) with the semantic valuation extension (used by the models relation). -/
+theorem models_subst_iff (σ : Subst) (ρ : Valuation) (H : SLProp) (h : HeapFragment)
+    (hσ : ∀ sid term, (sid, term) ∈ σ.mapping →
+      ∃ s, s.id = sid ∧ ρ.lookup s = evalIndexTerm ρ term) :
+    models ρ (H.subst σ) h ↔ models ρ H h := by
+  sorry
+
 /-! ## Resource Conversion Compatibility -/
 
 /-- Compatibility lemma: `models` via `SLProp.ofResources` agrees with `interpResources`.
@@ -522,21 +578,28 @@ theorem models_emp_star {ρ : Valuation} {H : SLProp} {h : HeapFragment} :
     models ρ (.star .emp H) h → models ρ H h := by
   exact fun hstar => models_star_emp (models_star_comm hstar)
 
-/-! ## HeapValue ↔ CN BaseType Compatibility -/
+/-! ## Singleton Heap Helpers -/
 
-/-- Relates a `HeapValue` to a CN `BaseType`.
-    Used in soundness proofs to state that a value has the expected type.
-    This is the semantic counterpart of `valueHasType` (in HasType.lean),
-    which relates Core `Value` to `CNBaseType`. -/
-def heapValueHasType : HeapValue → CerbLean.CN.Types.BaseType → Prop
-  | .integer _ _, .integer => True
-  | .integer (.signed (.intN w)) _, .bits .signed w' => w = w'
-  | .integer (.unsigned (.intN w)) _, .bits .unsigned w' => w = w'
-  | .pointer _, .loc => True
-  | .struct_ _ _, .record _ => True  -- field-level checking deferred
-  | _, .unit => True  -- unit is trivially satisfied
-  | _, .bool => True  -- booleans represented as integers in C
-  | _, _ => False
+/-- Lookup at the singleton's location returns the value. -/
+theorem HeapFragment.singleton_lookup (loc : Location) (v : HeapValue) :
+    (HeapFragment.singleton loc v).lookup loc = some v := by
+  simp [HeapFragment.singleton, HeapFragment.lookup]
+
+/-- Lookup at a different location returns none. -/
+theorem HeapFragment.singleton_lookup_ne {loc loc' : Location} {v : HeapValue}
+    (h : loc' ≠ loc) : (HeapFragment.singleton loc v).lookup loc' = none := by
+  simp [HeapFragment.singleton, HeapFragment.lookup]
+  intro heq; exact absurd heq.symm h
+
+/-- A singleton heap is disjoint from any heap that doesn't contain its location. -/
+theorem HeapFragment.singleton_disjoint {loc : Location} {v : HeapValue}
+    {h : HeapFragment} (hfresh : h.lookup loc = none) :
+    (HeapFragment.singleton loc v).disjoint h := by
+  intro loc' hloc' hloc_h
+  simp [HeapFragment.singleton, HeapFragment.dom] at hloc'
+  subst hloc'
+  obtain ⟨v', hv'⟩ := lookup_some_of_mem_dom hloc_h
+  simp [hfresh] at hv'
 
 /-! ## Interpreter State Bridge
 

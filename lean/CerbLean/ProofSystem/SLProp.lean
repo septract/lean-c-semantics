@@ -7,17 +7,18 @@
   This is the foundation type — HasType, Models, and Convert all import it.
 -/
 
-import CerbLean.CN.Types.Term
+import CerbLean.CN.Types.Term  -- for IndexTerm, Subst, AnnotTerm.subst
 import CerbLean.CN.Types.Base
 import CerbLean.CN.Types.Resource
-import CerbLean.CN.Types.Constraint
+import CerbLean.CN.Types.Constraint  -- for LogicalConstraint.subst
 import CerbLean.Core.Sym
 import CerbLean.Core.Ctype
 
 namespace CerbLean.ProofSystem
 
 open CerbLean.Core (Sym Ctype)
-open CerbLean.CN.Types (IndexTerm BaseType Init QPredicate LogicalConstraint)
+open CerbLean.CN.Types (IndexTerm BaseType Init QPredicate LogicalConstraint
+                         Subst AnnotTerm Term freshSymFor)
 
 /-- Separation logic propositions over Core heap state.
 
@@ -68,6 +69,34 @@ def flatten : SLProp → List SLProp
   | .star l r => flatten l ++ flatten r
   | .emp => []
   | other => [other]
+
+/-- Substitute in an SLProp using the existing CN substitution infrastructure.
+    Replaces index term symbol references according to the substitution mapping.
+    The `ex` case filters out the bound variable from σ to avoid capture,
+    and alpha-renames if the bound variable appears in σ's relevant set. -/
+def subst (σ : Subst) : SLProp → SLProp
+  | .emp => .emp
+  | .owned ct initState ptr val => .owned ct initState (ptr.subst σ) (val.subst σ)
+  | .block ct ptr => .block ct (ptr.subst σ)
+  | .pred name ptr iargs oarg =>
+    .pred name (ptr.subst σ) (iargs.map (·.subst σ)) (oarg.subst σ)
+  | .star l r => .star (l.subst σ) (r.subst σ)
+  | .each qp oarg => .each (qp.subst σ) (oarg.subst σ)
+  | .pure c => .pure (c.subst σ)
+  | .ex var ty body =>
+    -- Capture-avoiding: alpha-rename var if it conflicts with σ
+    -- Mirrors suitablyAlphaRename from CN/Types/Term.lean
+    if σ.relevant.contains var.id then
+      let var' := freshSymFor var σ.relevant
+      -- Build a combined substitution: rename var→var' and apply σ
+      let combined := Subst.fromMapping
+        ((var.id, AnnotTerm.mk (.sym var') ty default) ::
+         σ.mapping.filter (·.1 != var.id))
+      .ex var' ty (body.subst combined)
+    else
+      -- Bound variable doesn't conflict — just filter it from σ
+      let σ' := Subst.fromMapping (σ.mapping.filter (·.1 != var.id))
+      .ex var ty (body.subst σ')
 
 end SLProp
 

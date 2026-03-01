@@ -53,7 +53,7 @@ def pSym : Sym := { id := 0, description := .id "p" }
 /-- Symbol for the loaded value `v`. -/
 def vSym : Sym := { id := 1, description := .id "v" }
 
-/-- Symbol for the wildcard (store result). -/
+/-- Symbol for the store result (wildcard binding). -/
 def wSym : Sym := { id := 2, description := .id "w" }
 
 /-! ## Index Terms (specification level) -/
@@ -66,9 +66,14 @@ def ptrTerm : IndexTerm :=
 def vOldTerm : IndexTerm :=
   AnnotTerm.mk (.sym vSym) (.bits .signed 32) default
 
-/-- Index term for the new value `vNew` (symbolic — represents vOld + 1). -/
+/-- Index term for the new value `vOld + 1`.
+    Matches the Core expression `v + 1` via PexprMatchesTerm. -/
 def vNewTerm : IndexTerm :=
-  AnnotTerm.mk (.sym wSym) (.bits .signed 32) default
+  AnnotTerm.mk
+    (.binop .add
+      (AnnotTerm.mk (.sym vSym) (.bits .signed 32) default)
+      (AnnotTerm.mk (.const (.bits .signed 32 1)) (.bits .signed 32) default))
+    (.bits .signed 32) default
 
 /-! ## SLProp Pre/Post Conditions -/
 
@@ -116,6 +121,17 @@ def incrExpr : AExpr :=
       ⟨[], .action ⟨.pos, ⟨default, .store false tyPe ptrPe vPlusOnePe .na⟩⟩⟩
       ⟨[], .pure ⟨[], none, .val .unit⟩⟩⟩⟩
 
+/-! ## Typing Context
+
+  The context includes the pointer parameter `p` as a `loc` type binding.
+  This is needed because the action rules now require `PureHasType Γ ptrPe .loc`
+  to connect the Core pointer expression to the SLProp pointer term.
+-/
+
+/-- Typing context for `incr`: the pointer parameter `p` is in scope. -/
+def incrCtx : Ctx :=
+  { Ctx.empty with vars := [(pSym, .loc)] }
+
 /-! ## Typing Derivation
 
   The typing derivation threads resources through each step:
@@ -137,7 +153,7 @@ def incrExpr : AExpr :=
     2. `action_store` writes `v + 1` back, with a `PureHasType` proof for the value
     3. `pure` returns unit -/
 theorem incrTyped :
-    HasType Ctx.empty
+    HasType incrCtx
       (.star incrPre .emp)
       incrExpr
       .unit
@@ -145,19 +161,28 @@ theorem incrTyped :
   -- sseq v = load(signed_int, p)
   apply HasType.sseq
   -- Step 1: load — heap Owned(p,vOld)∗emp ⟹ Owned(p,vOld)∗emp
-  -- Return type is vOldTerm.bt = .bits .signed 32
-  · exact HasType.action_load
+  -- PexprMatchesTerm connects Core pointer `p` to SLProp pointer term.
+  · exact HasType.action_load rfl
+      (PexprMatchesTerm.sym pSym .loc default)
+      (PureHasType.sym (by rfl))
   -- sseq w = store(signed_int, p, v+1)
   · apply HasType.sseq
-    -- Step 2: store — heap Owned(p,vOld)∗emp ⟹ Owned(p,vNew)∗emp
-    -- action_store now requires a PureHasType proof for the stored value.
-    -- We explicitly provide all type parameters to avoid metavariable issues.
+    -- Step 2: store — heap Owned(p,vOld)∗emp ⟹ Owned(p,v+1)∗emp
+    -- PexprMatchesTerm connects both pointer and value expressions.
     · exact @HasType.action_store _ _ _ _ _ _ _ vNewTerm _ _ _ (.bits .signed 32)
+        rfl
+        (PexprMatchesTerm.sym pSym .loc default)
+        (PexprMatchesTerm.op .add .add _ _ _ _
+          (.bits .signed 32) default
+          trivial  -- CoreBinopMatchesCN .add .add = True
+          (PexprMatchesTerm.sym vSym (.bits .signed 32) default)
+          (PexprMatchesTerm.bitsVal 1 .none .signed 32 (.bits .signed 32) default))
+        (PureHasType.sym (by rfl))
         (@PureHasType.op _ [] none .add _ _
           (.bits .signed 32) (.bits .signed 32) (.bits .signed 32)
-          (PureHasType.sym (by rfl))   -- lookupVar vSym in extended context
-          (PureHasType.val trivial) -- valueHasType (integer 1) (bits .signed 32) = True
-          rfl)                      -- opResultType .add (bits s 32) (bits s 32) = some (bits s 32)
+          (PureHasType.sym (by rfl))
+          (PureHasType.val trivial)
+          rfl)
     -- Step 3: pure () — heap unchanged
     · exact HasType.pure (.val True.intro)
 
