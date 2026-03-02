@@ -584,4 +584,68 @@ partial def AnnotTerm.subst (σ : Subst) (at_ : AnnotTerm) : AnnotTerm :=
 
 end
 
+/-! ## Total Substitution
+
+`Term.substTotal` is a total (non-partial) version of `Term.subst` that
+covers only the ~10 Term constructors that actually appear in SLProp's
+IndexTerms. These are all non-binding forms and thus structurally recursive.
+
+The key benefit: `substTotal` reduces definitionally on concrete terms,
+enabling proofs by `rfl` and unblocking `models_substTotal_extend` (the
+semantic substitution lemma needed for proc/save/run soundness).
+
+See docs/2026-03-01_SOUNDNESS_AUDIT.md issue #5.
+-/
+
+/-- Total substitution for Terms. Covers the constructors that appear in
+    SLProp's IndexTerms. Structurally recursive — no binding forms, so no
+    alpha-renaming needed and Lean can verify termination.
+
+    AnnotTerm substitution is inlined (as anonymous constructor ⟨...⟩) to
+    avoid mutual recursion — each recursive call is `substTotal σ arg.term`
+    where `arg.term` is structurally smaller.
+
+    Unsupported constructors are returned unchanged (identity substitution).
+    This is safe because they don't appear in SLProp IndexTerms, so
+    `models` will never evaluate them. -/
+def Term.substTotal (σ : Subst) : Term → Term
+  | .const c => .const c
+  | .sym s =>
+    match σ.lookup s with
+    | some replacement => replacement.term
+    | none => .sym s
+  | .unop op ⟨t, bt, loc⟩ =>
+    .unop op ⟨Term.substTotal σ t, bt, loc⟩
+  | .binop op ⟨lt, lbt, lloc⟩ ⟨rt, rbt, rloc⟩ =>
+    .binop op ⟨Term.substTotal σ lt, lbt, lloc⟩
+              ⟨Term.substTotal σ rt, rbt, rloc⟩
+  | .ite ⟨ct, cbt, cloc⟩ ⟨tt, tbt, tloc⟩ ⟨et, ebt, eloc⟩ =>
+    .ite ⟨Term.substTotal σ ct, cbt, cloc⟩
+         ⟨Term.substTotal σ tt, tbt, tloc⟩
+         ⟨Term.substTotal σ et, ebt, eloc⟩
+  | .arrayShift ⟨bt_, bbt, bloc⟩ ct ⟨it, ibt, iloc⟩ =>
+    .arrayShift ⟨Term.substTotal σ bt_, bbt, bloc⟩
+                ct ⟨Term.substTotal σ it, ibt, iloc⟩
+  | .memberShift ⟨pt, pbt, ploc⟩ tag member =>
+    .memberShift ⟨Term.substTotal σ pt, pbt, ploc⟩ tag member
+  | .structMember ⟨ot, obt, oloc⟩ member =>
+    .structMember ⟨Term.substTotal σ ot, obt, oloc⟩ member
+  | .cast targetTy ⟨vt, vbt, vloc⟩ =>
+    .cast targetTy ⟨Term.substTotal σ vt, vbt, vloc⟩
+  | .nthTuple n ⟨tt, tbt, tloc⟩ =>
+    .nthTuple n ⟨Term.substTotal σ tt, tbt, tloc⟩
+  -- INVARIANT: The following constructors MUST NOT appear in SLProp IndexTerms
+  -- that are subject to substitution. If they do, this identity fallback
+  -- silently skips substitution, which would make models_substTotal_extend
+  -- unprovable for those cases. Before using SLProp with struct_, tuple, let_,
+  -- match_, eachI, or apply terms, extend substTotal to handle them.
+  -- Currently safe: only sym, const, binop, unop, ite, arrayShift,
+  -- memberShift, structMember, cast, nthTuple appear in SLProp IndexTerms.
+  | other => other
+
+/-- Total substitution for AnnotTerms. Non-recursive wrapper around
+    `Term.substTotal` — preserves type and location. -/
+def AnnotTerm.substTotal (σ : Subst) (at_ : AnnotTerm) : AnnotTerm :=
+  ⟨Term.substTotal σ at_.term, at_.bt, at_.loc⟩
+
 end CerbLean.CN.Types

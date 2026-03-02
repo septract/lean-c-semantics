@@ -99,6 +99,30 @@ def Precondition.subst (σ : Subst) (pre : Precondition) : Precondition :=
 def Postcondition.subst (σ : Subst) (post : Postcondition) : Postcondition :=
   { clauses := post.clauses.map (Clause.subst σ) }
 
+/-! ## Total Substitution for Clauses and Specifications
+
+Uses `AnnotTerm.substTotal` and `Request.substTotal` instead of the partial
+versions. Enables definitional reduction for proc/ccall soundness proofs.
+-/
+
+/-- Total substitution in a clause. Uses `Request.substTotal` and
+    `AnnotTerm.substTotal`. -/
+def Clause.substTotal (σ : Subst) : Clause → Clause
+  | .resource n r =>
+    let request' := r.request.substTotal σ
+    let output' := { r.output with value := AnnotTerm.substTotal σ r.output.value }
+    .resource n { r with request := request', output := output' }
+  | .constraint assertion => .constraint (AnnotTerm.substTotal σ assertion)
+  | .letBinding n v => .letBinding n (AnnotTerm.substTotal σ v)
+
+/-- Total substitution in a precondition. -/
+def Precondition.substTotal (σ : Subst) (pre : Precondition) : Precondition :=
+  { clauses := pre.clauses.map (Clause.substTotal σ) }
+
+/-- Total substitution in a postcondition. -/
+def Postcondition.substTotal (σ : Subst) (post : Postcondition) : Postcondition :=
+  { clauses := post.clauses.map (Clause.substTotal σ) }
+
 /-- Complete function specification
     Combines precondition and postcondition.
 

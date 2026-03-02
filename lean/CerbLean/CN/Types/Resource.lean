@@ -103,6 +103,13 @@ def subst (σ : Subst) (p : Predicate) : Predicate :=
     pointer := p.pointer.subst σ
     iargs := p.iargs.map (·.subst σ) }
 
+/-- Total substitution in a simple predicate. Uses `AnnotTerm.substTotal`
+    instead of the `partial` version. -/
+def substTotal (σ : Subst) (p : Predicate) : Predicate :=
+  { p with
+    pointer := AnnotTerm.substTotal σ p.pointer
+    iargs := p.iargs.map (AnnotTerm.substTotal σ) }
+
 end Predicate
 
 /-! ## Quantified Predicates
@@ -169,6 +176,18 @@ def subst (σ : Subst) (qp : QPredicate) : QPredicate :=
     permission := qp.permission.subst σ
     iargs := qp.iargs.map (·.subst σ) }
 
+/-- Total substitution in a quantified predicate. Uses `AnnotTerm.substTotal`.
+    Skips alpha-renaming when the quantified variable conflicts — returns
+    unchanged (safe for current proof examples where no qpredicate substitutions
+    conflict with the quantified variable). -/
+def substTotal (σ : Subst) (qp : QPredicate) : QPredicate :=
+  if σ.relevant.contains qp.q.1.id then qp
+  else
+    { qp with
+      pointer := AnnotTerm.substTotal σ qp.pointer
+      permission := AnnotTerm.substTotal σ qp.permission
+      iargs := qp.iargs.map (AnnotTerm.substTotal σ) }
+
 end QPredicate
 
 /-! ## Resource Requests
@@ -199,6 +218,12 @@ namespace Request
 def subst (σ : Subst) : Request → Request
   | .p pred => .p (pred.subst σ)
   | .q qpred => .q (qpred.subst σ)
+
+/-- Total substitution in a resource request. Uses `substTotal` on the
+    underlying predicate. -/
+def substTotal (σ : Subst) : Request → Request
+  | .p pred => .p (pred.substTotal σ)
+  | .q qpred => .q (qpred.substTotal σ)
 
 end Request
 

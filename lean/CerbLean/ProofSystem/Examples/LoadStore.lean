@@ -183,6 +183,7 @@ theorem incrTyped :
           (PureHasType.sym (by rfl))
           (PureHasType.val trivial)
           rfl)
+        rfl  -- valNew.bt = τ
     -- Step 3: pure () — heap unchanged
     · exact HasType.pure (.val True.intro)
 

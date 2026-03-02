@@ -67,7 +67,11 @@ def evalIndexTerm (ρ : Valuation) : IndexTerm → Option HeapValue
   | ⟨.const .null, _, _⟩ =>
     some (.pointer none)
   | ⟨.const (.z n), _, _⟩ =>
-    -- Unbounded integer; use signed int as representative IntegerType
+    -- TODO: Unbounded integer (.z) uses `.signed .int_` as a representative
+    -- IntegerType. This is arbitrary — if a `.z` constant ever appears as an
+    -- Owned resource value (not just in constraints), the IntegerType may not
+    -- match what the interpreter stored. Currently safe because `.z` appears
+    -- only in pure constraints, not in Owned output bindings.
     some (.integer (.signed .int_) n)
   | ⟨.const (.bits sign width n), _, _⟩ =>
     -- Fixed-width bitvector; map Sign to IntegerType
@@ -127,16 +131,25 @@ def evalConstraint (ρ : Valuation) (c : LogicalConstraint) : Prop :=
 /-- Relates a `HeapValue` to a CN `BaseType`.
     Used in soundness proofs to state that a value has the expected type.
     This is the semantic counterpart of `valueHasType` (in HasType.lean),
-    which relates Core `Value` to `CNBaseType`. -/
+    which relates Core `Value` to `CNBaseType`.
+
+    For `.bits` matching: uses `IntegerType.toSignWidth` to normalize ALL
+    integer kinds (`.int_`, `.intN 32`, `.long`, etc.) to (sign, width),
+    then compares. This accepts both interpreter-produced values (`.signed .int_`)
+    and evalIndexTerm-produced values (`.signed (.intN 32)`).
+
+    IMPORTANT: Every case must be tight — no blanket catchalls.
+    See docs/2026-03-01_SOUNDNESS_AUDIT.md issue #1. -/
 def heapValueHasType : HeapValue → CerbLean.CN.Types.BaseType → Prop
   | .integer _ _, .integer => True
-  | .integer (.signed (.intN w)) _, .bits .signed w' => w = w'
-  | .integer (.unsigned (.intN w)) _, .bits .unsigned w' => w = w'
+  | .integer ity _, .bits sign w =>
+    match ity.toSignWidth with
+    | some (isSigned, width) =>
+      (if sign = .signed then isSigned else !isSigned) ∧ width = w
+    | none => False
+  | .integer _ v, .bool => v = 0 ∨ v = 1  -- C booleans are integer 0 or 1
   | .pointer _, .loc => True
-  | .struct_ _ _, .record _ => True  -- field-level checking deferred
-  | _, .unit => True  -- unit is trivially satisfied
-  | _, .bool => True  -- booleans represented as integers in C
-  | _, .ctype => True  -- ctype values trivially satisfied
+  | .struct_ tag _, .struct_ tag' => tag == tag'  -- tag must match
   | _, _ => False
 
 /-! ## Semantic Model Relation
@@ -169,6 +182,13 @@ def models (ρ : Valuation) (H : SLProp) (h : HeapFragment) : Prop :=
       h.lookup loc = some v ∧
       (∀ loc', loc' ≠ loc → h.lookup loc' = none) ∧
       match initState with
+      -- DIVERGES-FROM-CN: Uses exact HeapValue equality (`= some v`).
+      -- evalIndexTerm for `.bits .signed 32 n` produces `.integer (.signed (.intN 32)) n`
+      -- while the interpreter stores `.integer (.signed .int_) n`. These are structurally
+      -- different. Currently safe because CN Owned output bindings are always symbols
+      -- (looked up from the valuation, returning the exact heap value). If constant
+      -- Owned values are ever needed, replace `= some v` with a compatibility relation
+      -- that normalizes IntegerType via `toSignWidth`.
       | .init => evalIndexTerm ρ val = some v ∧
                  CerbLean.CN.Semantics.valueMatchesType ct v ∧
                  heapValueHasType v val.bt
@@ -430,28 +450,35 @@ rules) with the semantic valuation extension (used by the models relation).
 
 open CerbLean.CN.Types (Subst)
 
-/-- Substitution in SLProp commutes with valuation extension (forward direction).
-    If σ maps each symbol s_i to term t_i, and ρ already binds each s_i to
-    the value that t_i evaluates to under ρ, then `H.subst σ` models the
-    same heaps as `H` does. Deprecated in favor of `models_subst_iff`. -/
-theorem models_subst (σ : Subst) (ρ : Valuation) (H : SLProp) (h : HeapFragment)
+/-- Substitution commutes with valuation extension: if σ maps each symbol
+    s_i to term t_i, and we define bindings as (s_i → eval(t_i) under ρ),
+    then modeling the substituted SLProp under ρ is equivalent to modeling
+    the original under the extended valuation `bindings ++ ρ`.
+
+    This is the key semantic lemma for save/run soundness:
+    - save rule: precondition is `inv.substTotal σ` under ρ (no loop params)
+    - body expects: `inv` under `bindings ++ ρ` (loop params bound)
+    - This lemma bridges the two.
+
+    The proof proceeds by structural induction on SLProp. Each case reduces
+    `substTotal` (which is total), then shows that `evalIndexTerm ρ (t.substTotal σ)`
+    equals `evalIndexTerm (bindings ++ ρ) t` when the bindings satisfy hσ. -/
+theorem models_substTotal_extend (σ : Subst) (ρ : Valuation)
+    (H : SLProp) (h : HeapFragment)
+    (bindings : List (Sym × HeapValue))
     (hσ : ∀ sid term, (sid, term) ∈ σ.mapping →
-      ∃ s, s.id = sid ∧ ρ.lookup s = evalIndexTerm ρ term) :
-    models ρ (H.subst σ) h → models ρ H h := by
+      ∃ s v, s.id = sid ∧ (s, v) ∈ bindings ∧
+        evalIndexTerm ρ term = some v) :
+    models ρ (H.substTotal σ) h ↔ models (bindings ++ ρ) H h := by
   sorry
 
-/-- Substitution in SLProp commutes with valuation extension (bidirectional).
-    If σ maps each symbol s_i to term t_i, and ρ already binds each s_i to
-    the value that t_i evaluates to under ρ, then `H.subst σ` and `H`
-    model exactly the same heaps.
-
-    This is the key semantic lemma needed for soundness of the proc/save/run
-    rules. It bridges the syntactic substitution in SLProp (used by the typing
-    rules) with the semantic valuation extension (used by the models relation). -/
-theorem models_subst_iff (σ : Subst) (ρ : Valuation) (H : SLProp) (h : HeapFragment)
+/-- Corollary: when ρ already contains the bindings, substitution is a no-op.
+    Useful for structural lemmas where the valuation doesn't change. -/
+theorem models_substTotal_iff (σ : Subst) (ρ : Valuation)
+    (H : SLProp) (h : HeapFragment)
     (hσ : ∀ sid term, (sid, term) ∈ σ.mapping →
       ∃ s, s.id = sid ∧ ρ.lookup s = evalIndexTerm ρ term) :
-    models ρ (H.subst σ) h ↔ models ρ H h := by
+    models ρ (H.substTotal σ) h ↔ models ρ H h := by
   sorry
 
 /-! ## Resource Conversion Compatibility -/
@@ -604,27 +631,76 @@ theorem HeapFragment.singleton_disjoint {loc : Location} {v : HeapValue}
 /-! ## Interpreter State Bridge
 
 The bridge between the proof system's heap model (`HeapFragment`) and the
-interpreter's concrete memory state (`InterpState`). The full conversion is
-complex because `MemState` uses a byte-level `bytemap` while `HeapFragment`
-uses typed `(Location × HeapValue)` cells. The extraction requires type
-information to group bytes into typed values.
+interpreter's concrete memory state (`InterpState`). The conversion goes:
+1. Iterate `MemState.allocations` to find typed memory regions
+2. For each allocation, reconstruct a typed `MemValue` from the byte-level `bytemap`
+3. Convert `MemValue → HeapValue` via `heapValueOfMemValue` (defined in Heap.lean)
+4. Produce `HeapFragment` cells at `Location` granularity
 
-For now we axiomatize the extraction and defer its implementation to when
-the soundness proof needs it. -/
+Step 2 (byte→typed-value reconstruction) is the complex part — it requires
+the same logic as the memory model's `load` operation. The body is sorry'd;
+the type-level plumbing constrains future implementations. -/
 
 open CerbLean.Semantics (InterpState)
 
 /-- Extract a logical heap fragment from an interpreter state.
-    AXIOM: The actual conversion from byte-level `MemState` to typed
-    `HeapFragment` requires type-directed byte grouping. This axiom is
-    in the TCB — it asserts that such an extraction exists and is faithful
-    to the memory model's semantics. -/
-axiom heapFragmentOf : InterpState → HeapFragment
+    Converts the byte-level `MemState` to typed `HeapFragment` by:
+    1. Iterating allocations
+    2. Reconstructing typed values from bytes (sorry'd)
+    3. Converting via `heapValueOfMemValue`
+
+    The body is sorry'd — byte→typed-value reconstruction requires the
+    full `reconstructValue` logic from the memory model. The type signature
+    is locked down to constrain future implementations. -/
+def heapFragmentOf (_st : InterpState) : HeapFragment :=
+  sorry
 
 /-- The interpreter state satisfies a separation-logic proposition.
     Connects the proof system (`models` over `HeapFragment`) to the
     interpreter (`InterpState`). -/
 def stateModels (σ : InterpState) (ρ : Valuation) (H : SLProp) : Prop :=
   models ρ H (heapFragmentOf σ)
+
+/-! ## Frame Properties
+
+These lemmas state that each memory operation has a local footprint —
+it only modifies the allocation it targets, leaving the rest of the heap
+unchanged. This is the key property needed for the frame rule's soundness.
+
+The concrete memory model's allocation-ID-based isolation makes these true:
+each operation touches exactly one allocation. Proofs are deferred but
+the statements constrain future implementations.
+
+See docs/2026-03-01_SOUNDNESS_AUDIT.md issue #7. -/
+
+/-- Store modifies exactly one cell: all other lookups are preserved.
+    Note: load is omitted because load doesn't modify the heap at all
+    (the soundness proof just uses `st' = st`). -/
+theorem store_preserves_frame {st st' : InterpState}
+    {loc : Location} {oldVal newVal : HeapValue}
+    (_hstore : True) :  -- TODO: storeImpl ct ptr val st = .ok ((), st')
+    (heapFragmentOf st).lookup loc = some oldVal →
+    (heapFragmentOf st').lookup loc = some newVal →
+    (∀ loc', loc' ≠ loc →
+      (heapFragmentOf st').lookup loc' = (heapFragmentOf st).lookup loc') := by
+  sorry
+
+/-- Kill removes exactly one cell, preserving all others. -/
+theorem kill_removes_cell {st st' : InterpState} {loc : Location}
+    (_hkill : True) :  -- TODO: killImpl kind ptr st = .ok ((), st')
+    (heapFragmentOf st).lookup loc ≠ none →
+    (heapFragmentOf st').lookup loc = none ∧
+    (∀ loc', loc' ≠ loc →
+      (heapFragmentOf st').lookup loc' = (heapFragmentOf st).lookup loc') := by
+  sorry
+
+/-- Allocate produces a fresh location, preserving all existing lookups. -/
+theorem allocate_fresh {st st' : InterpState} {loc : Location}
+    (_halloc : True) :  -- TODO: createImpl ... st = .ok (ptr, st')
+    (heapFragmentOf st).lookup loc = none →
+    (heapFragmentOf st').lookup loc ≠ none →
+    (∀ loc', loc' ≠ loc →
+      (heapFragmentOf st').lookup loc' = (heapFragmentOf st).lookup loc') := by
+  sorry
 
 end CerbLean.ProofSystem

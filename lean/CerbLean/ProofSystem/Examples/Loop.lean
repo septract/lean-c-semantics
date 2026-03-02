@@ -116,20 +116,17 @@ def innerCtx : Ctx := cntCtx.addParams loopLabelInv.params
 
 /-! ### Substitutions for save/run arguments
 
-  The save/run rules substitute actual argument terms into the invariant.
-  The substitution equalities hold but don't reduce definitionally because
-  `AnnotTerm.subst` is in a `partial mutual` block. We prove them as `sorry`
-  lemmas — they are morally `rfl` on concrete terms.
+  The save/run rules use `substTotal` (total substitution) instead of the
+  `partial` `subst`. This enables definitional reduction: the substitution
+  equalities hold by `rfl` on concrete terms.
 -/
 
 /-- The substitution mapping cntVSym → cntVTerm (identity-like). -/
 def loopIdentSubst : Subst :=
   Subst.fromMapping [(cntVSym.id, cntVTerm)]
 
-/-- Identity substitution on loopInvariant is identity.
-    Blocked by `partial` on `Term.subst`; morally `rfl`. -/
-private theorem loopInvariant_subst_ident :
-    loopInvariant.subst loopIdentSubst = loopInvariant := by sorry
+/-- Identity substitution on loopInvariant reduces by `rfl`. -/
+example : loopInvariant.substTotal loopIdentSubst = loopInvariant := by rfl
 
 /-- Typing derivation for the minimal loop.
 
@@ -143,16 +140,14 @@ private theorem loopInvariant_subst_ident :
        substitutes into invariant, checks precondition
 
     The substitution `loopIdentSubst` maps v → v (identity), so the
-    substituted invariant equals `loopInvariant`. -/
+    substituted invariant equals `loopInvariant` by `rfl`. -/
 theorem loopTyped :
     HasType cntCtx
       loopInvariant
       loopExpr
       .unit
       (.emp) := by
-  -- Transform pre-heap to substituted form (blocked by partial Term.subst)
-  rw [show loopInvariant = loopInvariant.subst loopIdentSubst from
-    loopInvariant_subst_ident.symm]
+  -- save rule: substTotal reduces loopInvariant.substTotal loopIdentSubst = loopInvariant
   refine HasType.save (inv := loopLabelInv) (argTerms := [cntVTerm])
     (σ := loopIdentSubst) rfl rfl rfl rfl ?_ ?_
   · -- PexprMatchesTerm for each param
@@ -160,10 +155,8 @@ theorem loopTyped :
     match i, hp, ht with
     | 0, _, _ => exact PexprMatchesTerm.sym cntVSym (.bits .signed 32) default
   · -- body (run loop) type-checks under invariant
-    -- Goal has loopLabelInv.invariant which is definitionally loopInvariant
     change HasType _ loopInvariant _ _ _
-    rw [show loopInvariant = loopInvariant.subst loopIdentSubst from
-      loopInvariant_subst_ident.symm]
+    -- run rule: substTotal reduces identically
     exact HasType.run (inv := loopLabelInv) (argTerms := [cntVTerm])
       (σ := loopIdentSubst) rfl rfl rfl rfl
       (fun i ha ht => by match i, ha, ht with
@@ -264,13 +257,11 @@ def countdownExpr : AExpr :=
 
 /-! ### Substitutions for Countdown
 
-  The save/run rules substitute actual argument terms into the invariant.
+  The save/run rules use `substTotal` for argument substitution into the invariant.
   - Save: maps v → v (identity) — invariant unchanged
   - Run: maps v → (v-1) — invariant becomes `Owned(p, v-1) ∗ emp` = `postStoreHeap`
 
-  The substitution equalities hold but don't reduce definitionally because
-  `AnnotTerm.subst` is in a `partial mutual` block. We prove them as `sorry`
-  lemmas — they are morally `rfl` on concrete terms. -/
+  Both equalities reduce by `rfl` thanks to `substTotal` being total. -/
 
 /-- Substitution for save: maps v → v (identity). -/
 def countdownSaveSubst : Subst :=
@@ -280,27 +271,21 @@ def countdownSaveSubst : Subst :=
 def countdownRunSubst : Subst :=
   Subst.fromMapping [(cntVSym.id, vMinusOneTerm)]
 
-/-- Identity substitution on countdownInvariant is identity.
-    Blocked by `partial` on `Term.subst`; morally `rfl`. -/
-private theorem countdownInvariant_subst_save :
-    countdownInvariant.subst countdownSaveSubst = countdownInvariant := by sorry
+/-- Identity substitution on countdownInvariant reduces by `rfl`. -/
+example : countdownInvariant.substTotal countdownSaveSubst = countdownInvariant := by rfl
 
-/-- Run substitution produces postStoreHeap.
-    Blocked by `partial` on `Term.subst`; morally `rfl`. -/
-private theorem countdownInvariant_subst_run :
-    countdownInvariant.subst countdownRunSubst = postStoreHeap := by sorry
+/-- Run substitution produces postStoreHeap — reduces by `rfl`. -/
+example : countdownInvariant.substTotal countdownRunSubst = postStoreHeap := by rfl
 
 /-- Typing derivation for the countdown loop.
 
-    **No hypotheses needed** — the argument substitution in `save` and `run`
-    rules automatically produces the correct pre/postconditions. The
-    substitution equalities are `sorry`-proved due to `partial` on `Term.subst`.
+    **No hypotheses, no sorry** — the argument substitution in `save` and `run`
+    rules uses `substTotal` which reduces definitionally on concrete terms.
 
-    Previously this theorem required `h_inv_restore : SLProp.entails postStoreHeap
-    countdownInvariant` — an unsound hypothesis that claimed `Owned(p, v-1)`
-    entails `Owned(p, v)`. Now the `run` rule substitutes `v → (v-1)` in the
-    invariant, producing `Owned(p, v-1) ∗ emp` = `postStoreHeap` as the
-    precondition, which matches what the store produces exactly.
+    Previously this theorem required sorry'd substitution lemmas (because
+    `Term.subst` is `partial`) and an unsound `SLProp.entails` hypothesis.
+    Now the `run` rule substitutes `v → (v-1)` in the invariant via `substTotal`,
+    producing `Owned(p, v-1) ∗ emp` = `postStoreHeap` as the precondition.
 
     **Rules exercised**: save, let_, if_, action_store, run, pure,
     PexprMatchesTerm (sym, op, bitsVal) -/
@@ -310,10 +295,8 @@ theorem countdownTyped :
       countdownExpr
       .unit
       countdownInvariant := by
-  -- Bridge: prove with substituted pre-heap, then rewrite back
-  suffices HasType countdownCtx (countdownInvariant.subst countdownSaveSubst)
-      countdownExpr .unit countdownInvariant by
-    rw [countdownInvariant_subst_save] at this; exact this
+  -- save rule: substTotal reduces countdownInvariant.substTotal countdownSaveSubst
+  -- = countdownInvariant by rfl
   refine HasType.save (inv := countdownLabelInv) (argTerms := [cntVTerm])
     (σ := countdownSaveSubst) rfl rfl rfl rfl ?_ ?_
   · -- PexprMatchesTerm: cntInitPe.expr matches cntVTerm
@@ -342,10 +325,10 @@ theorem countdownTyped :
             (PureHasType.op
               (PureHasType.sym (by rfl))
               (PureHasType.val (τ := .bits .signed 32) trivial) rfl)
-        · -- run: substituting v → (v-1) gives postStoreHeap = what store produced
+            rfl  -- valNew.bt = τ
+        · -- run: substTotal reduces countdownInvariant.substTotal countdownRunSubst
+          -- = postStoreHeap by rfl, matching what the store produced
           change HasType _ postStoreHeap _ _ _
-          rw [show postStoreHeap = countdownInvariant.subst countdownRunSubst from
-            countdownInvariant_subst_run.symm]
           exact HasType.run (inv := countdownLabelInv)
             (argTerms := [vMinusOneTerm]) (σ := countdownRunSubst)
             rfl rfl rfl rfl

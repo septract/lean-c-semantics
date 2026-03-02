@@ -35,18 +35,9 @@ abbrev CNBaseType := CerbLean.CN.Types.BaseType
 /-! ## Helper Functions -/
 
 /-- Width in bits for each integer base kind.
+    Delegates to `IntBaseKind.width` (Core/IntegerType.lean).
     Uses LP64 data model (matching Cerberus default target). -/
-def intBaseKindWidth : IntBaseKind → Nat
-  | .ichar => 8
-  | .short => 16
-  | .int_ => 32
-  | .long => 64         -- LP64; 32 on Windows/ILP32
-  | .longLong => 64
-  | .intN n => n
-  | .intLeastN n => n
-  | .intFastN n => n
-  | .intmax => 64
-  | .intptr => 64
+def intBaseKindWidth (k : IntBaseKind) : Nat := k.width
 
 /-- Map a Core `IntegerType` to a CN `BaseType`.
     Used to constrain the result type of `convInt` and `wrapI` rules. -/
@@ -62,23 +53,30 @@ def intTypeToBaseType : IntegerType → CNBaseType
   | .ptrdiff_t => .bits .signed 64   -- LP64
   | .ptraddr_t => .bits .unsigned 64 -- CHERI, treat as pointer-width
 
-/-- Map a Core `Ctype` to a CN `BaseType`.
-    Used to constrain `memberof` result types and `unspecified` values. -/
-def ctypeToBaseType : Ctype → Option CNBaseType
-  | ⟨_, .basic (.integer ity)⟩ => some (intTypeToBaseType ity)
-  | ⟨_, .basic (.floating _)⟩ => some .real
-  | ⟨_, .pointer _ _⟩ => some .loc
-  | ⟨_, .struct_ tag⟩ => some (.struct_ tag)
-  | ⟨_, .union_ tag⟩ => some (.struct_ tag)
-  | ⟨_, .void⟩ => some .unit
+/-- Convert the inner Ctype_ to a CN BaseType. Structurally recursive on Ctype_.
+    Handles array (→ list) and atomic (→ unwrap) types. -/
+private def ctype_ToBaseType : Ctype_ → Option CNBaseType
+  | .basic (.integer ity) => some (intTypeToBaseType ity)
+  | .basic (.floating _) => some .real
+  | .pointer _ _ => some .loc
+  | .struct_ tag => some (.struct_ tag)
+  | .union_ tag => some (.struct_ tag)
+  | .void => some .unit
+  | .array elem _ => ctype_ToBaseType elem |>.map (.list ·)
+  | .atomic inner => ctype_ToBaseType inner
   | _ => none
+
+def ctypeToBaseType (ct : Ctype) : Option CNBaseType :=
+  ctype_ToBaseType ct.ty
 
 /-- Negate an index term by wrapping in logical NOT. -/
 def negateIndexTerm (it : IndexTerm) : IndexTerm :=
   AnnotTerm.mk (.unop .not it) .bool default
 
-/-- Convert simple Pexprs to IndexTerms for use in path conditions.
-    Handles symbol references and integer literals. -/
+/-- Convert simple Pexprs to IndexTerms for use as comparison operands.
+    Handles symbol references and integer literals.
+    Symbols get `.integer` type — correct for comparison operands (v > 0)
+    but would need context lookup for general symbol typing. -/
 def pexprToIndexTerm : Pexpr → Option IndexTerm
   | .sym s => some (AnnotTerm.mk (.sym s) .integer default)
   | .val (.loaded (.specified (.integer ⟨n, _⟩))) =>
@@ -229,6 +227,9 @@ def valueHasType : Value → CNBaseType → Prop
   | .loaded (.specified (.integer _)), .integer => True
   | .loaded (.specified (.pointer _)), .loc => True
   | .loaded (.specified (.floating _)), .real => True
+  -- DIVERGES-FROM-CN: Array element types not checked. ObjectValue.array
+  -- doesn't carry element type info, so we can't verify element types here.
+  -- Would need LoadedValue type annotation or Ctype context to check properly.
   | .loaded (.specified (.array _)), .list _ => True
   | .loaded (.specified (.struct_ tag _)), .struct_ tag' => tag == tag'
   | .loaded (.specified (.union_ tag _ _)), .struct_ tag' => tag == tag'
@@ -589,6 +590,7 @@ inductive HasType : Ctx → SLProp → AExpr → CNBaseType → SLProp → Prop 
     PexprMatchesTerm valPe.expr valNew →
     PureHasType Γ ptrPe .loc →
     PureHasType Γ valPe τ →
+    valNew.bt = τ →  -- stored value's type annotation must match its actual type
     HasType Γ (.star (.owned ct .init ptr valOld) R)
       ⟨annots, .action ⟨.pos, ⟨locAnn, .store false tyPe ptrPe valPe .na⟩⟩⟩
       .unit
@@ -606,6 +608,7 @@ inductive HasType : Ctx → SLProp → AExpr → CNBaseType → SLProp → Prop 
     PexprMatchesTerm valPe.expr valNew →
     PureHasType Γ ptrPe .loc →
     PureHasType Γ valPe τ →
+    valNew.bt = τ →  -- stored value's type annotation must match its actual type
     HasType Γ (.star (.block ct ptr) R)
       ⟨annots, .action ⟨.pos, ⟨locAnn, .store false tyPe ptrPe valPe .na⟩⟩⟩
       .unit
@@ -667,33 +670,37 @@ inductive HasType : Ctx → SLProp → AExpr → CNBaseType → SLProp → Prop 
       (spec.params.zip argTerms |>.map fun ((sym, _), term) => (sym.id, term)) →
     (∀ i (ha : i < args.length) (ht : i < argTerms.length),
       PexprMatchesTerm (args[i]).expr (argTerms[i])) →
-    HasType Γ (.star (SLProp.ofPrecondition (spec.requires.subst σ)) R)
+    HasType Γ (.star (SLProp.ofPrecondition (spec.requires.substTotal σ)) R)
       ⟨annots, .proc (Name.sym s) args⟩
       spec.returnType
-      (.star (SLProp.ofPostcondition (spec.ensures.subst σ)) R)
+      (.star (SLProp.ofPostcondition (spec.ensures.substTotal σ)) R)
 
   /-- **C function call through pointer**: Like `proc` but the function is
-      identified by a pointer expression rather than a direct symbol. The
-      specification must be supplied (in a full system, connected via the
-      function pointer's type annotation).
+      identified by a pointer expression rather than a direct symbol.
+      The function pointer must resolve to a known symbol with a spec.
       Return type is constrained to `spec.returnType`.
-      The function pointer must be well-typed as a location (pointer). -/
+      `PexprMatchesTerm` connects the pointer to a symbol, and the spec
+      is looked up from the context for that symbol — preventing unsound
+      derivations that use an arbitrary spec. -/
   | ccall : ∀ {Γ : Ctx} {R : SLProp} {annots : Annots}
       {funPtr funTy : APexpr} {args : List APexpr}
       {spec : FunctionSpec}
       {argTerms : List IndexTerm}
-      {σ : Subst},
+      {σ : Subst}
+      {funSym : Sym},
     PureHasType Γ funPtr .loc →
+    PexprMatchesTerm funPtr.expr ⟨.sym funSym, .loc, default⟩ →
+    Γ.lookupFunSpec funSym = some spec →
     args.length = spec.params.length →
     argTerms.length = args.length →
     σ = Subst.fromMapping
       (spec.params.zip argTerms |>.map fun ((sym, _), term) => (sym.id, term)) →
     (∀ i (ha : i < args.length) (ht : i < argTerms.length),
       PexprMatchesTerm (args[i]).expr (argTerms[i])) →
-    HasType Γ (.star (SLProp.ofPrecondition (spec.requires.subst σ)) R)
+    HasType Γ (.star (SLProp.ofPrecondition (spec.requires.substTotal σ)) R)
       ⟨annots, .ccall funPtr funTy args⟩
       spec.returnType
-      (.star (SLProp.ofPostcondition (spec.ensures.subst σ)) R)
+      (.star (SLProp.ofPostcondition (spec.ensures.substTotal σ)) R)
 
   -- Memory Operations (Memops)
 
@@ -737,12 +744,16 @@ inductive HasType : Ctx → SLProp → AExpr → CNBaseType → SLProp → Prop 
       {args : List APexpr},
     HasType Γ H ⟨annots, .memop .ptrdiff args⟩ (.bits .signed 64) H
 
-  /-- **memcpy**: copies memory between locations. Modifies heap —
-      post-heap is given by an entailment hypothesis. -/
-  | memop_memcpy : ∀ {Γ : Ctx} {H₁ H₂ : SLProp} {annots : Annots}
+  /-- **memcpy**: copies memory between locations.
+      Conservative rule: heap is preserved. The actual byte-level copy
+      happens at the interpreter level; the proof system treats the
+      existing resources as unchanged. Users who need to reason about
+      the copied values should assert postconditions via `consequence`.
+      This avoids the unsound bare-entailment rule that allowed claiming
+      arbitrary post-heap transformations (see soundness audit #4). -/
+  | memop_memcpy : ∀ {Γ : Ctx} {H : SLProp} {annots : Annots}
       {args : List APexpr},
-    SLProp.entails H₁ H₂ →
-    HasType Γ H₁ ⟨annots, .memop .memcpy args⟩ .unit H₂
+    HasType Γ H ⟨annots, .memop .memcpy args⟩ .unit H
 
   /-- **memcmp**: compares memory. Returns a signed 32-bit integer.
       Heap unchanged (read-only). -/
@@ -772,7 +783,7 @@ inductive HasType : Ctx → SLProp → AExpr → CNBaseType → SLProp → Prop 
     (∀ i (hp : i < params.length) (ht : i < argTerms.length),
       PexprMatchesTerm (params[i]).2.2.expr (argTerms[i])) →
     HasType (Γ.addParams inv.params) inv.invariant body τ H₂ →
-    HasType Γ (inv.invariant.subst σ)
+    HasType Γ (inv.invariant.substTotal σ)
       ⟨annots, .save retSym retTy params body⟩ τ H₂
 
   /-- **Run (continuation jump)**: Jump to a labeled continuation.
@@ -792,7 +803,7 @@ inductive HasType : Ctx → SLProp → AExpr → CNBaseType → SLProp → Prop 
       (inv.params.zip argTerms |>.map fun ((sym, _), term) => (sym.id, term)) →
     (∀ i (ha : i < args.length) (ht : i < argTerms.length),
       PexprMatchesTerm (args[i]).expr (argTerms[i])) →
-    HasType Γ (inv.invariant.subst σ)
+    HasType Γ (inv.invariant.substTotal σ)
       ⟨annots, .run label args⟩ τ H₂
 
   -- Structural Rules

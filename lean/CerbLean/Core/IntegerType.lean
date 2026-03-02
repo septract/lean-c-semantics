@@ -54,4 +54,31 @@ inductive IntegerType where
   | ptraddr_t                      -- ptraddr_t (CHERI)
   deriving Repr, BEq, Inhabited
 
+/-- Width in bits for each integer base kind.
+    Uses LP64 data model (matching Cerberus default target). -/
+def IntBaseKind.width : IntBaseKind → Nat
+  | .ichar => 8
+  | .short => 16
+  | .int_ => 32
+  | .long => 64
+  | .longLong => 64
+  | .intN n => n
+  | .intLeastN n => n
+  | .intFastN n => n
+  | .intmax => 64
+  | .intptr => 64
+
+/-- Map an IntegerType to its CN (Sign, width) pair.
+    Returns `none` for types without a fixed-width bits representation
+    (char, bool, enum — these use `.integer` or `.bool` base types). -/
+def IntegerType.toSignWidth : IntegerType → Option (Bool × Nat)
+  | .signed k => some (true, k.width)
+  | .unsigned k => some (false, k.width)
+  | .size_t => some (false, 64)
+  | .ptrdiff_t => some (true, 64)
+  | .ptraddr_t => some (false, 64)
+  | .wchar_t => some (true, 32)
+  | .wint_t => some (true, 32)
+  | _ => none
+
 end CerbLean.Core

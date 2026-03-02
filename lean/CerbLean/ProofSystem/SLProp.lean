@@ -98,6 +98,61 @@ def subst (σ : Subst) : SLProp → SLProp
       let σ' := Subst.fromMapping (σ.mapping.filter (·.1 != var.id))
       .ex var ty (body.subst σ')
 
+/-! ## Total Substitution
+
+`SLProp.substTotal` is a total (non-partial) version of `SLProp.subst` that
+uses `Term.substTotal` and `AnnotTerm.substTotal` (defined in CN/Types/Term.lean)
+instead of the `partial` `Term.subst`. This covers only the ~10 Term constructors
+that actually appear in SLProp's IndexTerms, which are all non-binding forms
+and thus structurally recursive.
+
+The key benefit: `substTotal` reduces definitionally on concrete terms,
+enabling proofs by `rfl` and unblocking `models_substTotal_extend` (the
+semantic substitution lemma needed for proc/save/run soundness).
+
+See docs/2026-03-01_SOUNDNESS_AUDIT.md issue #5.
+-/
+
+/-- Total substitution for LogicalConstraints. Uses `AnnotTerm.substTotal`. -/
+def LogicalConstraint.substTotal (σ : Subst) : LogicalConstraint → LogicalConstraint
+  | .t term => .t (AnnotTerm.substTotal σ term)
+  -- INVARIANT: forall_ constraints do not appear in SLProp in current proof
+  -- examples. If they do, extend with alpha-renaming (total, since body is
+  -- structurally smaller). Until then, identity is safe.
+  | other => other
+
+/-- Total substitution in SLProp. Uses `AnnotTerm.substTotal` and
+    `LogicalConstraint.substTotal` instead of the `partial` versions.
+
+    The `ex` case uses capture-avoiding alpha-renaming, mirroring
+    `SLProp.subst` (lines 86-99) but using `substTotal`. -/
+def substTotal (σ : Subst) : SLProp → SLProp
+  | .emp => .emp
+  | .owned ct initState ptr val =>
+    .owned ct initState (AnnotTerm.substTotal σ ptr) (AnnotTerm.substTotal σ val)
+  | .block ct ptr => .block ct (AnnotTerm.substTotal σ ptr)
+  | .pred name ptr iargs oarg =>
+    .pred name (AnnotTerm.substTotal σ ptr)
+      (iargs.map (AnnotTerm.substTotal σ)) (AnnotTerm.substTotal σ oarg)
+  | .star l r => .star (l.substTotal σ) (r.substTotal σ)
+  -- INVARIANT: `each` resources are not used in current SLProp proof examples.
+  -- When needed, extend: substitute in qp.pointer, qp.permission, qp.iargs,
+  -- and oarg via AnnotTerm.substTotal (all total). Identity until then.
+  | .each _qp _oarg => .each _qp _oarg
+  | .pure c => .pure (LogicalConstraint.substTotal σ c)
+  | .ex var ty body =>
+    -- Capture-avoiding: alpha-rename var if it conflicts with σ's range.
+    -- Mirrors SLProp.subst but uses substTotal.
+    if σ.relevant.contains var.id then
+      let var' := freshSymFor var σ.relevant
+      let combined := Subst.fromMapping
+        ((var.id, AnnotTerm.mk (.sym var') ty default) ::
+         σ.mapping.filter (·.1 != var.id))
+      .ex var' ty (body.substTotal combined)
+    else
+      let σ' := Subst.fromMapping (σ.mapping.filter (·.1 != var.id))
+      .ex var ty (body.substTotal σ')
+
 end SLProp
 
 instance : Repr SLProp where

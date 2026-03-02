@@ -54,6 +54,54 @@ inductive HeapValue where
   | uninitialized (ty : Ctype)
   deriving Repr, Inhabited
 
+/-! ## MemValue → HeapValue Conversion
+
+Converts interpreter memory values (`MemValue`) to separation-logic heap values
+(`HeapValue`). This is the type-level bridge between the concrete memory model
+and the logical heap model.
+
+Note: MemValue carries more information (Ctype per struct field, provenance on
+integers, floating point). HeapValue is the simpler logical representation.
+-/
+
+open CerbLean.Core (MemValue PointerValue PointerValueBase Provenance)
+
+/-- Convert a pointer value to an optional Location.
+    Only concrete pointers with provenance produce a location;
+    NULL and function pointers map to `none`. -/
+def locationOfPointerValue (pv : PointerValue) : Option Location :=
+  match pv.prov, pv.base with
+  | .some allocId, .concrete _ addr => some ⟨allocId, addr⟩
+  | _, .null _ => none
+  | _, _ => none  -- function pointers, symbolic provenance: not heap locations
+
+/-- Convert a MemValue (interpreter) to a HeapValue (separation logic).
+    Structural recursion on MemValue.
+    - `floating` has no HeapValue equivalent — mapped to `.uninitialized`
+    - `union_` mapped to struct with single member field
+    - `array` requires element type from context — stubbed as `.uninitialized` -/
+def heapValueOfMemValue : MemValue → HeapValue
+  | .integer ity iv => .integer ity iv.val
+  | .pointer _ty pv => .pointer (locationOfPointerValue pv)
+  | .struct_ tag members =>
+    .struct_ tag (convertFields members)
+  | .union_ tag id mv =>
+    .struct_ tag [(id, heapValueOfMemValue mv)]
+  | .array _elems =>
+    -- DIVERGES-FROM-CN: Array needs element Ctype from context to construct
+    -- HeapValue.array. For now, return uninitialized placeholder.
+    -- Real implementation would need the allocation's Ctype.
+    .uninitialized ⟨[], .void⟩
+  | .floating _fty _fv =>
+    -- Floating point has no HeapValue representation
+    .uninitialized ⟨[], .void⟩
+  | .unspecified ty => .uninitialized ty
+where
+  /-- Convert struct fields, recursing into each MemValue member. -/
+  convertFields : List (Identifier × Ctype × MemValue) → List (Identifier × HeapValue)
+    | [] => []
+    | (id, _ty, mv) :: rest => (id, heapValueOfMemValue mv) :: convertFields rest
+
 /-! ## Heap Fragment
 
 This is the standard separation logic heap - a partial map from locations to values.
