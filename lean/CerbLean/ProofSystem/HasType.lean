@@ -762,6 +762,11 @@ inductive HasType : Ctx → SLProp → AExpr → CNBaseType → SLProp → Prop 
       {args : List APexpr}
       {qpDst qpSrc : QPredicate}
       {dstOut srcOut dstOut' : IndexTerm},
+    -- Connect Core arguments to SLProp QPredicate pointers
+    args.length ≥ 3 →
+    PexprMatchesTerm (args[0]!).expr qpDst.pointer →
+    PexprMatchesTerm (args[1]!).expr qpSrc.pointer →
+    -- QPredicate constraints
     qpDst.name = .owned (some Ctype.byte) .uninit →
     qpSrc.name = .owned (some Ctype.byte) .init →
     qpDst.step = Ctype.byte →
@@ -858,22 +863,83 @@ circular imports.
 See docs/2026-03-01_HASTYPE_SOUNDNESS_AUDIT.md issues #6, #8.
 -/
 
+open CerbLean.Core (MemValue IntegerType PointerValue FloatingType FloatingValue
+                     StructMember Qualifiers)
 open CerbLean.CN.Semantics (HeapValue HeapFragment Valuation heapValueOfMemValue)
+
+/-- Specification relation for `memValueFromValue` (Semantics/Eval.lean:310).
+    Since `memValueFromValue` is `partial`, it cannot appear in theorem
+    statements. This inductive relation specifies its input/output behavior
+    for the cases relevant to soundness proofs.
+
+    `MemValueFromValue ct v mv` holds when `memValueFromValue ct v = some mv`.
+
+    Each constructor mirrors one successful branch of `memValueFromValue`.
+    Covers: unspecified, integer, floating, pointer. Array and struct cases
+    can be added as needed (they require recursive cases). -/
+inductive MemValueFromValue : Ctype → Value → MemValue → Prop where
+  /-- Unspecified value passes through.
+      Corresponds to: Eval.lean:321 -/
+  | unspecified : ∀ (ct : Ctype) (ty : Ctype),
+      MemValueFromValue ct (.loaded (.unspecified ty)) (.unspecified ty)
+  /-- Integer object value with matching integer type.
+      Corresponds to: Eval.lean:323 -/
+  | integerObj : ∀ (ct : Ctype) (ity : IntegerType) (iv : CerbLean.Core.IntegerValue),
+      ct.ty = .basic (.integer ity) →
+      MemValueFromValue ct (.object (.integer iv)) (.integer ity iv)
+  /-- Integer loaded value with matching integer type.
+      Corresponds to: Eval.lean:324 -/
+  | integerLoaded : ∀ (ct : Ctype) (ity : IntegerType) (iv : CerbLean.Core.IntegerValue),
+      ct.ty = .basic (.integer ity) →
+      MemValueFromValue ct (.loaded (.specified (.integer iv))) (.integer ity iv)
+  /-- Byte-typed integer object value (byte = unsigned ichar).
+      Corresponds to: Eval.lean:326 -/
+  | byteObj : ∀ (ct : Ctype) (iv : CerbLean.Core.IntegerValue),
+      ct.ty = .byte →
+      MemValueFromValue ct (.object (.integer iv)) (.integer (.unsigned .ichar) iv)
+  /-- Byte-typed integer loaded value (byte = unsigned ichar).
+      Corresponds to: Eval.lean:327 -/
+  | byteLoaded : ∀ (ct : Ctype) (iv : CerbLean.Core.IntegerValue),
+      ct.ty = .byte →
+      MemValueFromValue ct (.loaded (.specified (.integer iv))) (.integer (.unsigned .ichar) iv)
+  /-- Floating object value with matching floating type.
+      Corresponds to: Eval.lean:329 -/
+  | floatingObj : ∀ (ct : Ctype) (fty : FloatingType) (fv : FloatingValue),
+      ct.ty = .basic (.floating fty) →
+      MemValueFromValue ct (.object (.floating fv)) (.floating fty fv)
+  /-- Floating loaded value with matching floating type.
+      Corresponds to: Eval.lean:330 -/
+  | floatingLoaded : ∀ (ct : Ctype) (fty : FloatingType) (fv : FloatingValue),
+      ct.ty = .basic (.floating fty) →
+      MemValueFromValue ct (.loaded (.specified (.floating fv))) (.floating fty fv)
+  /-- Pointer object value.
+      Corresponds to: Eval.lean:332-333 -/
+  | pointerObj : ∀ (ct : Ctype) (qual : Qualifiers) (refTy : Ctype_)
+      (pv : PointerValue),
+      ct.ty = .pointer qual refTy →
+      MemValueFromValue ct (.object (.pointer pv))
+        (.pointer ⟨[], refTy⟩ pv)
+  /-- Pointer loaded value.
+      Corresponds to: Eval.lean:334-335 -/
+  | pointerLoaded : ∀ (ct : Ctype) (qual : Qualifiers) (refTy : Ctype_)
+      (pv : PointerValue),
+      ct.ty = .pointer qual refTy →
+      MemValueFromValue ct (.loaded (.specified (.pointer pv)))
+        (.pointer ⟨[], refTy⟩ pv)
 
 /-- Value-to-HeapValue type bridge.
     If a Core `Value` has CN type τ (via `valueHasType`), and it converts
-    to a `MemValue` (via `memValueFromValue` from Semantics/Eval.lean:310),
-    then the resulting `HeapValue` (via `heapValueOfMemValue`) has that type.
+    to a `MemValue` (via `MemValueFromValue`, specifying the partial
+    `memValueFromValue` from Semantics/Eval.lean:310), then the resulting
+    `HeapValue` (via `heapValueOfMemValue`) has that type.
 
     This bridges the interpreter's value representation with the proof
     system's heap model. Needed for `action_store` soundness.
-    See audit issue #6.
-
-    Note: Takes the MemValue as a parameter rather than referencing
-    `memValueFromValue` directly, avoiding a dependency on Semantics.Eval. -/
+    See audit issue #6. -/
 theorem valueHasType_implies_heapValueHasType
-    {v : Value} {τ : CNBaseType} {mv : CerbLean.Core.MemValue}
-    (_hvt : valueHasType v τ) :
+    {ct : Ctype} {v : Value} {τ : CNBaseType} {mv : MemValue}
+    (_hvt : valueHasType v τ)
+    (_hmv : MemValueFromValue ct v mv) :
     heapValueHasType (heapValueOfMemValue mv) τ := by
   sorry
 
@@ -887,9 +953,17 @@ def envValuationCompat (env : List (Sym × Value)) (ρ : Valuation) : Prop :=
     ∃ hv, ρ.lookup s = some hv ∧
       ∀ τ, valueHasType v τ → heapValueHasType hv τ
 
+/-- Look up the value of a Pexpr symbol in an interpreter environment.
+    For `Pexpr.sym s`, returns the value bound to `s`.
+    Other Pexpr forms are not directly looked up (they compose sub-lookups). -/
+def pexprEnvLookup (env : List (Sym × Value)) : Pexpr → Option Value
+  | .sym s => env.lookup s
+  | _ => none
+
 /-- PexprMatchesTerm correctness: if a Core Pexpr matches an IndexTerm,
-    then under compatible env/valuation pairs, the Pexpr and IndexTerm
-    evaluate to corresponding values.
+    then under compatible env/valuation pairs, looking up the Pexpr's
+    value in the env and evaluating the IndexTerm in the valuation yield
+    type-compatible results.
 
     This connects the syntactic `PexprMatchesTerm` relation to actual
     semantic agreement. Needed for all rules with `PexprMatchesTerm`
@@ -903,10 +977,12 @@ def envValuationCompat (env : List (Sym × Value)) (ρ : Valuation) : Prop :=
     both HasType and Eval. -/
 theorem pexprMatchesTerm_eval_compat
     {pe : Pexpr} {it : IndexTerm} {ρ : Valuation}
-    (_hmatch : PexprMatchesTerm pe it) :
-    ∀ (v : Value) (hv : HeapValue),
-      evalIndexTerm ρ it = some hv →
-      ∀ τ, valueHasType v τ → heapValueHasType hv τ := by
+    {env : List (Sym × Value)}
+    (_hmatch : PexprMatchesTerm pe it)
+    (_hcompat : envValuationCompat env ρ) :
+    ∀ v, pexprEnvLookup env pe = some v →
+      ∀ τ, valueHasType v τ →
+        ∃ hv, evalIndexTerm ρ it = some hv ∧ heapValueHasType hv τ := by
   sorry
 
 end CerbLean.ProofSystem

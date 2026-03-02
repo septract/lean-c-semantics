@@ -737,13 +737,22 @@ open CerbLean.Semantics (InterpState)
 
 /-- Extract a logical heap fragment from an interpreter state.
     Converts the byte-level `MemState` to typed `HeapFragment` by:
-    1. Iterating allocations
-    2. Reconstructing typed values from bytes (sorry'd)
-    3. Converting via `heapValueOfMemValue`
+    1. Iterating over live allocations in `st.memory.allocations`
+    2. For each allocation, reconstructing the typed value from its
+       byte representation using the allocation's stored `Ctype`
+    3. Converting each `MemValue` to `HeapValue` via `heapValueOfMemValue`
+    4. Mapping each allocation to a `Location` using its allocation ID as
+       `allocId` and base address as `addr`
 
     The body is sorry'd — byte→typed-value reconstruction requires the
-    full `reconstructValue` logic from the memory model. The type signature
-    is locked down to constrain future implementations. -/
+    full `reconstructValue` logic from the memory model (`loadImpl`'s
+    byte-to-value path). The type signature is locked down to constrain
+    future implementations.
+
+    Key invariant: `heapFragmentOf` must be monotone w.r.t. untouched
+    allocations — if an allocation is not modified between `st` and `st'`,
+    then its `HeapFragment` cell is identical. This is what the frame
+    property lemmas rely on. -/
 def heapFragmentOf (_st : InterpState) : HeapFragment :=
   sorry
 
@@ -760,61 +769,94 @@ it only modifies the allocation it targets, leaving the rest of the heap
 unchanged. This is the key property needed for the frame rule's soundness.
 
 The concrete memory model's allocation-ID-based isolation makes these true:
-each operation touches exactly one allocation. Proofs are deferred but
-the statements constrain future implementations.
+each operation touches exactly one allocation (identified by the pointer's
+provenance / allocation ID). Proofs are deferred but the statements
+constrain future implementations.
+
+The bridge predicates (`storeSucceeded`, `killSucceeded`, `allocateSucceeded`)
+unwrap the `ConcreteMemM` monad stack to connect interpreter-level state
+transitions to the memory model operations.
 
 See docs/2026-03-01_SOUNDNESS_AUDIT.md issue #7. -/
 
-/-- Store modifies exactly one cell: all other lookups are preserved.
+open CerbLean.Core (PointerValue MemValue)
+open CerbLean.Memory (MemState TypeEnv ConcreteMemM storeImpl killImpl allocateImpl
+                       ReadonlyStatus)
+
+/-- Store succeeded: `storeImpl` with the given type env and memory state
+    produced a new memory state. Unwraps the `ConcreteMemM` monad:
+    `ConcreteMemM = ReaderT TypeEnv (StateT MemState (Except MemError))`. -/
+def storeSucceeded (env : TypeEnv) (st st' : MemState)
+    (ct : Ctype) (ptr : PointerValue) (mv : MemValue) : Prop :=
+  ∃ fp, ((storeImpl ct false ptr mv).run env).run st = .ok (fp, st')
+
+/-- Kill succeeded: `killImpl` with the given type env and memory state
+    produced a new memory state. -/
+def killSucceeded (env : TypeEnv) (st st' : MemState)
+    (isDynamic : Bool) (ptr : PointerValue) : Prop :=
+  ((killImpl isDynamic ptr).run env).run st = .ok ((), st')
+
+/-- Allocate succeeded: `allocateImpl` with the given type env and memory
+    state produced a new pointer and memory state. -/
+def allocateSucceeded (env : TypeEnv) (st st' : MemState)
+    (name : String) (size : Nat) (ty : Option Ctype)
+    (align : Nat) (readonly : ReadonlyStatus)
+    (init : Option MemValue) (ptr : PointerValue) : Prop :=
+  ((allocateImpl name size ty align readonly init).run env).run st = .ok (ptr, st')
+
+/-- Store modifies exactly one allocation: all other lookups are preserved.
     Note: load is omitted because load doesn't modify the heap at all
     (the soundness proof just uses `st' = st`).
 
-    TODO: The `_hstore : True` placeholder should become:
-      `hstore : storeImpl ct false ptr mval st = .ok ((), st')`
-    where `ct` is the Ctype, `ptr` is the pointer value, `mval` is the
-    MemValue being stored, `st` is the pre-state, and `st'` is the post-state.
-    Proof strategy: storeImpl (Memory/Impl.lean) only modifies the allocation
-    identified by ptr's provenance. heapFragmentOf maps each allocation to a
-    cell; since only one allocation changes, all other lookups are preserved. -/
-theorem store_preserves_frame {st st' : InterpState}
+    Proof strategy: `storeImpl` (Memory/Concrete.lean:711) only modifies
+    the bytes within the allocation identified by `ptr`'s provenance.
+    `heapFragmentOf` maps each allocation to a cell; since only one
+    allocation changes, all other lookups are preserved. -/
+theorem store_preserves_frame {env : TypeEnv} {st st' : MemState}
+    {ct : Ctype} {ptr : PointerValue} {mv : MemValue}
     {loc : Location} {oldVal newVal : HeapValue}
-    (_hstore : True) :  -- TODO: storeImpl ct false ptr mval st = .ok ((), st')
-    (heapFragmentOf st).lookup loc = some oldVal →
-    (heapFragmentOf st').lookup loc = some newVal →
+    (_hstore : storeSucceeded env st st' ct ptr mv) :
+    (heapFragmentOf ⟨st, default, default, default, default⟩).lookup loc = some oldVal →
+    (heapFragmentOf ⟨st', default, default, default, default⟩).lookup loc = some newVal →
     (∀ loc', loc' ≠ loc →
-      (heapFragmentOf st').lookup loc' = (heapFragmentOf st).lookup loc') := by
+      (heapFragmentOf ⟨st', default, default, default, default⟩).lookup loc' =
+      (heapFragmentOf ⟨st, default, default, default, default⟩).lookup loc') := by
   sorry
 
 /-- Kill removes exactly one cell, preserving all others.
 
-    TODO: The `_hkill : True` placeholder should become:
-      `hkill : killImpl kind ptr st = .ok ((), st')`
-    where `kind` is the KillKind, `ptr` is the pointer value.
-    Proof strategy: killImpl deallocates the allocation identified by ptr's
-    provenance. heapFragmentOf will produce no cell for a deallocated region,
-    so the killed location maps to none; all other allocations are untouched. -/
-theorem kill_removes_cell {st st' : InterpState} {loc : Location}
-    (_hkill : True) :  -- TODO: killImpl kind ptr st = .ok ((), st')
-    (heapFragmentOf st).lookup loc ≠ none →
-    (heapFragmentOf st').lookup loc = none ∧
+    Proof strategy: `killImpl` (Memory/Concrete.lean:777) deallocates the
+    allocation identified by `ptr`'s provenance (moves it to `deadAllocations`).
+    `heapFragmentOf` produces no cell for dead allocations, so the killed
+    location maps to `none`; all other allocations are untouched. -/
+theorem kill_removes_cell {env : TypeEnv} {st st' : MemState}
+    {isDynamic : Bool} {ptr : PointerValue}
+    {loc : Location}
+    (_hkill : killSucceeded env st st' isDynamic ptr) :
+    (heapFragmentOf ⟨st, default, default, default, default⟩).lookup loc ≠ none →
+    (heapFragmentOf ⟨st', default, default, default, default⟩).lookup loc = none ∧
     (∀ loc', loc' ≠ loc →
-      (heapFragmentOf st').lookup loc' = (heapFragmentOf st).lookup loc') := by
+      (heapFragmentOf ⟨st', default, default, default, default⟩).lookup loc' =
+      (heapFragmentOf ⟨st, default, default, default, default⟩).lookup loc') := by
   sorry
 
 /-- Allocate produces a fresh location, preserving all existing lookups.
 
-    TODO: The `_halloc : True` placeholder should become:
-      `halloc : createImpl align ct prefix_ st = .ok (ptr, st')`
-    where `align` is alignment, `ct` is the Ctype, `prefix_` is the SymPrefix.
-    Proof strategy: createImpl allocates a fresh region with a new allocation ID.
-    heapFragmentOf produces a new cell for this region; all pre-existing
-    allocations are unchanged, so all pre-existing lookups are preserved. -/
-theorem allocate_fresh {st st' : InterpState} {loc : Location}
-    (_halloc : True) :  -- TODO: createImpl align ct prefix_ st = .ok (ptr, st')
-    (heapFragmentOf st).lookup loc = none →
-    (heapFragmentOf st').lookup loc ≠ none →
+    Proof strategy: `allocateImpl` (Memory/Concrete.lean:454) creates a fresh
+    region with a new allocation ID (monotonically increasing from
+    `st.nextAllocId`). `heapFragmentOf` produces a new cell for this region;
+    all pre-existing allocations are unchanged, so all pre-existing lookups
+    are preserved. -/
+theorem allocate_fresh {env : TypeEnv} {st st' : MemState}
+    {name : String} {size : Nat} {ty : Option Ctype} {align : Nat}
+    {readonly : ReadonlyStatus} {init : Option MemValue}
+    {ptr : PointerValue} {loc : Location}
+    (_halloc : allocateSucceeded env st st' name size ty align readonly init ptr) :
+    (heapFragmentOf ⟨st, default, default, default, default⟩).lookup loc = none →
+    (heapFragmentOf ⟨st', default, default, default, default⟩).lookup loc ≠ none →
     (∀ loc', loc' ≠ loc →
-      (heapFragmentOf st').lookup loc' = (heapFragmentOf st).lookup loc') := by
+      (heapFragmentOf ⟨st', default, default, default, default⟩).lookup loc' =
+      (heapFragmentOf ⟨st, default, default, default, default⟩).lookup loc') := by
   sorry
 
 end CerbLean.ProofSystem
