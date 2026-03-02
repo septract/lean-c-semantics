@@ -9,6 +9,7 @@
   - HasType: Typing rules (Hoare-triple-style with frame rule)
   - Models: Semantic interpretation (SLProp satisfaction on concrete heaps)
   - Convert: CN specification types → SLProp conversion
+  - Soundness/: Soundness theorem relating type system to interpreter
   - Examples/: Concrete typing derivations for validation
 -/
 
@@ -16,6 +17,9 @@ import CerbLean.ProofSystem.SLProp
 import CerbLean.ProofSystem.HasType
 import CerbLean.ProofSystem.Models
 import CerbLean.ProofSystem.Convert
+import CerbLean.ProofSystem.Soundness.Defs
+import CerbLean.ProofSystem.Soundness.Statement
+import CerbLean.ProofSystem.Soundness.Pure
 import CerbLean.ProofSystem.Examples.ReturnLiteral
 import CerbLean.ProofSystem.Examples.LoadStore
 import CerbLean.ProofSystem.Examples.Loop
