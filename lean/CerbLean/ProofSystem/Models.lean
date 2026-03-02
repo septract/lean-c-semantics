@@ -152,6 +152,53 @@ def heapValueHasType : HeapValue → CerbLean.CN.Types.BaseType → Prop
   | .struct_ tag _, .struct_ tag' => tag == tag'  -- tag must match
   | _, _ => False
 
+/-! ## Iterated Conjunction Helpers (`each`)
+
+Helpers for the semantic interpretation of `.each qp oarg` (iterated separating
+conjunction over a quantified predicate). Defined as standalone functions
+(not recursive through `models`) to maintain structural termination of `models`.
+-/
+
+/-- Does index `i` satisfy the permission guard of a QPredicate under valuation ρ?
+    Binds the quantified variable `qp.q` to integer `i` in the valuation, then
+    evaluates `qp.permission` as a truthy/falsy value. -/
+def evalEachPermission (ρ : Valuation) (qp : QPredicate) (i : Int) : Prop :=
+  evalConstraint ((qp.q.1, HeapValue.integer (.signed .int_) i) :: ρ) (.t qp.permission)
+
+/-- Semantics for a single entry of an `each` resource at index `i`.
+    Defined directly (not via recursive `models` call) to avoid
+    non-structural recursion in `models`.
+
+    For `Owned<ct>(initState)`: a single cell at the pointer location,
+    mirroring the `.owned` case of `models`.
+    For user predicates: unsupported (`False`). -/
+def modelsEachEntry (ρ : Valuation) (qp : QPredicate) (oarg : IndexTerm)
+    (i : Int) (frag : HeapFragment) : Prop :=
+  let ρ' := (qp.q.1, HeapValue.integer (.signed .int_) i) :: ρ
+  match qp.name with
+  | .owned (some ct) initState =>
+    ∃ loc v,
+      evalIndexTerm ρ' qp.pointer = some (.pointer (some loc)) ∧
+      frag.lookup loc = some v ∧
+      (∀ loc', loc' ≠ loc → frag.lookup loc' = none) ∧
+      match initState with
+      | .init => evalIndexTerm ρ' oarg = some v ∧
+                 CerbLean.CN.Semantics.valueMatchesType ct v ∧
+                 heapValueHasType v oarg.bt
+      | .uninit => True
+  | .owned none _ => False  -- unresolved type: unsatisfiable
+  | .pname _ => False  -- user predicates not yet supported
+
+/-- Pairwise disjointness for a list of heap fragments. -/
+def pairwiseDisjoint : List HeapFragment → Prop
+  | [] => True
+  | f :: rest => (∀ f', f' ∈ rest → f.disjoint f') ∧ pairwiseDisjoint rest
+
+/-- Concatenate a list of heap fragments into a single fragment. -/
+def concatFragments : List HeapFragment → HeapFragment
+  | [] => HeapFragment.empty
+  | f :: rest => f ++ concatFragments rest
+
 /-! ## Semantic Model Relation
 
 The main semantic function: `models ρ H h` holds when heap fragment `h`
@@ -210,8 +257,18 @@ def models (ρ : Valuation) (H : SLProp) (h : HeapFragment) : Prop :=
     ∃ v, models ((var, v) :: ρ) body h
   | .pred _name _ptr _iargs _oarg =>
     False  -- user predicates not yet supported
-  | .each _qp _oarg =>
-    False  -- iterated conjunction not yet supported
+  | .each qp oarg =>
+    ∃ (indices : List Int) (fragments : List HeapFragment),
+      indices.length = fragments.length ∧
+      -- Each index satisfies the permission guard
+      (∀ i, i ∈ indices → evalEachPermission ρ qp i) ∧
+      -- Fragments are pairwise disjoint
+      pairwiseDisjoint fragments ∧
+      -- Heap is the union of all fragments
+      h.equiv (concatFragments fragments) ∧
+      -- Each fragment models the corresponding instantiated resource
+      (∀ j (hj : j < indices.length) (hf : j < fragments.length),
+        modelsEachEntry ρ qp oarg indices[j] fragments[j])
 
 /-! ## Properties -/
 
@@ -503,6 +560,38 @@ theorem models_ofResources_iff (ρ : Valuation) (rs : List CerbLean.CN.Types.Res
     models ρ (SLProp.ofResources rs) h ↔ interpResources rs ρ h := by
   sorry
 
+/-! ## Bridge Lemmas (Substitution-Conversion Commutativity)
+
+These lemmas bridge between substitution on CN spec types and substitution
+on SLProp. They are sorry'd — the statements constrain future implementations.
+See docs/2026-03-01_HASTYPE_SOUNDNESS_AUDIT.md issue #7.
+
+Note: Bridge lemmas that reference `valueHasType` or `PexprMatchesTerm` are
+in HasType.lean (which imports Models.lean, avoiding circular dependencies).
+-/
+
+/-- Substitution-conversion commutativity for preconditions.
+    Substituting in a precondition then converting to SLProp gives the
+    same result as converting first then substituting.
+
+    Needed for `proc` / `ccall` soundness: the rule substitutes actual
+    args into the spec's pre/post, then converts to SLProp. Soundness
+    requires this equals substituting in the SLProp directly.
+    See audit issue #7. -/
+theorem ofPrecondition_substTotal_comm
+    (pre : CerbLean.CN.Types.Precondition) (σ : CerbLean.CN.Types.Subst) :
+    SLProp.ofPrecondition (pre.substTotal σ) =
+    (SLProp.ofPrecondition pre).substTotal σ := by
+  sorry
+
+/-- Substitution-conversion commutativity for postconditions.
+    See `ofPrecondition_substTotal_comm` for explanation. -/
+theorem ofPostcondition_substTotal_comm
+    (post : CerbLean.CN.Types.Postcondition) (σ : CerbLean.CN.Types.Subst) :
+    SLProp.ofPostcondition (post.substTotal σ) =
+    (SLProp.ofPostcondition post).substTotal σ := by
+  sorry
+
 /-! ## Block-Owned Bridge -/
 
 /-- Block implies owned-uninit: the backward direction of the block-owned bridge.
@@ -570,7 +659,10 @@ theorem models_equiv {H : SLProp} {ρ : Valuation} {h1 h2 : HeapFragment}
     intro ⟨v, hm⟩
     exact ⟨v, ih he hm⟩
   | pred => exact id
-  | each => exact id
+  | each qp oarg =>
+    intro ⟨indices, fragments, hlen, hperm, hdisj, hequiv, hmod⟩
+    exact ⟨indices, fragments, hlen, hperm, hdisj,
+      HeapFragment.equiv_trans he hequiv, hmod⟩
 
 /-- Appending an empty heap on the right is lookup-equivalent. -/
 private theorem HeapFragment.equiv_append_empty {h1 h2 : HeapFragment}
@@ -675,17 +767,32 @@ See docs/2026-03-01_SOUNDNESS_AUDIT.md issue #7. -/
 
 /-- Store modifies exactly one cell: all other lookups are preserved.
     Note: load is omitted because load doesn't modify the heap at all
-    (the soundness proof just uses `st' = st`). -/
+    (the soundness proof just uses `st' = st`).
+
+    TODO: The `_hstore : True` placeholder should become:
+      `hstore : storeImpl ct false ptr mval st = .ok ((), st')`
+    where `ct` is the Ctype, `ptr` is the pointer value, `mval` is the
+    MemValue being stored, `st` is the pre-state, and `st'` is the post-state.
+    Proof strategy: storeImpl (Memory/Impl.lean) only modifies the allocation
+    identified by ptr's provenance. heapFragmentOf maps each allocation to a
+    cell; since only one allocation changes, all other lookups are preserved. -/
 theorem store_preserves_frame {st st' : InterpState}
     {loc : Location} {oldVal newVal : HeapValue}
-    (_hstore : True) :  -- TODO: storeImpl ct ptr val st = .ok ((), st')
+    (_hstore : True) :  -- TODO: storeImpl ct false ptr mval st = .ok ((), st')
     (heapFragmentOf st).lookup loc = some oldVal →
     (heapFragmentOf st').lookup loc = some newVal →
     (∀ loc', loc' ≠ loc →
       (heapFragmentOf st').lookup loc' = (heapFragmentOf st).lookup loc') := by
   sorry
 
-/-- Kill removes exactly one cell, preserving all others. -/
+/-- Kill removes exactly one cell, preserving all others.
+
+    TODO: The `_hkill : True` placeholder should become:
+      `hkill : killImpl kind ptr st = .ok ((), st')`
+    where `kind` is the KillKind, `ptr` is the pointer value.
+    Proof strategy: killImpl deallocates the allocation identified by ptr's
+    provenance. heapFragmentOf will produce no cell for a deallocated region,
+    so the killed location maps to none; all other allocations are untouched. -/
 theorem kill_removes_cell {st st' : InterpState} {loc : Location}
     (_hkill : True) :  -- TODO: killImpl kind ptr st = .ok ((), st')
     (heapFragmentOf st).lookup loc ≠ none →
@@ -694,9 +801,16 @@ theorem kill_removes_cell {st st' : InterpState} {loc : Location}
       (heapFragmentOf st').lookup loc' = (heapFragmentOf st).lookup loc') := by
   sorry
 
-/-- Allocate produces a fresh location, preserving all existing lookups. -/
+/-- Allocate produces a fresh location, preserving all existing lookups.
+
+    TODO: The `_halloc : True` placeholder should become:
+      `halloc : createImpl align ct prefix_ st = .ok (ptr, st')`
+    where `align` is alignment, `ct` is the Ctype, `prefix_` is the SymPrefix.
+    Proof strategy: createImpl allocates a fresh region with a new allocation ID.
+    heapFragmentOf produces a new cell for this region; all pre-existing
+    allocations are unchanged, so all pre-existing lookups are preserved. -/
 theorem allocate_fresh {st st' : InterpState} {loc : Location}
-    (_halloc : True) :  -- TODO: createImpl ... st = .ok (ptr, st')
+    (_halloc : True) :  -- TODO: createImpl align ct prefix_ st = .ok (ptr, st')
     (heapFragmentOf st).lookup loc = none →
     (heapFragmentOf st').lookup loc ≠ none →
     (∀ loc', loc' ≠ loc →

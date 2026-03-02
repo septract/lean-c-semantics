@@ -597,51 +597,140 @@ semantic substitution lemma needed for proc/save/run soundness).
 See docs/2026-03-01_SOUNDNESS_AUDIT.md issue #5.
 -/
 
-/-- Total substitution for Terms. Covers the constructors that appear in
-    SLProp's IndexTerms. Structurally recursive — no binding forms, so no
-    alpha-renaming needed and Lean can verify termination.
+-- Termination helpers: the Term inside an AnnotTerm is strictly smaller.
+private theorem AnnotTerm.term_sizeOf_lt (at_ : AnnotTerm) :
+    SizeOf.sizeOf at_.term < SizeOf.sizeOf at_ := by
+  cases at_ with | mk t bt loc =>
+  simp [AnnotTerm.mk.sizeOf_spec, AnnotTerm.term]; omega
+
+private theorem AnnotTerm.term_sizeOf_lt_of_pair [SizeOf α]
+    {p : α × AnnotTerm} {l : List (α × AnnotTerm)} (h : p ∈ l) :
+    SizeOf.sizeOf p.2.term < SizeOf.sizeOf l := by
+  have h1 := List.sizeOf_lt_of_mem h
+  have h2 : SizeOf.sizeOf p.2 < SizeOf.sizeOf p := by
+    cases p; simp [Prod.mk.sizeOf_spec]; omega
+  have h3 := AnnotTerm.term_sizeOf_lt p.2
+  omega
+
+/-- Total substitution for Terms. Uses well-founded recursion (`termination_by
+    sizeOf`) to handle all Term constructors including list-arg and binding forms.
 
     AnnotTerm substitution is inlined (as anonymous constructor ⟨...⟩) to
     avoid mutual recursion — each recursive call is `substTotal σ arg.term`
-    where `arg.term` is structurally smaller.
+    where `arg.term` has smaller `sizeOf`.
 
-    Unsupported constructors are returned unchanged (identity substitution).
-    This is safe because they don't appear in SLProp IndexTerms, so
-    `models` will never evaluate them. -/
+    Binding forms (let_, eachI, mapDef) use capture-avoiding substitution
+    with a combined rename+σ substitution (one pass), mirroring the pattern
+    in `SLProp.subst`'s `.ex` case. match_ uses panic! because proper pattern
+    alpha-renaming requires the partial `Pattern.boundVarIds`. -/
 def Term.substTotal (σ : Subst) : Term → Term
   | .const c => .const c
   | .sym s =>
     match σ.lookup s with
     | some replacement => replacement.term
     | none => .sym s
-  | .unop op ⟨t, bt, loc⟩ =>
-    .unop op ⟨Term.substTotal σ t, bt, loc⟩
+  -- Single-arg non-binding constructors
+  | .unop op ⟨t, bt, loc⟩ => .unop op ⟨Term.substTotal σ t, bt, loc⟩
+  | .nthTuple n ⟨t, bt, loc⟩ => .nthTuple n ⟨Term.substTotal σ t, bt, loc⟩
+  | .structMember ⟨t, bt, loc⟩ member => .structMember ⟨Term.substTotal σ t, bt, loc⟩ member
+  | .recordMember ⟨t, bt, loc⟩ member => .recordMember ⟨Term.substTotal σ t, bt, loc⟩ member
+  | .memberShift ⟨t, bt, loc⟩ tag member => .memberShift ⟨Term.substTotal σ t, bt, loc⟩ tag member
+  | .cast targetTy ⟨t, bt, loc⟩ => .cast targetTy ⟨Term.substTotal σ t, bt, loc⟩
+  | .head ⟨t, bt, loc⟩ => .head ⟨Term.substTotal σ t, bt, loc⟩
+  | .tail ⟨t, bt, loc⟩ => .tail ⟨Term.substTotal σ t, bt, loc⟩
+  | .hasAllocId ⟨t, bt, loc⟩ => .hasAllocId ⟨Term.substTotal σ t, bt, loc⟩
+  | .cnSome ⟨t, bt, loc⟩ => .cnSome ⟨Term.substTotal σ t, bt, loc⟩
+  | .isSome ⟨t, bt, loc⟩ => .isSome ⟨Term.substTotal σ t, bt, loc⟩
+  | .getOpt ⟨t, bt, loc⟩ => .getOpt ⟨Term.substTotal σ t, bt, loc⟩
+  | .good ct ⟨t, bt, loc⟩ => .good ct ⟨Term.substTotal σ t, bt, loc⟩
+  | .representable ct ⟨t, bt, loc⟩ => .representable ct ⟨Term.substTotal σ t, bt, loc⟩
+  | .wrapI ity ⟨t, bt, loc⟩ => .wrapI ity ⟨Term.substTotal σ t, bt, loc⟩
+  | .mapConst kty ⟨t, bt, loc⟩ => .mapConst kty ⟨Term.substTotal σ t, bt, loc⟩
+  -- Two-arg non-binding constructors
   | .binop op ⟨lt, lbt, lloc⟩ ⟨rt, rbt, rloc⟩ =>
-    .binop op ⟨Term.substTotal σ lt, lbt, lloc⟩
-              ⟨Term.substTotal σ rt, rbt, rloc⟩
+    .binop op ⟨Term.substTotal σ lt, lbt, lloc⟩ ⟨Term.substTotal σ rt, rbt, rloc⟩
+  | .cons ⟨ht, hbt, hloc⟩ ⟨tt, tbt, tloc⟩ =>
+    .cons ⟨Term.substTotal σ ht, hbt, hloc⟩ ⟨Term.substTotal σ tt, tbt, tloc⟩
+  | .aligned ⟨pt, pbt, ploc⟩ ⟨at_, abt, aloc⟩ =>
+    .aligned ⟨Term.substTotal σ pt, pbt, ploc⟩ ⟨Term.substTotal σ at_, abt, aloc⟩
+  | .copyAllocId ⟨at_, abt, aloc⟩ ⟨lt, lbt, lloc⟩ =>
+    .copyAllocId ⟨Term.substTotal σ at_, abt, aloc⟩ ⟨Term.substTotal σ lt, lbt, lloc⟩
+  | .mapGet ⟨mt, mbt, mloc⟩ ⟨kt, kbt, kloc⟩ =>
+    .mapGet ⟨Term.substTotal σ mt, mbt, mloc⟩ ⟨Term.substTotal σ kt, kbt, kloc⟩
+  | .arrayShift ⟨bt_, bbt, bloc⟩ ct ⟨it, ibt, iloc⟩ =>
+    .arrayShift ⟨Term.substTotal σ bt_, bbt, bloc⟩ ct ⟨Term.substTotal σ it, ibt, iloc⟩
+  -- Three-arg non-binding constructors
   | .ite ⟨ct, cbt, cloc⟩ ⟨tt, tbt, tloc⟩ ⟨et, ebt, eloc⟩ =>
     .ite ⟨Term.substTotal σ ct, cbt, cloc⟩
          ⟨Term.substTotal σ tt, tbt, tloc⟩
          ⟨Term.substTotal σ et, ebt, eloc⟩
-  | .arrayShift ⟨bt_, bbt, bloc⟩ ct ⟨it, ibt, iloc⟩ =>
-    .arrayShift ⟨Term.substTotal σ bt_, bbt, bloc⟩
-                ct ⟨Term.substTotal σ it, ibt, iloc⟩
-  | .memberShift ⟨pt, pbt, ploc⟩ tag member =>
-    .memberShift ⟨Term.substTotal σ pt, pbt, ploc⟩ tag member
-  | .structMember ⟨ot, obt, oloc⟩ member =>
-    .structMember ⟨Term.substTotal σ ot, obt, oloc⟩ member
-  | .cast targetTy ⟨vt, vbt, vloc⟩ =>
-    .cast targetTy ⟨Term.substTotal σ vt, vbt, vloc⟩
-  | .nthTuple n ⟨tt, tbt, tloc⟩ =>
-    .nthTuple n ⟨Term.substTotal σ tt, tbt, tloc⟩
-  -- INVARIANT: The following constructors MUST NOT appear in SLProp IndexTerms
-  -- that are subject to substitution. If they do, this identity fallback
-  -- silently skips substitution, which would make models_substTotal_extend
-  -- unprovable for those cases. Before using SLProp with struct_, tuple, let_,
-  -- match_, eachI, or apply terms, extend substTotal to handle them.
-  -- Currently safe: only sym, const, binop, unop, ite, arrayShift,
-  -- memberShift, structMember, cast, nthTuple appear in SLProp IndexTerms.
+  | .mapSet ⟨mt, mbt, mloc⟩ ⟨kt, kbt, kloc⟩ ⟨vt, vbt, vloc⟩ =>
+    .mapSet ⟨Term.substTotal σ mt, mbt, mloc⟩
+            ⟨Term.substTotal σ kt, kbt, kloc⟩
+            ⟨Term.substTotal σ vt, vbt, vloc⟩
+  | .structUpdate ⟨ot, obt, oloc⟩ member ⟨vt, vbt, vloc⟩ =>
+    .structUpdate ⟨Term.substTotal σ ot, obt, oloc⟩ member
+                  ⟨Term.substTotal σ vt, vbt, vloc⟩
+  | .recordUpdate ⟨ot, obt, oloc⟩ member ⟨vt, vbt, vloc⟩ =>
+    .recordUpdate ⟨Term.substTotal σ ot, obt, oloc⟩ member
+                  ⟨Term.substTotal σ vt, vbt, vloc⟩
+  -- List-arg non-binding constructors (use projections, not destructuring, for termination)
+  | .tuple elems =>
+    .tuple (elems.map fun at_ => ⟨Term.substTotal σ at_.term, at_.bt, at_.loc⟩)
+  | .struct_ tag members =>
+    .struct_ tag (members.map fun p => (p.1, ⟨Term.substTotal σ p.2.term, p.2.bt, p.2.loc⟩))
+  | .record members =>
+    .record (members.map fun p => (p.1, ⟨Term.substTotal σ p.2.term, p.2.bt, p.2.loc⟩))
+  | .constructor constr args =>
+    .constructor constr (args.map fun p => (p.1, ⟨Term.substTotal σ p.2.term, p.2.bt, p.2.loc⟩))
+  | .apply fn args =>
+    .apply fn (args.map fun at_ => ⟨Term.substTotal σ at_.term, at_.bt, at_.loc⟩)
+  -- Binding forms: capture-avoiding substitution with combined rename+σ (one pass)
+  | .let_ var ⟨bt, bbt, bloc⟩ ⟨bodyt, bodybt, bodyloc⟩ =>
+    if σ.relevant.contains var.id then
+      let var' := freshSymFor var σ.relevant
+      let combined := Subst.fromMapping
+        ((var.id, AnnotTerm.mk (.sym var') bodybt default) ::
+         σ.mapping.filter (·.1 != var.id))
+      .let_ var' ⟨Term.substTotal σ bt, bbt, bloc⟩
+                 ⟨Term.substTotal combined bodyt, bodybt, bodyloc⟩
+    else
+      let σ' := Subst.fromMapping (σ.mapping.filter (·.1 != var.id))
+      .let_ var ⟨Term.substTotal σ bt, bbt, bloc⟩
+               ⟨Term.substTotal σ' bodyt, bodybt, bodyloc⟩
+  | .eachI lo (s, sBt) hi ⟨bodyt, bodybt, bodyloc⟩ =>
+    if σ.relevant.contains s.id then
+      let s' := freshSymFor s σ.relevant
+      let combined := Subst.fromMapping
+        ((s.id, AnnotTerm.mk (.sym s') sBt default) ::
+         σ.mapping.filter (·.1 != s.id))
+      .eachI lo (s', sBt) hi ⟨Term.substTotal combined bodyt, bodybt, bodyloc⟩
+    else
+      let σ' := Subst.fromMapping (σ.mapping.filter (·.1 != s.id))
+      .eachI lo (s, sBt) hi ⟨Term.substTotal σ' bodyt, bodybt, bodyloc⟩
+  | .mapDef (s, abt) ⟨bodyt, bodybt, bodyloc⟩ =>
+    if σ.relevant.contains s.id then
+      let s' := freshSymFor s σ.relevant
+      let combined := Subst.fromMapping
+        ((s.id, AnnotTerm.mk (.sym s') abt default) ::
+         σ.mapping.filter (·.1 != s.id))
+      .mapDef (s', abt) ⟨Term.substTotal combined bodyt, bodybt, bodyloc⟩
+    else
+      let σ' := Subst.fromMapping (σ.mapping.filter (·.1 != s.id))
+      .mapDef (s, abt) ⟨Term.substTotal σ' bodyt, bodybt, bodyloc⟩
+  -- match_: proper pattern alpha-renaming requires partial Pattern.boundVarIds
+  | .match_ .. => panic! "substTotal: match_ requires partial Pattern.boundVarIds"
+  -- Zero-arg forms: nil, sizeOf, offsetOf, cnNone (no AnnotTerm subterms)
   | other => other
+termination_by tm => @SizeOf.sizeOf Term _ tm
+decreasing_by
+  all_goals simp_wf
+  all_goals first
+    | omega
+    | (have := AnnotTerm.term_sizeOf_lt at_
+       have := List.sizeOf_lt_of_mem ‹_›
+       omega)
+    | (have := AnnotTerm.term_sizeOf_lt_of_pair ‹_›; omega)
 
 /-- Total substitution for AnnotTerms. Non-recursive wrapper around
     `Term.substTotal` — preserves type and location. -/

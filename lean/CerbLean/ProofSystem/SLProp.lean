@@ -113,13 +113,22 @@ semantic substitution lemma needed for proc/save/run soundness).
 See docs/2026-03-01_SOUNDNESS_AUDIT.md issue #5.
 -/
 
-/-- Total substitution for LogicalConstraints. Uses `AnnotTerm.substTotal`. -/
+/-- Total substitution for LogicalConstraints. Uses `AnnotTerm.substTotal`.
+    The `.forall_` case uses capture-avoiding substitution, mirroring
+    `LogicalConstraint.subst` (Constraint.lean:44-48) and `SLProp.substTotal`'s
+    `.ex` case (lines 143-154). -/
 def LogicalConstraint.substTotal (σ : Subst) : LogicalConstraint → LogicalConstraint
   | .t term => .t (AnnotTerm.substTotal σ term)
-  -- INVARIANT: forall_ constraints do not appear in SLProp in current proof
-  -- examples. If they do, extend with alpha-renaming (total, since body is
-  -- structurally smaller). Until then, identity is safe.
-  | other => other
+  | .forall_ (s, bt) body =>
+    if σ.relevant.contains s.id then
+      let s' := freshSymFor s σ.relevant
+      let combined := Subst.fromMapping
+        ((s.id, AnnotTerm.mk (.sym s') bt default) ::
+         σ.mapping.filter (·.1 != s.id))
+      .forall_ (s', bt) (AnnotTerm.substTotal combined body)
+    else
+      let σ' := Subst.fromMapping (σ.mapping.filter (·.1 != s.id))
+      .forall_ (s, bt) (AnnotTerm.substTotal σ' body)
 
 /-- Total substitution in SLProp. Uses `AnnotTerm.substTotal` and
     `LogicalConstraint.substTotal` instead of the `partial` versions.
@@ -135,10 +144,7 @@ def substTotal (σ : Subst) : SLProp → SLProp
     .pred name (AnnotTerm.substTotal σ ptr)
       (iargs.map (AnnotTerm.substTotal σ)) (AnnotTerm.substTotal σ oarg)
   | .star l r => .star (l.substTotal σ) (r.substTotal σ)
-  -- INVARIANT: `each` resources are not used in current SLProp proof examples.
-  -- When needed, extend: substitute in qp.pointer, qp.permission, qp.iargs,
-  -- and oarg via AnnotTerm.substTotal (all total). Identity until then.
-  | .each _qp _oarg => .each _qp _oarg
+  | .each qp oarg => .each (qp.substTotal σ) (AnnotTerm.substTotal σ oarg)
   | .pure c => .pure (LogicalConstraint.substTotal σ c)
   | .ex var ty body =>
     -- Capture-avoiding: alpha-rename var if it conflicts with σ's range.

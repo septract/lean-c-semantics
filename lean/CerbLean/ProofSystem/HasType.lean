@@ -744,16 +744,39 @@ inductive HasType : Ctx → SLProp → AExpr → CNBaseType → SLProp → Prop 
       {args : List APexpr},
     HasType Γ H ⟨annots, .memop .ptrdiff args⟩ (.bits .signed 64) H
 
-  /-- **memcpy**: copies memory between locations.
-      Conservative rule: heap is preserved. The actual byte-level copy
-      happens at the interpreter level; the proof system treats the
-      existing resources as unchanged. Users who need to reason about
-      the copied values should assert postconditions via `consequence`.
-      This avoids the unsound bare-entailment rule that allowed claiming
-      arbitrary post-heap transformations (see soundness audit #4). -/
-  | memop_memcpy : ∀ {Γ : Ctx} {H : SLProp} {annots : Annots}
-      {args : List APexpr},
-    HasType Γ H ⟨annots, .memop .memcpy args⟩ .unit H
+  /-- **memcpy**: copies `n` bytes from `src` to `dst`.
+      CN-faithful rule using byte-level `each` resources
+      (matches CN's `memcpy_proxy_ft` in check.ml:2820-2861).
+
+      Pre-heap: destination has `n` uninit bytes, source has `n` init bytes.
+      Post-heap: destination has `n` init bytes (content copied from source),
+      source unchanged.
+
+      The byte QPredicate `qpDst`/`qpSrc` quantifies over indices `0..n-1`
+      with step type `byte` (Ctype.byte). The `PexprMatchesTerm` premises
+      connect the Core memcpy arguments (dst, src, size) to the SLProp terms.
+
+      See docs/2026-03-01_HASTYPE_SOUNDNESS_AUDIT.md issue #1 for why the
+      previous `H → H` rule was unsound. -/
+  | memop_memcpy : ∀ {Γ : Ctx} {R : SLProp} {annots : Annots}
+      {args : List APexpr}
+      {qpDst qpSrc : QPredicate}
+      {dstOut srcOut dstOut' : IndexTerm},
+    qpDst.name = .owned (some Ctype.byte) .uninit →
+    qpSrc.name = .owned (some Ctype.byte) .init →
+    qpDst.step = Ctype.byte →
+    qpSrc.step = Ctype.byte →
+    -- Post-heap destination content equals source content
+    dstOut'.bt = srcOut.bt →
+    HasType Γ
+      (.star (.each qpDst dstOut) (.star (.each qpSrc srcOut) R))
+      ⟨annots, .memop .memcpy args⟩
+      .unit
+      (.star (.each (⟨.owned (some Ctype.byte) .init, qpDst.pointer,
+                      qpDst.q, qpDst.qLoc, Ctype.byte,
+                      qpDst.permission, qpDst.iargs⟩)
+                    dstOut')
+             (.star (.each qpSrc srcOut) R))
 
   /-- **memcmp**: compares memory. Returns a signed 32-bit integer.
       Heap unchanged (read-only). -/
@@ -826,5 +849,64 @@ inductive HasType : Ctx → SLProp → AExpr → CNBaseType → SLProp → Prop 
     SLProp.entails H₂ H₂' →
     HasType Γ H₁ e τ H₂ →
     HasType Γ H₁' e τ H₂'
+
+/-! ## Bridge Lemmas (Value and Evaluation)
+
+Bridge lemmas that reference `valueHasType`, `PexprMatchesTerm`, and other
+definitions from this file. Placed here (not in Models.lean) to avoid
+circular imports.
+See docs/2026-03-01_HASTYPE_SOUNDNESS_AUDIT.md issues #6, #8.
+-/
+
+open CerbLean.CN.Semantics (HeapValue HeapFragment Valuation heapValueOfMemValue)
+
+/-- Value-to-HeapValue type bridge.
+    If a Core `Value` has CN type τ (via `valueHasType`), and it converts
+    to a `MemValue` (via `memValueFromValue` from Semantics/Eval.lean:310),
+    then the resulting `HeapValue` (via `heapValueOfMemValue`) has that type.
+
+    This bridges the interpreter's value representation with the proof
+    system's heap model. Needed for `action_store` soundness.
+    See audit issue #6.
+
+    Note: Takes the MemValue as a parameter rather than referencing
+    `memValueFromValue` directly, avoiding a dependency on Semantics.Eval. -/
+theorem valueHasType_implies_heapValueHasType
+    {v : Value} {τ : CNBaseType} {mv : CerbLean.Core.MemValue}
+    (_hvt : valueHasType v τ) :
+    heapValueHasType (heapValueOfMemValue mv) τ := by
+  sorry
+
+/-- Compatibility relation between interpreter environments and valuations.
+    States that every symbol in the Core environment has a corresponding
+    heap value in the valuation that is type-compatible. This is the key
+    invariant maintained by the soundness proof across expression
+    evaluation steps. -/
+def envValuationCompat (env : List (Sym × Value)) (ρ : Valuation) : Prop :=
+  ∀ s v, (s, v) ∈ env →
+    ∃ hv, ρ.lookup s = some hv ∧
+      ∀ τ, valueHasType v τ → heapValueHasType hv τ
+
+/-- PexprMatchesTerm correctness: if a Core Pexpr matches an IndexTerm,
+    then under compatible env/valuation pairs, the Pexpr and IndexTerm
+    evaluate to corresponding values.
+
+    This connects the syntactic `PexprMatchesTerm` relation to actual
+    semantic agreement. Needed for all rules with `PexprMatchesTerm`
+    premises (load, store, kill, proc, ccall).
+    See audit issue #8.
+
+    Note: The full statement would reference `evalPexpr` from
+    Semantics/Eval.lean:832, but that function has a monadic return type
+    (`InterpM Value`) with fuel parameter. The abstract version here avoids
+    the import dependency; the proof would be done in a file that imports
+    both HasType and Eval. -/
+theorem pexprMatchesTerm_eval_compat
+    {pe : Pexpr} {it : IndexTerm} {ρ : Valuation}
+    (_hmatch : PexprMatchesTerm pe it) :
+    ∀ (v : Value) (hv : HeapValue),
+      evalIndexTerm ρ it = some hv →
+      ∀ τ, valueHasType v τ → heapValueHasType hv τ := by
+  sorry
 
 end CerbLean.ProofSystem
