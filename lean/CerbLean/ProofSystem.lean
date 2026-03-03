@@ -19,6 +19,7 @@ import CerbLean.ProofSystem.Models
 import CerbLean.ProofSystem.Convert
 import CerbLean.ProofSystem.Soundness.Defs
 import CerbLean.ProofSystem.Soundness.Statement
+import CerbLean.ProofSystem.Soundness.PureHelpers
 import CerbLean.ProofSystem.Soundness.Pure
 import CerbLean.ProofSystem.Examples.ReturnLiteral
 import CerbLean.ProofSystem.Examples.LoadStore

@@ -223,6 +223,7 @@ inductive PexprMatchesTerm : Pexpr → IndexTerm → Prop where
     Tightened: structs/unions check tag equality, unspecified uses `ctypeToBaseType`,
     arrays remain permissive (no element type in ObjectValue.array). -/
 def valueHasType : Value → CNBaseType → Prop
+  -- Loaded (specified) values — from value literals in Core AST
   | .loaded (.specified (.integer _)), .bits _ _ => True
   | .loaded (.specified (.integer _)), .integer => True
   | .loaded (.specified (.pointer _)), .loc => True
@@ -237,6 +238,16 @@ def valueHasType : Value → CNBaseType → Prop
     match ctypeToBaseType ct with
     | some τ' => τ = τ'
     | none => False
+  -- Object values — produced by interpreter (evalIntOp, convertInt, wrapIntOp, etc.)
+  -- evalPexpr always produces .object form for computed values (Cerberus Vcval).
+  | .object (.integer _), .bits _ _ => True
+  | .object (.integer _), .integer => True
+  | .object (.pointer _), .loc => True
+  | .object (.floating _), .real => True
+  | .object (.array _), .list _ => True
+  | .object (.struct_ tag _), .struct_ tag' => tag == tag'
+  | .object (.union_ tag _ _), .struct_ tag' => tag == tag'
+  -- Non-object values
   | .unit, .unit => True
   | .true_, .bool => True
   | .false_, .bool => True
@@ -397,27 +408,32 @@ inductive PureHasType : Ctx → APexpr → CNBaseType → Prop where
       {ity : IntegerType} {e : Pexpr} {τ₁ : CNBaseType},
     PureHasType Γ ⟨annots, coreTy, e⟩ τ₁ →
     PureHasType Γ ⟨annots, coreTy, .convInt ity e⟩ (intTypeToBaseType ity)
-  /-- Type predicate `is_scalar` returns bool. -/
-  | isScalar : ∀ {Γ : Ctx} {annots : Annots} {coreTy} {e : Pexpr} {τ : CNBaseType},
-    PureHasType Γ ⟨annots, coreTy, e⟩ τ →
+  /-- Type predicate `is_scalar` returns bool.
+      Requires `.ctype` input — evalPexpr's isScalar branch fails on non-ctype. -/
+  | isScalar : ∀ {Γ : Ctx} {annots : Annots} {coreTy} {e : Pexpr},
+    PureHasType Γ ⟨annots, coreTy, e⟩ .ctype →
     PureHasType Γ ⟨annots, coreTy, .isScalar e⟩ .bool
-  /-- Type predicate `is_integer` returns bool. -/
-  | isInteger : ∀ {Γ : Ctx} {annots : Annots} {coreTy} {e : Pexpr} {τ : CNBaseType},
-    PureHasType Γ ⟨annots, coreTy, e⟩ τ →
+  /-- Type predicate `is_integer` returns bool.
+      Requires `.ctype` input — evalPexpr's isInteger branch fails on non-ctype. -/
+  | isInteger : ∀ {Γ : Ctx} {annots : Annots} {coreTy} {e : Pexpr},
+    PureHasType Γ ⟨annots, coreTy, e⟩ .ctype →
     PureHasType Γ ⟨annots, coreTy, .isInteger e⟩ .bool
-  /-- Type predicate `is_signed` returns bool. -/
-  | isSigned : ∀ {Γ : Ctx} {annots : Annots} {coreTy} {e : Pexpr} {τ : CNBaseType},
-    PureHasType Γ ⟨annots, coreTy, e⟩ τ →
+  /-- Type predicate `is_signed` returns bool.
+      Requires `.ctype` input — evalPexpr's isSigned branch fails on non-ctype. -/
+  | isSigned : ∀ {Γ : Ctx} {annots : Annots} {coreTy} {e : Pexpr},
+    PureHasType Γ ⟨annots, coreTy, e⟩ .ctype →
     PureHasType Γ ⟨annots, coreTy, .isSigned e⟩ .bool
-  /-- Type predicate `is_unsigned` returns bool. -/
-  | isUnsigned : ∀ {Γ : Ctx} {annots : Annots} {coreTy} {e : Pexpr} {τ : CNBaseType},
-    PureHasType Γ ⟨annots, coreTy, e⟩ τ →
+  /-- Type predicate `is_unsigned` returns bool.
+      Requires `.ctype` input — evalPexpr's isUnsigned branch fails on non-ctype. -/
+  | isUnsigned : ∀ {Γ : Ctx} {annots : Annots} {coreTy} {e : Pexpr},
+    PureHasType Γ ⟨annots, coreTy, e⟩ .ctype →
     PureHasType Γ ⟨annots, coreTy, .isUnsigned e⟩ .bool
-  /-- Type predicate `are_compatible` returns bool. -/
+  /-- Type predicate `are_compatible` returns bool.
+      Requires `.ctype` inputs — evalPexpr's areCompatible branch fails on non-ctype. -/
   | areCompatible : ∀ {Γ : Ctx} {annots : Annots} {coreTy}
-      {e₁ e₂ : Pexpr} {τ₁ τ₂ : CNBaseType},
-    PureHasType Γ ⟨annots, coreTy, e₁⟩ τ₁ →
-    PureHasType Γ ⟨annots, coreTy, e₂⟩ τ₂ →
+      {e₁ e₂ : Pexpr},
+    PureHasType Γ ⟨annots, coreTy, e₁⟩ .ctype →
+    PureHasType Γ ⟨annots, coreTy, e₂⟩ .ctype →
     PureHasType Γ ⟨annots, coreTy, .areCompatible e₁ e₂⟩ .bool
   /-- Pure case expression: scrutinee well-typed, all branches same type. -/
   | case_ : ∀ {Γ : Ctx} {annots : Annots} {coreTy}
