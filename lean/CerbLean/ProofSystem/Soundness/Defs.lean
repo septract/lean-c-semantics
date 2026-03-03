@@ -25,7 +25,9 @@ open CerbLean.Semantics (InterpM InterpState InterpEnv InterpError ThreadState
                           runUntilDone step callProc collectAllLabeledContinuations)
 open CerbLean.Memory (TypeEnv MemState)
 open CerbLean.ProofSystem (Ctx LabelInv SLProp HasType PureHasType
-                            valueHasType heapValueHasType evalIndexTerm
+                            valueHasType pureValueHasType
+                            pureValueHasType_implies_valueHasType
+                            heapValueHasType evalIndexTerm
                             evalConstraint stateModels models heapFragmentOf
                             envValuationCompat pexprEnvLookup)
 open Std (HashMap)
@@ -189,5 +191,31 @@ structure StateCompatible (file : File) (typeEnv : TypeEnv) (interpState : Inter
   /-- Label invariants in context match actual continuations -/
   labelInvs : LabelInvsConsistent Γ.labelInvs
                 (collectAllLabeledContinuations file) currentProc
+
+/-! ## Pure Environment Compatibility -/
+
+/-- Stronger environment compatibility requiring all values to be in operable
+    (`.object`) form. Used in `PureHasType.progress` to guarantee evaluation
+    succeeds — pure expression operations only accept `.object`-form values.
+
+    This excludes environments containing `.loaded` values (e.g., from
+    `memberof` which produces `.loaded (.specified _)` via `valueFromMemValue`).
+    Programs like `let x = memberof(...) in x + 1` have environments where `x`
+    is `.loaded`, so progress fails for the `x + 1` part. -/
+def PureEnvCompat (env : List (HashMap Sym Value)) (vars : List (Sym × BaseType))
+    (ρ : Valuation) : Prop :=
+  ∀ s τ, (s, τ) ∈ vars →
+    ∃ v, envLookup env s = some v ∧ pureValueHasType v τ ∧
+    ∃ hv, ρ.lookup s = some hv ∧
+      (∀ τ', valueHasType v τ' → heapValueHasType hv τ')
+
+/-- `PureEnvCompat` implies `EnvCompat` (weakening). -/
+theorem PureEnvCompat_implies_EnvCompat
+    {env : List (HashMap Sym Value)} {vars : List (Sym × BaseType)}
+    {ρ : Valuation}
+    (h : PureEnvCompat env vars ρ) : EnvCompat env vars ρ := by
+  intro s τ hmem
+  obtain ⟨v, hlook, hpure, hv, hρ, hcompat⟩ := h s τ hmem
+  exact ⟨v, hlook, pureValueHasType_implies_valueHasType hpure, hv, hρ, hcompat⟩
 
 end CerbLean.ProofSystem.Soundness

@@ -374,7 +374,11 @@ def valueFromMemValue (mv : MemValue) : Value :=
   | .union_ tag ident mv' =>
     .loaded (.specified (.union_ tag ident mv'))
 
-/-- Extract floating value from Value -/
+/-- Extract floating value from Value
+    -- DIVERGES-FROM-CN: Cerberus core_eval.lem only handles `Vobject (OVfloating fv)`.
+    -- We also handle `.loaded (.specified (.floating fv))` for convenience.
+    -- This is a minor divergence — loaded floats can arise from memberof but
+    -- Cerberus would require pattern matching via Cspecified first. -/
 def valueToFloat (v : Value) : Option FloatingValue :=
   match v with
   | .object (.floating fv) => some fv

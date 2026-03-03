@@ -170,27 +170,41 @@ theorem matchPattern_base_some
 /-! ## L11: evalPexpr on .ctype Values
 
     If evalPexpr succeeds and valueHasType v .ctype, then v = .ctype _ .
-    Needed for the isScalar/isInteger/isSigned/isUnsigned cases. -/
+    Needed for the isScalar/isInteger/isSigned/isUnsigned cases.
+    Provable after removing `.loaded (.unspecified ct)` from `valueHasType`. -/
 
 /-- A value with type .ctype is a .ctype constructor. -/
 theorem valueHasType_ctype_form {v : Value}
     (h : valueHasType v .ctype) :
     ∃ ct, v = .ctype ct := by
-  sorry
+  unfold valueHasType at h
+  cases v with
+  | ctype ct => exact ⟨ct, rfl⟩
+  | loaded lv => cases lv with
+    | specified ov => cases ov <;> simp at h
+    | unspecified => simp at h
+  | object ov => cases ov <;> simp at h
+  | _ => simp at h
 
 /-! ## L12: evalPexpr on .bool Values
 
     If valueHasType v .bool, then v = .true_ or v = .false_.
-    Needed for if_, not_ cases. -/
+    Needed for if_, not_ cases.
+    Provable after removing `.loaded (.unspecified ct)` from `valueHasType`. -/
 
-/-- A value with type .bool is either .true_ or .false_.
-    NOTE: This is incorrect as stated — `.loaded (.unspecified ct)` with
-    `ctypeToBaseType ct = some .bool` also satisfies `valueHasType v .bool`.
-    Need to tighten `valueHasType` or add "interpreter-compatible" qualifier. -/
+/-- A value with type .bool is either .true_ or .false_. -/
 theorem valueHasType_bool_form {v : Value}
     (h : valueHasType v .bool) :
     v = .true_ ∨ v = .false_ := by
-  sorry
+  unfold valueHasType at h
+  cases v with
+  | true_ => exact Or.inl rfl
+  | false_ => exact Or.inr rfl
+  | loaded lv => cases lv with
+    | specified ov => cases ov <;> simp at h
+    | unspecified => simp at h
+  | object ov => cases ov <;> simp at h
+  | _ => simp at h
 
 /-! ## L13: evalPexpr on .loc Values
 
@@ -202,6 +216,80 @@ theorem valueHasType_loc_form {v : Value}
     (h : valueHasType v .loc) :
     (∃ pv, v = .loaded (.specified (.pointer pv))) ∨
     (∃ pv, v = .object (.pointer pv)) := by
-  sorry
+  unfold valueHasType at h
+  cases v with
+  | loaded lv => cases lv with
+    | specified ov => cases ov with
+      | pointer pv => exact Or.inl ⟨pv, rfl⟩
+      | _ => simp at h
+    | unspecified => simp at h
+  | object ov => cases ov with
+    | pointer pv => exact Or.inr ⟨pv, rfl⟩
+    | _ => simp at h
+  | _ => simp at h
+
+/-! ## L14-L16: pureValueHasType Form Lemmas
+
+    Analogous to L11-L13 but for `pureValueHasType`. These are stronger
+    because `.loaded` values are excluded entirely. -/
+
+/-- A pure value with type .bool is either .true_ or .false_. -/
+theorem pureValueHasType_bool_form {v : Value}
+    (h : pureValueHasType v .bool) :
+    v = .true_ ∨ v = .false_ := by
+  unfold pureValueHasType at h
+  cases v with
+  | true_ => exact Or.inl rfl
+  | false_ => exact Or.inr rfl
+  | _ => simp at h
+
+/-- A pure value with type .ctype is a .ctype constructor. -/
+theorem pureValueHasType_ctype_form {v : Value}
+    (h : pureValueHasType v .ctype) :
+    ∃ ct, v = .ctype ct := by
+  unfold pureValueHasType at h
+  cases v with
+  | ctype ct => exact ⟨ct, rfl⟩
+  | _ => simp at h
+
+/-- A pure value with type .loc is an `.object (.pointer _)`.
+    Stronger than `valueHasType_loc_form` — no `.loaded` case. -/
+theorem pureValueHasType_loc_form {v : Value}
+    (h : pureValueHasType v .loc) :
+    ∃ pv, v = .object (.pointer pv) := by
+  unfold pureValueHasType at h
+  cases v with
+  | object ov => cases ov with
+    | pointer pv => exact ⟨pv, rfl⟩
+    | _ => simp at h
+  | _ => simp at h
+
+/-- A pure value with integer type is `.object (.integer _)`.
+    Needed for `op`, `convInt`, `wrapI` cases where `valueToInt` only accepts
+    `.object (.integer _)`. -/
+theorem pureValueHasType_integer_form {v : Value} {s k}
+    (h : pureValueHasType v (.bits s k)) :
+    ∃ iv, v = .object (.integer iv) := by
+  unfold pureValueHasType at h
+  cases v with
+  | object ov => cases ov with
+    | integer iv => exact ⟨iv, rfl⟩
+    | _ => simp at h
+  | _ => simp at h
+
+/-- A pure value with struct type is `.object (.struct_ tag _)` or
+    `.object (.union_ tag _ _)` with matching tag.
+    Note: BEq Sym is custom (digest + id), so tag equality is BEq, not propositional. -/
+theorem pureValueHasType_struct_form {v : Value} {tag : Sym}
+    (h : pureValueHasType v (.struct_ tag)) :
+    (∃ tag' members, v = .object (.struct_ tag' members) ∧ (tag' == tag) = true) ∨
+    (∃ tag' ident mv, v = .object (.union_ tag' ident mv) ∧ (tag' == tag) = true) := by
+  unfold pureValueHasType at h
+  cases v with
+  | object ov => cases ov with
+    | struct_ tag' members => exact Or.inl ⟨tag', members, rfl, h⟩
+    | union_ tag' ident mv => exact Or.inr ⟨tag', ident, mv, rfl, h⟩
+    | _ => simp at h
+  | _ => simp at h
 
 end CerbLean.ProofSystem.Soundness

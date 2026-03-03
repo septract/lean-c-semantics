@@ -220,8 +220,9 @@ inductive PexprMatchesTerm : Pexpr → IndexTerm → Prop where
 /-- Relates a Core value to its CN base type.
     Used as a premise in `PureHasType.val` to ensure the value actually
     matches the claimed type.
-    Tightened: structs/unions check tag equality, unspecified uses `ctypeToBaseType`,
-    arrays remain permissive (no element type in ObjectValue.array). -/
+    Tightened: structs/unions check tag equality, `.loaded (.unspecified _)` excluded
+    (uninitialized values don't satisfy any type), arrays remain permissive
+    (no element type in ObjectValue.array). -/
 def valueHasType : Value → CNBaseType → Prop
   -- Loaded (specified) values — from value literals in Core AST
   | .loaded (.specified (.integer _)), .bits _ _ => True
@@ -234,10 +235,9 @@ def valueHasType : Value → CNBaseType → Prop
   | .loaded (.specified (.array _)), .list _ => True
   | .loaded (.specified (.struct_ tag _)), .struct_ tag' => tag == tag'
   | .loaded (.specified (.union_ tag _ _)), .struct_ tag' => tag == tag'
-  | .loaded (.unspecified ct), τ =>
-    match ctypeToBaseType ct with
-    | some τ' => τ = τ'
-    | none => False
+  -- NOTE: `.loaded (.unspecified ct)` intentionally excluded. Unspecified values have
+  -- no concrete content; using them in conditionals/arithmetic is UB in Cerberus
+  -- (UB_unspec_conditional). They should NOT satisfy any type predicate.
   -- Object values — produced by interpreter (evalIntOp, convertInt, wrapIntOp, etc.)
   -- evalPexpr always produces .object form for computed values (Cerberus Vcval).
   | .object (.integer _), .bits _ _ => True
@@ -253,6 +253,47 @@ def valueHasType : Value → CNBaseType → Prop
   | .false_, .bool => True
   | .ctype _, .ctype => True
   | _, _ => False
+
+/-- Restricted value-type compatibility for "operable" values.
+    Only `.object`-form values (Cerberus Vcval) and non-object values
+    (.unit, .true_, .false_, .ctype) satisfy this predicate.
+    `.loaded` values (from memory reads via `valueFromMemValue`) are excluded
+    because pure expression operations (`valueToInt`, `evalBinop`, `convertInt`,
+    `wrapIntOp`, `arrayShift`, `memberShift`) only accept `.object` form.
+
+    Used in `PureHasType.val` to ensure value literals are operable (Core
+    value literals, Vcval, are always in `.object` form). -/
+def pureValueHasType : Value → CNBaseType → Prop
+  | .object (.integer _), .bits _ _ => True
+  | .object (.integer _), .integer => True
+  | .object (.pointer _), .loc => True
+  | .object (.floating _), .real => True
+  | .object (.array _), .list _ => True
+  | .object (.struct_ tag _), .struct_ tag' => tag == tag'
+  | .object (.union_ tag _ _), .struct_ tag' => tag == tag'
+  | .unit, .unit => True
+  | .true_, .bool => True
+  | .false_, .bool => True
+  | .ctype _, .ctype => True
+  | _, _ => False
+
+/-- Every `pureValueHasType` instance implies `valueHasType`.
+    The converse is false: `.loaded (.specified _)` satisfies `valueHasType`
+    but not `pureValueHasType`. -/
+theorem pureValueHasType_implies_valueHasType
+    {v : Value} {τ : CNBaseType}
+    (h : pureValueHasType v τ) : valueHasType v τ := by
+  unfold pureValueHasType at h
+  unfold valueHasType
+  cases v with
+  | object ov => cases ov <;> cases τ <;> simp_all
+  | unit => cases τ <;> simp_all
+  | true_ => cases τ <;> simp_all
+  | false_ => cases τ <;> simp_all
+  | ctype => cases τ <;> simp_all
+  | loaded lv => cases lv <;> cases τ <;> simp_all
+  | list => cases τ <;> simp_all
+  | tuple => cases τ <;> simp_all
 
 /-! ## Label Invariant -/
 
@@ -334,8 +375,11 @@ def Ctx.addPatternBinding (ctx : Ctx) (pat : APattern) (τ : CNBaseType) : Ctx :
     has CN base type `τ`. Pure expressions have no heap effects. -/
 inductive PureHasType : Ctx → APexpr → CNBaseType → Prop where
   /-- A value literal has the claimed type, provided the value matches it.
-      The `valueHasType` premise ensures the Core value is compatible with
-      the claimed CN base type. -/
+      Uses `valueHasType` (not `pureValueHasType`) because Core value literals
+      are `.loaded (.specified _)` form in the AST (Cerberus represents literals
+      as `Specified(object_value)`). The `val` case is fine for soundness —
+      `evalPexpr` just returns the value as-is without requiring `.object` form.
+      The `.loaded`-vs-`.object` issue only arises for operation operands. -/
   | val : ∀ {Γ : Ctx} {annots : Annots} {coreTy} {v : Value} {τ : CNBaseType},
     valueHasType v τ →
     PureHasType Γ ⟨annots, coreTy, .val v⟩ τ
