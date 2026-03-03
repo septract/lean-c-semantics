@@ -734,33 +734,46 @@ the same logic as the memory model's `load` operation. The body is sorry'd;
 the type-level plumbing constrains future implementations. -/
 
 open CerbLean.Semantics (InterpState)
+open CerbLean.Memory (TypeEnv MemState readBytesPure reconstructHeapValue)
 
 /-- Extract a logical heap fragment from an interpreter state.
     Converts the byte-level `MemState` to typed `HeapFragment` by:
     1. Iterating over live allocations in `st.memory.allocations`
-    2. For each allocation, reconstructing the typed value from its
-       byte representation using the allocation's stored `Ctype`
-    3. Converting each `MemValue` to `HeapValue` via `heapValueOfMemValue`
+    2. For each typed allocation, reading its bytes from the bytemap
+    3. Reconstructing a `HeapValue` from bytes using `reconstructHeapValue`
     4. Mapping each allocation to a `Location` using its allocation ID as
        `allocId` and base address as `addr`
 
-    The body is sorry'd — byte→typed-value reconstruction requires the
-    full `reconstructValue` logic from the memory model (`loadImpl`'s
-    byte-to-value path). The type signature is locked down to constrain
-    future implementations.
+    Requires `TypeEnv` for struct/union layout computation (`sizeof`,
+    `structMemberInfo`). `partial` propagates from `reconstructHeapValue`
+    (which calls `sizeof`/`structMemberInfo`).
 
-    Key invariant: `heapFragmentOf` must be monotone w.r.t. untouched
+    Allocations with `ty = none` (malloc without type annotation) produce
+    no cell — sound because CN requires every `Owned<T>(p)` to have concrete T.
+
+    Key invariant: `heapFragmentOf` is monotone w.r.t. untouched
     allocations — if an allocation is not modified between `st` and `st'`,
     then its `HeapFragment` cell is identical. This is what the frame
-    property lemmas rely on. -/
-def heapFragmentOf (_st : InterpState) : HeapFragment :=
-  sorry
+    property lemmas rely on. Follows from deterministic reconstruction:
+    same `(env, alloc, bytes)` → same `HeapValue`. -/
+partial def heapFragmentOf (env : TypeEnv) (st : InterpState) : HeapFragment :=
+  let mem := st.memory
+  let cells := mem.allocations.toList.filterMap fun (allocId, alloc) =>
+    match alloc.ty with
+    | none => none  -- Untyped allocation (malloc without type)
+    | some ct =>
+      match readBytesPure mem.bytemap alloc.base alloc.size with
+      | none => none  -- Incomplete allocation (missing bytes)
+      | some bytes =>
+        let hv := (reconstructHeapValue env ct bytes).getD (.uninitialized ct)
+        some (⟨allocId, alloc.base⟩, hv)
+  { cells }
 
 /-- The interpreter state satisfies a separation-logic proposition.
     Connects the proof system (`models` over `HeapFragment`) to the
     interpreter (`InterpState`). -/
-def stateModels (σ : InterpState) (ρ : Valuation) (H : SLProp) : Prop :=
-  models ρ H (heapFragmentOf σ)
+def stateModels (env : TypeEnv) (σ : InterpState) (ρ : Valuation) (H : SLProp) : Prop :=
+  models ρ H (heapFragmentOf env σ)
 
 /-! ## Frame Properties
 
@@ -816,11 +829,11 @@ theorem store_preserves_frame {env : TypeEnv} {st st' : MemState}
     {ct : Ctype} {ptr : PointerValue} {mv : MemValue}
     {loc : Location} {oldVal newVal : HeapValue}
     (_hstore : storeSucceeded env st st' ct ptr mv) :
-    (heapFragmentOf ⟨st, default, default, default, default⟩).lookup loc = some oldVal →
-    (heapFragmentOf ⟨st', default, default, default, default⟩).lookup loc = some newVal →
+    (heapFragmentOf env ⟨st, default, default, default, default⟩).lookup loc = some oldVal →
+    (heapFragmentOf env ⟨st', default, default, default, default⟩).lookup loc = some newVal →
     (∀ loc', loc' ≠ loc →
-      (heapFragmentOf ⟨st', default, default, default, default⟩).lookup loc' =
-      (heapFragmentOf ⟨st, default, default, default, default⟩).lookup loc') := by
+      (heapFragmentOf env ⟨st', default, default, default, default⟩).lookup loc' =
+      (heapFragmentOf env ⟨st, default, default, default, default⟩).lookup loc') := by
   sorry
 
 /-- Kill removes exactly one cell, preserving all others.
@@ -833,11 +846,11 @@ theorem kill_removes_cell {env : TypeEnv} {st st' : MemState}
     {isDynamic : Bool} {ptr : PointerValue}
     {loc : Location}
     (_hkill : killSucceeded env st st' isDynamic ptr) :
-    (heapFragmentOf ⟨st, default, default, default, default⟩).lookup loc ≠ none →
-    (heapFragmentOf ⟨st', default, default, default, default⟩).lookup loc = none ∧
+    (heapFragmentOf env ⟨st, default, default, default, default⟩).lookup loc ≠ none →
+    (heapFragmentOf env ⟨st', default, default, default, default⟩).lookup loc = none ∧
     (∀ loc', loc' ≠ loc →
-      (heapFragmentOf ⟨st', default, default, default, default⟩).lookup loc' =
-      (heapFragmentOf ⟨st, default, default, default, default⟩).lookup loc') := by
+      (heapFragmentOf env ⟨st', default, default, default, default⟩).lookup loc' =
+      (heapFragmentOf env ⟨st, default, default, default, default⟩).lookup loc') := by
   sorry
 
 /-- Allocate produces a fresh location, preserving all existing lookups.
@@ -852,11 +865,11 @@ theorem allocate_fresh {env : TypeEnv} {st st' : MemState}
     {readonly : ReadonlyStatus} {init : Option MemValue}
     {ptr : PointerValue} {loc : Location}
     (_halloc : allocateSucceeded env st st' name size ty align readonly init ptr) :
-    (heapFragmentOf ⟨st, default, default, default, default⟩).lookup loc = none →
-    (heapFragmentOf ⟨st', default, default, default, default⟩).lookup loc ≠ none →
+    (heapFragmentOf env ⟨st, default, default, default, default⟩).lookup loc = none →
+    (heapFragmentOf env ⟨st', default, default, default, default⟩).lookup loc ≠ none →
     (∀ loc', loc' ≠ loc →
-      (heapFragmentOf ⟨st', default, default, default, default⟩).lookup loc' =
-      (heapFragmentOf ⟨st, default, default, default, default⟩).lookup loc') := by
+      (heapFragmentOf env ⟨st', default, default, default, default⟩).lookup loc' =
+      (heapFragmentOf env ⟨st, default, default, default, default⟩).lookup loc') := by
   sorry
 
 end CerbLean.ProofSystem

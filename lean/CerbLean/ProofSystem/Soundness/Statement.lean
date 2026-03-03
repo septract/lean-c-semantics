@@ -78,7 +78,7 @@ theorem HasType.soundness
       match ((runUntilDone ts file conts fuel).run ⟨file, typeEnv⟩).run interpState with
       | .ok (v, st') =>
           valueHasType v τ ∧
-          ∃ ρ', ValuationExtends ρ ρ' ∧ stateModels st' ρ' H₂
+          ∃ ρ', ValuationExtends ρ ρ' ∧ stateModels typeEnv st' ρ' H₂
       | .error (.undefinedBehavior _ _) => False
       | .error _ => True := by
   sorry
@@ -112,7 +112,7 @@ theorem HasType.frame_soundness
       match ((runUntilDone ts file conts fuel).run ⟨file, typeEnv⟩).run interpState with
       | .ok (v, st') =>
           valueHasType v τ ∧
-          ∃ ρ', ValuationExtends ρ ρ' ∧ stateModels st' ρ' (.star H₂ R)
+          ∃ ρ', ValuationExtends ρ ρ' ∧ stateModels typeEnv st' ρ' (.star H₂ R)
       | .error (.undefinedBehavior _ _) => False
       | .error _ => True := by
   sorry

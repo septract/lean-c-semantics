@@ -16,10 +16,12 @@
 -/
 
 import CerbLean.Memory.Interface
+import CerbLean.CN.Semantics.Heap
 
 namespace CerbLean.Memory
 
 open CerbLean.Core
+open CerbLean.CN.Semantics (HeapValue Location)
 
 /-! ## IEEE 754 Float Conversion Helpers
 
@@ -252,6 +254,12 @@ def readBytes (addr : Nat) (size : Nat) : ConcreteMemM (List AbsByte) := do
     match st.bytemap[addr + i]? with
     | some b => pure b
     | none => throw (.access .outOfBoundPtr (some (addr + i)))
+
+/-- Read bytes from memory (pure version — no monad, returns none if any byte missing).
+    Used by `heapFragmentOf` to extract bytes for heap reconstruction. -/
+def readBytesPure (bytemap : Std.HashMap Nat AbsByte) (addr size : Nat) : Option (List AbsByte) :=
+  let bytes := (List.range size).map fun i => bytemap[addr + i]?
+  bytes.mapM id
 
 /-! ## Value Serialization
 
@@ -659,6 +667,99 @@ partial def reconstructValue (env : TypeEnv) (ty : Ctype) (bytes : List AbsByte)
       pure (.integer .char { val := n, prov := prov })
     | none =>
       pure (.unspecified ty)
+
+/-- Reconstruct HeapValue directly from bytes (pure, no monad).
+    Goes bytes → HeapValue without the MemValue intermediary.
+    This avoids `heapValueOfMemValue`'s limitations (arrays → uninitialized,
+    floats → uninitialized) by using the allocation's Ctype for context.
+    Used by `heapFragmentOf` to build the separation logic heap. -/
+partial def reconstructHeapValue (env : TypeEnv) (ct : Ctype) (bytes : List AbsByte)
+    : Option HeapValue :=
+  match ct.ty with
+  | .basic (.integer ity) =>
+    let signed := isSignedIntegerType ity
+    match bytesToInt bytes signed with
+    | some n => some (.integer ity n)
+    | none => some (.uninitialized ct)
+
+  | .basic (.floating _fty) =>
+    -- HeapValue has no floating case; store as uninitialized
+    -- DIVERGES-FROM-CN: CN's HeapValue may have a floating case in the future.
+    -- For now, this is consistent with heapValueOfMemValue's handling.
+    some (.uninitialized ct)
+
+  | .pointer _quals _pointeeTy =>
+    match bytesToInt bytes false with
+    | some 0 => some (.pointer none)  -- NULL pointer
+    | some addr =>
+      let prov := bytesProvenance bytes
+      -- Reconstruct location from provenance
+      match prov with
+      | .some allocId => some (.pointer (some ⟨allocId, addr.toNat⟩))
+      | _ => some (.pointer none)  -- No provenance → can't form a Location
+    | none => some (.uninitialized ct)
+
+  | .struct_ tag =>
+    match env.lookupTag tag with
+    | some (.struct_ fields _) =>
+      match structMemberInfo env fields with
+      | .ok memberInfo =>
+        let members := memberInfo.filterMap fun (membIdent, membTy, membOffset) =>
+          match sizeof env membTy with
+          | .ok membSize =>
+            let membBytes := bytes.drop membOffset |>.take membSize
+            match reconstructHeapValue env membTy membBytes with
+            | some hv => some (membIdent, hv)
+            | none => none
+          | .error _ => none
+        -- Only produce struct if all members reconstructed
+        if members.length == memberInfo.length then
+          some (.struct_ tag members)
+        else
+          some (.uninitialized ct)
+      | .error _ => none
+    | _ => none
+
+  | .union_ tag =>
+    -- Reconstruct using first member (matches reconstructValue's union handling)
+    match env.lookupTag tag with
+    | some (.union_ fields) =>
+      match fields.head? with
+      | some field =>
+        match reconstructHeapValue env field.ty bytes with
+        | some hv => some (.struct_ tag [(field.name, hv)])
+        | none => some (.uninitialized ct)
+      | none => none
+    | _ => none
+
+  | .array elemTy (some n) =>
+    let elemCty : Ctype := { ty := elemTy }
+    match sizeof env elemCty with
+    | .ok elemSize =>
+      let elems := (List.range n).filterMap fun i =>
+        let start := i * elemSize
+        let elemBytes := bytes.drop start |>.take elemSize
+        reconstructHeapValue env elemCty elemBytes
+      if elems.length == n then
+        some (.array elemCty elems)
+      else
+        some (.uninitialized ct)
+    | .error _ => none
+
+  | .atomic innerTy =>
+    let innerCty : Ctype := { ty := innerTy }
+    reconstructHeapValue env innerCty bytes
+
+  | .byte =>
+    -- Byte type: treat like unsigned char
+    match bytesToInt (bytes.take 1) false with
+    | some n => some (.integer .char n)
+    | none => some (.uninitialized ct)
+
+  | .array _ none => none  -- Flexible array member
+  | .void => none
+  | .function .. => none
+  | .functionNoParams .. => none
 
 /-- Load value from memory.
     Corresponds to: load in impl_mem.ml:1552-1603

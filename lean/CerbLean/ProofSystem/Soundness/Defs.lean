@@ -157,7 +157,7 @@ def FunSpecsCorrect (file : File) (typeEnv : TypeEnv)
       (∀ i (hv : i < argVals.length) (hp : i < spec.params.length),
         valueHasType argVals[i] (spec.params[i]'hp).2) →
       -- Precondition holds
-      stateModels interpState ρ (SLProp.ofPrecondition (spec.requires.substTotal σ)) →
+      stateModels typeEnv interpState ρ (SLProp.ofPrecondition (spec.requires.substTotal σ)) →
       -- Then for any fuel and caller env, calling the function is safe
       ∀ (callerEnv : List (HashMap Sym Value)) (fuel : Nat),
         let result := ((runProcCall file typeEnv s argVals callerEnv fuel).run
@@ -168,7 +168,7 @@ def FunSpecsCorrect (file : File) (typeEnv : TypeEnv)
         (∀ v st', result = .ok (v, st') →
           valueHasType v spec.returnType ∧
           ∃ ρ', ValuationExtends ρ ρ' ∧
-                stateModels st' ρ' (SLProp.ofPostcondition (spec.ensures.substTotal σ)))
+                stateModels typeEnv st' ρ' (SLProp.ofPostcondition (spec.ensures.substTotal σ)))
 
 /-! ## State Compatibility Bundle -/
 
@@ -183,7 +183,7 @@ structure StateCompatible (file : File) (typeEnv : TypeEnv) (interpState : Inter
   /-- All path conditions hold under the valuation -/
   pathConds : PathCondsHold ρ Γ.pathConds
   /-- The heap satisfies the SLProp under the valuation -/
-  heapModels : stateModels interpState ρ H
+  heapModels : stateModels typeEnv interpState ρ H
   /-- Tag definitions in context match file and type env -/
   tagDefs : TagDefsCompat Γ file typeEnv
   /-- Label invariants in context match actual continuations -/
