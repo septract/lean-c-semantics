@@ -680,10 +680,15 @@ inductive HasType : Ctx → SLProp → AExpr → CNBaseType → SLProp → Prop 
       The `sizePe.expr = .val (.ctype ct)` premise connects the size expression
       to the Ctype in the Block resource (the interpreter evaluates sizePe to get the type).
       The pointer is restricted to a logical variable (`⟨.sym ptrSym, .loc, default⟩`)
-      to prevent claiming allocations at specific concrete addresses. -/
+      to prevent claiming allocations at specific concrete addresses.
+      The `ptrSym ∉ Γ.vars.map Prod.fst` freshness premise ensures the pointer
+      symbol is not already bound in the typing context, which is needed for
+      soundness: without it, extending the valuation to map ptrSym to the new
+      allocation could conflict with an existing binding. -/
   | action_create : ∀ {Γ : Ctx} {H : SLProp} {annots : Annots} {locAnn : Loc}
       {ct : Ctype} {ptrSym : Sym} {alignPe sizePe : APexpr} {prefix_ : SymPrefix},
     sizePe.expr = .val (.ctype ct) →
+    ptrSym ∉ Γ.vars.map Prod.fst →
     HasType Γ H
       ⟨annots, .action ⟨.pos, ⟨locAnn, .create alignPe sizePe prefix_⟩⟩⟩
       .loc

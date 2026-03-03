@@ -50,16 +50,18 @@ def flattenEnv (env : List (HashMap Sym Value)) : List (Sym × Value) :=
 /-- Relates the interpreter's scoped environment to `Ctx.vars` and
     the logical `Valuation`. For every typed variable in the context,
     the env has a value with the right type, and the valuation has a
-    corresponding heap value that is type-compatible.
+    corresponding heap value of that type.
 
-    This is strictly stronger than `envValuationCompat` because it also
-    requires `Ctx.vars` membership and `valueHasType`. -/
+    Uses the *declared* type `τ` (not a universally quantified type) for
+    the heap value check. This is sufficient for soundness and avoids the
+    provability issue where Core's untyped integers (IntegerValue has no
+    IntegerType annotation) satisfy `valueHasType _ (.bits s w)` for all
+    sign/width, making a `∀ τ'` bridge unprovable. -/
 def EnvCompat (env : List (HashMap Sym Value)) (vars : List (Sym × BaseType))
     (ρ : Valuation) : Prop :=
   ∀ s τ, (s, τ) ∈ vars →
     ∃ v, envLookup env s = some v ∧ valueHasType v τ ∧
-    ∃ hv, ρ.lookup s = some hv ∧
-      (∀ τ', valueHasType v τ' → heapValueHasType hv τ')
+    ∃ hv, ρ.lookup s = some hv ∧ heapValueHasType hv τ
 
 /-! ## Context Conditions -/
 
@@ -206,8 +208,7 @@ def PureEnvCompat (env : List (HashMap Sym Value)) (vars : List (Sym × BaseType
     (ρ : Valuation) : Prop :=
   ∀ s τ, (s, τ) ∈ vars →
     ∃ v, envLookup env s = some v ∧ pureValueHasType v τ ∧
-    ∃ hv, ρ.lookup s = some hv ∧
-      (∀ τ', valueHasType v τ' → heapValueHasType hv τ')
+    ∃ hv, ρ.lookup s = some hv ∧ heapValueHasType hv τ
 
 /-- `PureEnvCompat` implies `EnvCompat` (weakening). -/
 theorem PureEnvCompat_implies_EnvCompat

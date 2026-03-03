@@ -151,7 +151,7 @@ theorem EnvCompat_bind
     (henv : EnvCompat env Γ.vars ρ)
     (hvt : valueHasType v τ) :
     ∀ ρ', ValuationExtends ρ ρ' →
-      (∃ hv, ρ'.lookup s = some hv ∧ (∀ τ', valueHasType v τ' → CerbLean.ProofSystem.heapValueHasType hv τ')) →
+      (∃ hv, ρ'.lookup s = some hv ∧ CerbLean.ProofSystem.heapValueHasType hv τ) →
       EnvCompat (bindAllInEnv [(s, v)] env) (Γ.addVar s τ).vars ρ' := by
   sorry
 
