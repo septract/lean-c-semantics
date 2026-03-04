@@ -149,7 +149,9 @@ def heapValueHasType : HeapValue → CerbLean.CN.Types.BaseType → Prop
     | none => False
   | .integer _ v, .bool => v = 0 ∨ v = 1  -- C booleans are integer 0 or 1
   | .pointer _, .loc => True
+  | .floating _ _, .real => True
   | .struct_ tag _, .struct_ tag' => tag == tag'  -- tag must match
+  | .array _ elems, .list bt => ∀ elem, elem ∈ elems → heapValueHasType elem bt
   | _, _ => False
 
 /-! ## Iterated Conjunction Helpers (`each`)

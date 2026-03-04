@@ -16,7 +16,7 @@ import CerbLean.Memory.Types
 
 namespace CerbLean.CN.Semantics
 
-open CerbLean.Core (Sym Identifier Ctype IntegerType)
+open CerbLean.Core (Sym Identifier Ctype IntegerType FloatingType FloatingValue)
 
 /-! ## Location
 
@@ -49,6 +49,7 @@ Corresponds to: mem_value in cn/coq/Cn/CNMem.v
 inductive HeapValue where
   | integer (ity : IntegerType) (val : Int)
   | pointer (addr : Option Location)  -- None = NULL
+  | floating (fty : FloatingType) (fv : FloatingValue)
   | struct_ (tag : Sym) (fields : List (Identifier × HeapValue))
   | array (elemTy : Ctype) (elems : List HeapValue)
   | uninitialized (ty : Ctype)
@@ -77,9 +78,9 @@ def locationOfPointerValue (pv : PointerValue) : Option Location :=
 
 /-- Convert a MemValue (interpreter) to a HeapValue (separation logic).
     Structural recursion on MemValue.
-    - `floating` has no HeapValue equivalent — mapped to `.uninitialized`
+    - `floating` maps directly to `HeapValue.floating`
     - `union_` mapped to struct with single member field
-    - `array` requires element type from context — stubbed as `.uninitialized` -/
+    - `array` elements recursively converted (Ctype stubbed as `.void`) -/
 def heapValueOfMemValue : MemValue → HeapValue
   | .integer ity iv => .integer ity iv.val
   | .pointer _ty pv => .pointer (locationOfPointerValue pv)
@@ -87,20 +88,23 @@ def heapValueOfMemValue : MemValue → HeapValue
     .struct_ tag (convertFields members)
   | .union_ tag id mv =>
     .struct_ tag [(id, heapValueOfMemValue mv)]
-  | .array _elems =>
-    -- DIVERGES-FROM-CN: Array needs element Ctype from context to construct
-    -- HeapValue.array. For now, return uninitialized placeholder.
-    -- Real implementation would need the allocation's Ctype.
-    .uninitialized ⟨[], .void⟩
-  | .floating _fty _fv =>
-    -- Floating point has no HeapValue representation
-    .uninitialized ⟨[], .void⟩
+  | .array elems =>
+    -- DIVERGES-FROM-CN: MemValue.array doesn't carry element Ctype, so
+    -- we use a dummy `.void` for `elemTy`. The HeapValue elements are
+    -- recursively converted; `elemTy` is only used for display/debugging.
+    .array ⟨[], .void⟩ (convertArray elems)
+  | .floating fty fv =>
+    .floating fty fv
   | .unspecified ty => .uninitialized ty
 where
   /-- Convert struct fields, recursing into each MemValue member. -/
   convertFields : List (Identifier × Ctype × MemValue) → List (Identifier × HeapValue)
     | [] => []
     | (id, _ty, mv) :: rest => (id, heapValueOfMemValue mv) :: convertFields rest
+  /-- Convert array elements, recursing into each MemValue element. -/
+  convertArray : List MemValue → List HeapValue
+    | [] => []
+    | mv :: rest => heapValueOfMemValue mv :: convertArray rest
 
 /-! ## Heap Fragment
 

@@ -38,7 +38,7 @@ open CerbLean.Memory (TypeEnv)
 open CerbLean.ProofSystem (Ctx SLProp PureHasType valueHasType pureValueHasType
                             pureValueHasType_implies_valueHasType
                             heapValueHasType evalIndexTerm
-                            PexprMatchesTerm pexprEnvLookup
+                            PexprMatchesTerm
                             opResultType intTypeToBaseType CNBaseType)
 open Std (HashMap)
 
@@ -265,24 +265,10 @@ theorem PureHasType.soundness
   obtain ⟨hvt, hmem⟩ := PureHasType.preservation hty henv' htags hok
   exact ⟨fuel, v, st', hok, hvt, hmem⟩
 
-/-! ## PexprMatchesTerm Evaluation Compatibility -/
+/-! ## PexprMatchesTerm Evaluation Compatibility
 
-/-- If a Pexpr matches an IndexTerm, their evaluations are compatible:
-    evaluating the Pexpr in the interpreter and evaluating the IndexTerm
-    in the logical model produce corresponding values.
-
-    This restates the sorry'd lemma at HasType.lean:978-986 with the
-    precise type for the soundness proof context (using `flattenEnv`
-    to convert the scoped env to a flat assoc list). -/
-theorem pexprMatchesTerm_eval_compat
-    {pe : Pexpr} {it : IndexTerm} {ρ : Valuation}
-    {env : List (HashMap Sym Value)}
-    {Γ : Ctx}
-    (hmatch : PexprMatchesTerm pe it)
-    (henv : EnvCompat env Γ.vars ρ)
-    : ∀ v, pexprEnvLookup (flattenEnv env) pe = some v →
-      ∀ τ, valueHasType v τ →
-        ∃ hv, evalIndexTerm ρ it = some hv ∧ heapValueHasType hv τ := by
-  sorry
+    The strengthened version `pexprMatchesTerm_eval_compat'` is in
+    PureHelpers.lean. It uses `evalPexpr` directly instead of the
+    limited `pexprEnvLookup`, covering non-symbol value expressions. -/
 
 end CerbLean.ProofSystem.Soundness

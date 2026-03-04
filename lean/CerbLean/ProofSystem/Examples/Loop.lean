@@ -360,6 +360,7 @@ theorem countdownTyped :
               (PureHasType.sym (by rfl))
               (PureHasType.val (τ := .bits .signed 32) trivial) rfl)
             rfl  -- valNew.bt = τ
+            rfl  -- ctypeToBaseType ct = some τ
         · -- run: substTotal on countdownInvariant with v→(v-1) produces postStoreHeap
           have hrun : countdownInvariant.substTotal countdownRunSubst = postStoreHeap := by
             unfold countdownInvariant countdownRunSubst postStoreHeap

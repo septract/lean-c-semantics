@@ -28,8 +28,7 @@ open CerbLean.ProofSystem (Ctx LabelInv SLProp HasType PureHasType
                             valueHasType pureValueHasType
                             pureValueHasType_implies_valueHasType
                             heapValueHasType evalIndexTerm
-                            evalConstraint stateModels models heapFragmentOf
-                            envValuationCompat pexprEnvLookup)
+                            evalConstraint stateModels models heapFragmentOf)
 open Std (HashMap)
 
 /-! ## Environment Correspondence -/
@@ -43,7 +42,7 @@ def envLookup (env : List (HashMap Sym Value)) (s : Sym) : Option Value :=
 
 /-- Flatten the scoped env (list of HashMaps) to a flat assoc list.
     Inner scopes come first in the list, matching `envLookup`'s
-    search order. Used with `envValuationCompat` and `pexprEnvLookup`. -/
+    search order. -/
 def flattenEnv (env : List (HashMap Sym Value)) : List (Sym × Value) :=
   env.flatMap (fun hm => hm.toList)
 

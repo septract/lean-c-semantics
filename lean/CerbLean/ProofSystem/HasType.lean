@@ -651,6 +651,7 @@ inductive HasType : Ctx → SLProp → AExpr → CNBaseType → SLProp → Prop 
     PureHasType Γ ptrPe .loc →
     PureHasType Γ valPe τ →
     valNew.bt = τ →  -- stored value's type annotation must match its actual type
+    ctypeToBaseType ct = some τ →  -- Ctype and value type must agree (for memValueFromValue)
     HasType Γ (.star (.owned ct .init ptr valOld) R)
       ⟨annots, .action ⟨.pos, ⟨locAnn, .store false tyPe ptrPe valPe .na⟩⟩⟩
       .unit
@@ -669,6 +670,7 @@ inductive HasType : Ctx → SLProp → AExpr → CNBaseType → SLProp → Prop 
     PureHasType Γ ptrPe .loc →
     PureHasType Γ valPe τ →
     valNew.bt = τ →  -- stored value's type annotation must match its actual type
+    ctypeToBaseType ct = some τ →  -- Ctype and value type must agree (for memValueFromValue)
     HasType Γ (.star (.block ct ptr) R)
       ⟨annots, .action ⟨.pos, ⟨locAnn, .store false tyPe ptrPe valPe .na⟩⟩⟩
       .unit
@@ -1006,48 +1008,6 @@ theorem valueHasType_implies_heapValueHasType
     (_hvt : valueHasType v τ)
     (_hmv : MemValueFromValue ct v mv) :
     heapValueHasType (heapValueOfMemValue mv) τ := by
-  sorry
-
-/-- Compatibility relation between interpreter environments and valuations.
-    States that every symbol in the Core environment has a corresponding
-    heap value in the valuation that is type-compatible. This is the key
-    invariant maintained by the soundness proof across expression
-    evaluation steps. -/
-def envValuationCompat (env : List (Sym × Value)) (ρ : Valuation) : Prop :=
-  ∀ s v, (s, v) ∈ env →
-    ∃ hv, ρ.lookup s = some hv ∧
-      ∀ τ, valueHasType v τ → heapValueHasType hv τ
-
-/-- Look up the value of a Pexpr symbol in an interpreter environment.
-    For `Pexpr.sym s`, returns the value bound to `s`.
-    Other Pexpr forms are not directly looked up (they compose sub-lookups). -/
-def pexprEnvLookup (env : List (Sym × Value)) : Pexpr → Option Value
-  | .sym s => env.lookup s
-  | _ => none
-
-/-- PexprMatchesTerm correctness: if a Core Pexpr matches an IndexTerm,
-    then under compatible env/valuation pairs, looking up the Pexpr's
-    value in the env and evaluating the IndexTerm in the valuation yield
-    type-compatible results.
-
-    This connects the syntactic `PexprMatchesTerm` relation to actual
-    semantic agreement. Needed for all rules with `PexprMatchesTerm`
-    premises (load, store, kill, proc, ccall).
-    See audit issue #8.
-
-    Note: The full statement would reference `evalPexpr` from
-    Semantics/Eval.lean:832, but that function has a monadic return type
-    (`InterpM Value`) with fuel parameter. The abstract version here avoids
-    the import dependency; the proof would be done in a file that imports
-    both HasType and Eval. -/
-theorem pexprMatchesTerm_eval_compat
-    {pe : Pexpr} {it : IndexTerm} {ρ : Valuation}
-    {env : List (Sym × Value)}
-    (_hmatch : PexprMatchesTerm pe it)
-    (_hcompat : envValuationCompat env ρ) :
-    ∀ v, pexprEnvLookup env pe = some v →
-      ∀ τ, valueHasType v τ →
-        ∃ hv, evalIndexTerm ρ it = some hv ∧ heapValueHasType hv τ := by
   sorry
 
 end CerbLean.ProofSystem

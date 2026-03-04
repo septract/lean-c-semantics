@@ -184,6 +184,7 @@ theorem incrTyped :
           (PureHasType.val trivial)
           rfl)
         rfl  -- valNew.bt = τ
+        rfl  -- ctypeToBaseType ct = some τ
     -- Step 3: pure () — heap unchanged
     · exact HasType.pure (.val True.intro)
 
