@@ -53,8 +53,12 @@ type name =
     Audited: 2025-01-17
     Deviations: None -/
 inductive ResourceName where
-  /-- Built-in ownership predicate: RW<ct> (init) or W<ct> (uninit) -/
-  | owned (ct : Ctype) (initState : Init)
+  /-- Built-in ownership predicate: RW<ct> (init) or W<ct> (uninit).
+      The Ctype is optional — when `none`, it must be inferred from the pointer type
+      during resolution. This matches CN's parser which accepts both `Owned<int>(p)`
+      and `Owned(p)` (type inferred from p's declaration).
+      Corresponds to: Owned of Sctypes.t * init in request.ml -/
+  | owned (ct : Option Ctype) (initState : Init)
   /-- User-defined predicate by name -/
   | pname (name : Sym)
   deriving Repr, Inhabited
@@ -146,8 +150,20 @@ namespace QPredicate
 
 /-- Substitute in a quantified predicate.
     Replaces symbol references in pointer, permission, and index args.
-    Corresponds to: QPredicate substitution in CN -/
+    Alpha-renames the quantified variable if it conflicts with the substitution.
+    Corresponds to: QPredicate substitution in CN
+    CN ref: request.ml:111-125 -/
 def subst (σ : Subst) (qp : QPredicate) : QPredicate :=
+  -- Alpha-rename quantified variable if it conflicts with substitution
+  let qp := if σ.relevant.contains qp.q.1.id then
+    let q' := freshSymFor qp.q.1 σ.relevant
+    let renameσ := Subst.single qp.q.1 (AnnotTerm.mk (.sym q') qp.q.2 qp.qLoc)
+    { qp with
+      q := (q', qp.q.2)
+      pointer := qp.pointer.subst renameσ
+      permission := qp.permission.subst renameσ
+      iargs := qp.iargs.map (·.subst renameσ) }
+  else qp
   { qp with
     pointer := qp.pointer.subst σ
     permission := qp.permission.subst σ

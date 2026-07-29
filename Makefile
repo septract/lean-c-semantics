@@ -1,7 +1,7 @@
 # C-to-Lean Project Makefile
 
 .PHONY: all lean cerberus cerberus-setup cerberus-coverage cerberus-coverage-setup clean \
-        test test-unit test-memory test-cn test-cn-unit \
+        test test-unit test-memory test-cn test-cn-nolibc test-cn-libc test-cn-unit \
         test-interp test-interp-full test-interp-ci test-interp-seq \
         test-parser test-pp test-parser-quick test-pp-quick \
         test-genproof test-verified verified-programs test-one \
@@ -96,9 +96,8 @@ clean:
 # so most test targets don't need `lean` or `cerberus` as prerequisites.
 # ------------------------------------------------------------------------------
 
-# Run all quick tests (unit + memory + interp + genproof)
-# NOTE: test-cn is excluded because CN is a prototype with known failures
-test: test-unit test-memory test-interp test-interp-seq test-genproof
+# Run all tests (unit, memory, interpreter in both modes, genproof, CN)
+test: test-unit test-memory test-cn-unit test-interp test-interp-seq test-genproof test-cn
 
 # Run exactly what CI runs (for local verification before pushing)
 ci: test test-verified
@@ -139,6 +138,9 @@ test-genproof:
 	./scripts/test_genproof.sh --nolibc tests/minimal/001-return-literal.c
 	@echo "✓ GenProof pipeline test passed"
 
+# TODO: add test-interp-libc target to run *.libc.c tests with libc in CI
+# (currently only test-interp-full runs them, but it's not in the CI test target)
+
 # Interpreter Tests (fast mode with --nolibc, skips *.libc.c tests)
 test-interp:
 	./scripts/test_interp.sh --nolibc tests/minimal
@@ -165,10 +167,17 @@ test-interp-seq:
 test-coverage: cerberus-coverage
 	./scripts/test_coverage.sh --no-build
 
-# CN Tests
-# test-cn: run integration tests on tests/cn/*.c (requires Cerberus)
+# CN Tests (run both nolibc and libc-only, fail if either fails)
 test-cn:
-	./scripts/test_cn.sh
+	$(MAKE) test-cn-nolibc; nolibc=$$?; $(MAKE) test-cn-libc; libc=$$?; exit $$(( nolibc || libc ))
+
+# CN Tests (fast mode with --nolibc, skips *.libc.* tests)
+test-cn-nolibc:
+	./scripts/test_cn.sh --nolibc
+
+# CN Tests (with libc — runs only *.libc.* tests)
+test-cn-libc:
+	./scripts/test_cn.sh --libc-only
 
 # test-cn-unit: run unit tests only (fast, no Cerberus)
 test-cn-unit:

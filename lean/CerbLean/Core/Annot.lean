@@ -381,4 +381,21 @@ def Annots.getIntegerAnnot (annots : Annots) : Option IntegerType :=
     | .value (.integer ity) => some ity
     | _ => none
 
+/-- Get cerb::magic attribute text from annotations.
+    Corresponds to: get_cerb_magic_attr in cerberus/frontend/model/annot.lem:199-211
+    CN uses this to detect ghost statements in Esseq nodes.
+
+    Returns the list of magic attribute argument texts (e.g., ["cn_have(x == y)"]). -/
+def Annots.getCerbMagic (annots : Annots) : List String :=
+  annots.foldl (init := []) fun acc annot =>
+    match annot with
+    | .attrs attrs =>
+      let magicArgs := attrs.attrs.foldl (init := []) fun acc2 attr =>
+        match attr.ns, attr.id with
+        | some "cerb", "magic" =>
+          acc2 ++ attr.args.map (·.arg)
+        | _, _ => acc2
+      acc ++ magicArgs
+    | _ => acc
+
 end CerbLean.Core

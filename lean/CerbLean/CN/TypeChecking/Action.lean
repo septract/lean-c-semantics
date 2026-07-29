@@ -71,7 +71,7 @@ Helper functions to create Owned predicates.
 def mkOwnedResource (ct : Ctype) (initState : Init) (ptr : IndexTerm) (value : IndexTerm)
     : Resource :=
   let pred : Predicate := {
-    name := .owned ct initState
+    name := .owned (some ct) initState
     pointer := ptr
     iargs := []
   }
@@ -107,30 +107,12 @@ def simplifyPointerForResource (ptr : IndexTerm) : IndexTerm :=
   | _ => ptr
 
 /-- Convert Ctype to CN BaseType.
-    Fails on unsupported types rather than silently returning a default.
+    Delegates to ctypeInnerToBaseType which correctly maps integer types to Bits
+    (matching CN's Memory.bt_of_sct which returns Bits(sign, width) for integers).
 
-    Corresponds to: Memory.bt_of_sct in CN OCaml -/
-def ctypeToBaseType (ct : Ctype) (loc : Core.Loc) : TypingM BaseType := do
-  match ct.ty with
-  | .void => return .unit
-  | .basic (.integer _) => return .integer
-  | .basic (.floating _) => return .real
-  | .pointer _ _ => return .loc
-  | .struct_ tag => return .struct_ tag
-  | .array _ _ =>
-    -- Arrays require proper handling - fail explicitly
-    TypingM.fail (.other s!"Array types not yet supported in ctypeToBaseType at {repr loc}")
-  | .union_ tag =>
-    TypingM.fail (.other s!"Union type {repr tag} not yet supported at {repr loc}")
-  | .function _ _ _ _ =>
-    TypingM.fail (.other s!"Function types not supported in ctypeToBaseType at {repr loc}")
-  | .functionNoParams _ _ =>
-    TypingM.fail (.other s!"Function types not supported in ctypeToBaseType at {repr loc}")
-  | .atomic _ =>
-    TypingM.fail (.other s!"Atomic types not yet supported in ctypeToBaseType at {repr loc}")
-  | .byte =>
-    -- Byte is an internal type, maps to memory byte
-    return .memByte
+    Corresponds to: Memory.bt_of_sct in CN OCaml (cn/lib/memory.ml) -/
+def ctypeToBaseType (ct : Ctype) (_loc : Core.Loc) : TypingM BaseType := do
+  return ctypeInnerToBaseType ct.ty
 
 /-! ## Unspecified Value Detection
 
@@ -191,8 +173,8 @@ Each handler implements the separation logic semantics for a memory action.
     should provide the type information, or we should examine the size expression. -/
 def handleCreate (align : APexpr) (size : APexpr) (ct : Ctype) (prefix_ : SymPrefix) (loc : Core.Loc)
     : TypingM IndexTerm := do
-  -- Evaluate alignment expression (for constraint generation)
-  let _alignVal ← checkPexpr align
+  -- Evaluate alignment expression
+  let alignVal ← checkPexpr align
   -- Evaluate size expression (for constraint generation)
   let _sizeVal ← checkPexpr size
 
@@ -211,9 +193,22 @@ def handleCreate (align : APexpr) (size : APexpr) (ct : Ctype) (prefix_ : SymPre
   -- Produce Owned<T>(Uninit) resource
   -- Corresponds to: add_r loc (P { name = Owned (act.ct, Uninit); ... }, O ...) in check.ml 1802-1806
   let resource := mkOwnedResource ct .uninit ptrTerm defaultVal
-  TypingM.addR resource
+  addResourceWithUnfold resource
 
-  -- TODO: Add alignment constraint (LC.T (alignedI_ ~align:align_v ~t:ret loc))
+  -- Add alignment fact: the freshly created pointer is aligned
+  -- Corresponds to: let align_v = cast_ Memory.uintptr_bt arg loc in
+  --                  add_c loc (LC.T (alignedI_ ~align:align_v ~t:ret loc)) in check.ml:1799-1800
+  -- CN casts alignment to uintptr_bt (Bits(Unsigned, 64)) before building the constraint.
+  -- CN adds this as a constraint (assumption), NOT as an obligation to prove.
+  -- The create operation guarantees the returned pointer is aligned.
+  -- CN: cast_ Memory.uintptr_bt arg loc (indexTerms.ml:683-684)
+  -- cast_ only wraps if types differ; uintptr_bt = Bits(Unsigned, 64)
+  let uintptrBt : BaseType := .bits .unsigned 64
+  let alignCast := match alignVal.bt with
+    | .bits .unsigned 64 => alignVal
+    | _ => AnnotTerm.mk (.cast uintptrBt alignVal) uintptrBt loc
+  let alignedLc := AnnotTerm.mk (.aligned ptrTerm alignCast) .bool loc
+  TypingM.addC (.t alignedLc)
   -- TODO: Add Alloc predicate (add_r loc (P (Req.make_alloc ret), O lookup))
 
   -- Return the new pointer
@@ -239,9 +234,21 @@ def handleKill (kind : KillKind) (ptrPe : APexpr) (loc : Core.Loc)
     | .static ct => ct
     | .dynamic => Ctype.void  -- Dynamic kill (free) - type determined at runtime
 
-  -- First try to consume Owned<T>(Uninit) for this pointer
+  -- Lazy muCore: check for parameter stack slot FIRST, before resource consumption.
+  -- CN's muCore doesn't include param slot kills in the callee — the caller manages them.
+  -- This MUST be checked before resource consumption because the SMT slow path
+  -- in predicateRequest could incorrectly consume an unrelated resource when
+  -- it finds a single name-matching candidate at a different pointer.
+  match ptr.term with
+  | .sym s =>
+    if ← TypingM.isParamStackSlot s.id then
+      return mkUnitTerm loc
+  | _ => pure ()
+
+  -- Consume Owned<T>(Uninit) for this pointer
+  -- CN check.ml:1836-1841: ONLY consumes Uninit, never Init
   let uninitPred : Predicate := {
-    name := .owned ct .uninit
+    name := .owned (some ct) .uninit
     pointer := ptr
     iargs := []
   }
@@ -249,27 +256,14 @@ def handleKill (kind : KillKind) (ptrPe : APexpr) (loc : Core.Loc)
   match ← predicateRequest uninitPred with
   | some _ =>
     -- Resource consumed successfully
-    -- TODO: Also consume Alloc predicate (Req.make_alloc arg)
+    -- TODO: Also consume Alloc predicate (Req.make_alloc arg, check.ml:1842-1843)
     return mkUnitTerm loc
   | none =>
-    -- Try consuming Owned<T>(Init) instead - memory may have been initialized
-    let initPred : Predicate := {
-      name := .owned ct .init
-      pointer := ptr
-      iargs := []
-    }
-    match ← predicateRequest initPred with
-    | some _ =>
-      -- Resource consumed successfully
-      return mkUnitTerm loc
-    | none =>
-      -- No resource found - this is an error.
-      -- CN requires the resource to exist for kill actions.
-      -- Attempting to kill non-existent memory is a verification failure.
-      TypingM.fail (.other s!"Kill: no Owned resource found for pointer (possible double-free or use-after-free)")
+    TypingM.fail (.other "Kill: no Owned(Uninit) resource found for pointer (possible double-free or use-after-free)")
 
 /-- Handle store action: write to memory.
-    Consumes Owned<T>(Uninit) or Owned<T>(Init), produces Owned<T>(Init) with the stored value.
+    Consumes Owned<T>(Uninit), produces Owned<T>(Init) with the stored value.
+    CN check.ml:1879-1883: ONLY consumes Uninit, never Init.
 
     Separation logic rule:
     {Owned<T>(Uninit)(p)} *p = v {Owned<T>(Init)(p) ∧ *p == v}
@@ -289,6 +283,23 @@ def handleStore (_locking : Bool) (tyPe : APexpr) (ptrPe : APexpr) (valPe : APex
   -- Corresponds to: act.ct in check.ml
   let ct ← extractCtype tyPe loc
 
+  -- MOD-11: ensure_base_type checks for store arguments
+  -- Corresponds to: check.ml:1850 — WellTyped.ensure_base_type loc ~expect:(Loc ()) (Mu.bt_of_pexpr p_pe)
+  match ptrPe.ty.bind coreBaseTypeToCN with
+  | some ptrBt =>
+    if !BaseType.beq ptrBt .loc then
+      TypingM.fail (.other s!"Store: pointer expression has type {repr ptrBt}, expected Loc at {repr loc}")
+  | none => pure ()  -- No annotation available or not convertible from Core IR
+
+  -- Corresponds to: check.ml:1851-1855 — WellTyped.ensure_base_type loc ~expect:(Memory.bt_of_sct act.ct) (Mu.bt_of_pexpr v_pe)
+  -- Verifies the stored value's annotated type matches the C type being stored to.
+  let expectedBt := ctypeInnerToBaseType ct.ty
+  match valPe.ty.bind coreBaseTypeToCN with
+  | some valBt =>
+    if !BaseType.beq valBt expectedBt then
+      TypingM.fail (.other s!"Store: value expression has type {repr valBt}, expected {repr expectedBt} (from C type {repr ct}) at {repr loc}")
+  | none => pure ()  -- No annotation available or not convertible from Core IR
+
   -- Evaluate pointer and value expressions
   -- Simplify pointer for resource matching (strip PtrValidForDeref wrappers)
   let ptrRaw ← checkPexpr ptrPe
@@ -307,20 +318,26 @@ def handleStore (_locking : Bool) (tyPe : APexpr) (ptrPe : APexpr) (valPe : APex
   -- If so, we should keep the resource as Uninit, not Init
   let storeIsUnspecified := isUnspecifiedValue valPe
 
-  -- TODO: Check representability of the value
-  -- Corresponds to: representable_ (act.ct, varg) in check.ml lines 1863-1877
-  -- let in_range_lc := representable ct val
-  -- TypingM.ensureProvable in_range_lc
+  -- Check representability of stored value
+  -- Corresponds to: representable_ (act.ct, varg) in check.ml:1863-1877
+  -- CN generates this for ALL store types (integer, pointer, struct, etc.)
+  -- Skip for unspecified values: these come from dead PEundef branches where
+  -- the unreachability obligation (C7) already proves the branch is dead.
+  -- CN's inline solver would prune these branches before reaching the store.
+  if !storeIsUnspecified then
+    let repLc := AnnotTerm.mk (.representable ct val) .bool loc
+    TypingM.requireConstraint (.t repLc) loc "Write value not representable in type"
 
   -- Request (consume) Owned<T>(Uninit) - we need writable permission
   -- Corresponds to: RI.Special.predicate_request ... ({ name = Owned (act.ct, Uninit); ... }, None)
   let uninitPred : Predicate := {
-    name := .owned ct .uninit
+    name := .owned (some ct) .uninit
     pointer := ptr
     iargs := []
   }
 
-  -- First try to consume Uninit
+  -- Consume Owned<T>(Uninit)
+  -- CN check.ml:1879-1883: ONLY consumes Uninit, never Init
   let consumed ← predicateRequest uninitPred
   match consumed with
   | some _ =>
@@ -328,38 +345,29 @@ def handleStore (_locking : Bool) (tyPe : APexpr) (ptrPe : APexpr) (valPe : APex
     if storeIsUnspecified then
       -- Storing unspecified value: keep as Uninit (memory still logically uninitialized)
       let resource := mkOwnedResource ct .uninit ptr val
-      TypingM.addR resource
+      addResourceWithUnfold resource
     else
       -- Storing specified value: produce Init
       -- Corresponds to: add_r loc (P { name = Owned (act.ct, Init); ... }, O varg) in check.ml 1885-1888
       let resource := mkOwnedResource ct .init ptr val
-      TypingM.addR resource
+      addResourceWithUnfold resource
     return mkUnitTerm loc
   | none =>
-    -- Try consuming Init instead (overwriting initialized memory)
-    -- This is valid in CN - you can write to already-initialized memory
-    let initPred : Predicate := {
-      name := .owned ct .init
-      pointer := ptr
-      iargs := []
-    }
-    match ← predicateRequest initPred with
-    | some _ =>
-      -- Consumed Init
-      if storeIsUnspecified then
-        -- Storing unspecified value to initialized memory: produces Uninit
-        -- (This is unusual but handles re-declaring uninitialized variables)
-        let resource := mkOwnedResource ct .uninit ptr val
-        TypingM.addR resource
-      else
-        -- Consumed Init, produce Init with new value
-        let resource := mkOwnedResource ct .init ptr val
-        TypingM.addR resource
-      return mkUnitTerm loc
-    | none =>
-      -- No matching resource found
-      let ctx ← TypingM.getContext
-      TypingM.fail (.missingResource (.p uninitPred) ctx)
+    -- Fallback: param stack slot check (only when no resource found)
+      -- CN's muCore eliminates stores to parameter slots entirely (core_to_mucore.ml).
+      -- We handle them lazily here by updating the param value map.
+      match ptr.term with
+      | .sym s =>
+        if ← TypingM.isParamStackSlot s.id then
+          if !storeIsUnspecified then
+            TypingM.addParamValue s.id val
+          return mkUnitTerm loc
+        else
+          let ctx ← TypingM.getContext
+          TypingM.fail (.missingResource (.p uninitPred) ctx)
+      | _ =>
+        let ctx ← TypingM.getContext
+        TypingM.fail (.missingResource (.p uninitPred) ctx)
 
 /-- Handle load action: read from memory.
     Consumes Owned<T>(Init), produces it back, returns the loaded value.
@@ -405,7 +413,7 @@ def handleLoad (tyPe : APexpr) (ptrPe : APexpr) (_order : Core.MemoryOrder) (loc
   -- Request (consume) Owned<T>(Init) - we need readable permission
   -- Load requires initialized memory (reading uninitialized is UB)
   let pred : Predicate := {
-    name := .owned ct .init
+    name := .owned (some ct) .init
     pointer := ptr
     iargs := []
   }
@@ -414,7 +422,7 @@ def handleLoad (tyPe : APexpr) (ptrPe : APexpr) (_order : Core.MemoryOrder) (loc
   | some (_, output) =>
     -- Got the value, produce the resource back (non-destructive read)
     let resource := mkOwnedResource ct .init ptr output.value
-    TypingM.addR resource
+    addResourceWithUnfold resource
 
     -- Return the loaded value
     return output.value
@@ -470,7 +478,7 @@ def checkAction (pact : Paction) : TypingM IndexTerm := do
     let ptrTerm := AnnotTerm.mk (.sym ptrSym) .loc loc
     -- Produce Owned<T>(Init) with the init value
     let resource := mkOwnedResource ct .init ptrTerm initVal
-    TypingM.addR resource
+    addResourceWithUnfold resource
     return ptrTerm
 
   -- Corresponds to: Eaction Alloc case in check.ml lines 1825-1827
@@ -500,10 +508,10 @@ def checkAction (pact : Paction) : TypingM IndexTerm := do
     -- RMW is not fully implemented in CN either
     TypingM.fail (.other s!"RMW operations not yet supported at {repr loc}")
 
-  -- Memory fence (no resource changes)
+  -- Memory fence
   -- Corresponds to: Eaction Fence case in check.ml line 1900
   | .fence _order =>
-    return mkUnitTerm loc
+    TypingM.fail (.other "Fence not yet supported")
 
   -- Compare-exchange operations
   -- Corresponds to: Eaction CompareExchangeStrong/Weak cases in check.ml lines 1901-1904
@@ -513,9 +521,72 @@ def checkAction (pact : Paction) : TypingM IndexTerm := do
   | .compareExchangeWeak _ty _ptr _expected _desired _successOrd _failOrd =>
     TypingM.fail (.other s!"CompareExchangeWeak not yet supported at {repr loc}")
 
-  -- Sequential RMW (for BMC)
-  | .seqRmw _isUpdate _ty _ptr _sym _val =>
-    TypingM.fail (.other s!"SeqRMW not yet supported at {repr loc}")
+  -- Sequential RMW: atomic load + compute + store (pre/post-increment)
+  -- isUpdate=true: return NEW value (pre-increment ++i)
+  -- isUpdate=false: return OLD value (post-increment i++)
+  -- Corresponds to: core_reduction.lem:1214-1276
+  -- DIVERGES-FROM-CN: CN's core_to_mucore doesn't support SeqRMW (assert_error).
+  -- We implement it as load + eval + store since it's needed for C pre/post-increment.
+  -- Audited: 2026-02-19
+  | .seqRmw isUpdate tyPe ptrPe sym valPe =>
+    -- Step 1: Extract type and pointer
+    let ct ← extractCtype tyPe loc
+    let ptrRaw ← checkPexpr ptrPe
+    let ptr := simplifyPointerForResource ptrRaw
+
+    -- Check if this is a SeqRMW on a parameter stack slot (lazy muCore transformation).
+    -- In CN's muCore, SeqRMW doesn't exist (assert_error). For parameter slots,
+    -- we handle it by reading/updating the param value map instead of resources.
+    match ptr.term with
+    | .sym s =>
+      if ← TypingM.isParamStackSlot s.id then
+        -- Parameter slot SeqRMW: read old value from param map, compute new, update map
+        match ← TypingM.lookupParamValue s.id with
+        | some oldValue =>
+          -- Bind sym to old value and evaluate update expression
+          TypingM.addAValue sym oldValue loc "seqRmw param loaded value"
+          let newValue ← checkPexpr valPe
+          -- Representability check
+          let repLc := AnnotTerm.mk (.representable ct newValue) .bool loc
+          TypingM.requireConstraint (.t repLc) loc "SeqRMW value not representable in type"
+          -- Update param value
+          TypingM.addParamValue s.id newValue
+          -- Return old or new value
+          if isUpdate then return newValue else return oldValue
+        | none =>
+          TypingM.fail (.other s!"SeqRMW: parameter slot has no value")
+      else pure ()
+    | _ => pure ()
+
+    -- Step 2: Load - consume Owned<T>(Init), get old value
+    let loadPred : Predicate := {
+      name := .owned (some ct) .init
+      pointer := ptr
+      iargs := []
+    }
+    match ← predicateRequest loadPred with
+    | none =>
+      let ctx ← TypingM.getContext
+      TypingM.fail (.missingResource (.p loadPred) ctx)
+    | some (_, output) =>
+      let oldValue := output.value
+
+      -- Step 3: Bind sym to old value and evaluate update expression
+      TypingM.addAValue sym oldValue loc "seqRmw loaded value"
+      let newValue ← checkPexpr valPe
+
+      -- Step 4: Store - produce Owned<T>(Init) with new value
+      -- (The old Owned was consumed by the load above)
+      let repLc := AnnotTerm.mk (.representable ct newValue) .bool loc
+      TypingM.requireConstraint (.t repLc) loc "SeqRMW value not representable in type"
+      let resource := mkOwnedResource ct .init ptr newValue
+      addResourceWithUnfold resource
+
+      -- Step 5: Return old value (post-inc) or new value (pre-inc)
+      if isUpdate then
+        return newValue
+      else
+        return oldValue
 
 /-! ## CPS Version
 
