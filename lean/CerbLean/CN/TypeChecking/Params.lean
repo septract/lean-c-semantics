@@ -542,7 +542,8 @@ def checkFunctionWithParams
         { tagDefs := tagDefs : CerbLean.Memory.TypeEnv } with
         | .ok s => pure s
         | .error msg => return TypeCheckResult.fail msg
-      let preamble := CerbLean.CN.Verification.SmtLib.pointerPreamble ++ structPreamble
+      let preamble := CerbLean.CN.Verification.SmtLib.solverBasicsPreamble
+        ++ CerbLean.CN.Verification.SmtLib.uninterpFunctionPreamble ++ structPreamble
       let solverChild ← try
         let proc ← IO.Process.spawn {
           cmd := "cvc5"

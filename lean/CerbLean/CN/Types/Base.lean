@@ -127,8 +127,8 @@ partial def BaseType.beq : BaseType → BaseType → Bool
   | .allocId, .allocId => true
   | .loc, .loc => true
   | .ctype, .ctype => true
-  | .struct_ t1, .struct_ t2 => t1.id == t2.id
-  | .datatype t1, .datatype t2 => t1.id == t2.id
+  | .struct_ t1, .struct_ t2 => t1 == t2
+  | .datatype t1, .datatype t2 => t1 == t2
   | .record m1, .record m2 => m1.length == m2.length &&
       (m1.zip m2).all fun ((id1, bt1), (id2, bt2)) => id1 == id2 && BaseType.beq bt1 bt2
   | .map k1 v1, .map k2 v2 => BaseType.beq k1 k2 && BaseType.beq v1 v2

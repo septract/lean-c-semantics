@@ -245,7 +245,8 @@ def handleKill (kind : KillKind) (ptrPe : APexpr) (loc : Core.Loc)
       return mkUnitTerm loc
   | _ => pure ()
 
-  -- First try to consume Owned<T>(Uninit) for this pointer
+  -- Consume Owned<T>(Uninit) for this pointer
+  -- CN check.ml:1836-1841: ONLY consumes Uninit, never Init
   let uninitPred : Predicate := {
     name := .owned (some ct) .uninit
     pointer := ptr
@@ -255,24 +256,14 @@ def handleKill (kind : KillKind) (ptrPe : APexpr) (loc : Core.Loc)
   match ← predicateRequest uninitPred with
   | some _ =>
     -- Resource consumed successfully
-    -- TODO: Also consume Alloc predicate (Req.make_alloc arg)
+    -- TODO: Also consume Alloc predicate (Req.make_alloc arg, check.ml:1842-1843)
     return mkUnitTerm loc
   | none =>
-    -- Try consuming Owned<T>(Init) instead - memory may have been initialized
-    let initPred : Predicate := {
-      name := .owned (some ct) .init
-      pointer := ptr
-      iargs := []
-    }
-    match ← predicateRequest initPred with
-    | some _ =>
-      -- Resource consumed successfully
-      return mkUnitTerm loc
-    | none =>
-      TypingM.fail (.other "Kill: no Owned resource found for pointer (possible double-free or use-after-free)")
+    TypingM.fail (.other "Kill: no Owned(Uninit) resource found for pointer (possible double-free or use-after-free)")
 
 /-- Handle store action: write to memory.
-    Consumes Owned<T>(Uninit) or Owned<T>(Init), produces Owned<T>(Init) with the stored value.
+    Consumes Owned<T>(Uninit), produces Owned<T>(Init) with the stored value.
+    CN check.ml:1879-1883: ONLY consumes Uninit, never Init.
 
     Separation logic rule:
     {Owned<T>(Uninit)(p)} *p = v {Owned<T>(Init)(p) ∧ *p == v}
@@ -291,6 +282,23 @@ def handleStore (_locking : Bool) (tyPe : APexpr) (ptrPe : APexpr) (valPe : APex
   -- Extract the C type from the type expression
   -- Corresponds to: act.ct in check.ml
   let ct ← extractCtype tyPe loc
+
+  -- MOD-11: ensure_base_type checks for store arguments
+  -- Corresponds to: check.ml:1850 — WellTyped.ensure_base_type loc ~expect:(Loc ()) (Mu.bt_of_pexpr p_pe)
+  match ptrPe.ty.bind coreBaseTypeToCN with
+  | some ptrBt =>
+    if !BaseType.beq ptrBt .loc then
+      TypingM.fail (.other s!"Store: pointer expression has type {repr ptrBt}, expected Loc at {repr loc}")
+  | none => pure ()  -- No annotation available or not convertible from Core IR
+
+  -- Corresponds to: check.ml:1851-1855 — WellTyped.ensure_base_type loc ~expect:(Memory.bt_of_sct act.ct) (Mu.bt_of_pexpr v_pe)
+  -- Verifies the stored value's annotated type matches the C type being stored to.
+  let expectedBt := ctypeInnerToBaseType ct.ty
+  match valPe.ty.bind coreBaseTypeToCN with
+  | some valBt =>
+    if !BaseType.beq valBt expectedBt then
+      TypingM.fail (.other s!"Store: value expression has type {repr valBt}, expected {repr expectedBt} (from C type {repr ct}) at {repr loc}")
+  | none => pure ()  -- No annotation available or not convertible from Core IR
 
   -- Evaluate pointer and value expressions
   -- Simplify pointer for resource matching (strip PtrValidForDeref wrappers)
@@ -328,7 +336,8 @@ def handleStore (_locking : Bool) (tyPe : APexpr) (ptrPe : APexpr) (valPe : APex
     iargs := []
   }
 
-  -- First try to consume Uninit
+  -- Consume Owned<T>(Uninit)
+  -- CN check.ml:1879-1883: ONLY consumes Uninit, never Init
   let consumed ← predicateRequest uninitPred
   match consumed with
   | some _ =>
@@ -344,28 +353,7 @@ def handleStore (_locking : Bool) (tyPe : APexpr) (ptrPe : APexpr) (valPe : APex
       addResourceWithUnfold resource
     return mkUnitTerm loc
   | none =>
-    -- Try consuming Init instead (overwriting initialized memory)
-    -- This is valid in CN - you can write to already-initialized memory
-    let initPred : Predicate := {
-      name := .owned (some ct) .init
-      pointer := ptr
-      iargs := []
-    }
-    match ← predicateRequest initPred with
-    | some _ =>
-      -- Consumed Init
-      if storeIsUnspecified then
-        -- Storing unspecified value to initialized memory: produces Uninit
-        -- (This is unusual but handles re-declaring uninitialized variables)
-        let resource := mkOwnedResource ct .uninit ptr val
-        addResourceWithUnfold resource
-      else
-        -- Consumed Init, produce Init with new value
-        let resource := mkOwnedResource ct .init ptr val
-        addResourceWithUnfold resource
-      return mkUnitTerm loc
-    | none =>
-      -- Fallback: param stack slot check (only when no resource found)
+    -- Fallback: param stack slot check (only when no resource found)
       -- CN's muCore eliminates stores to parameter slots entirely (core_to_mucore.ml).
       -- We handle them lazily here by updating the param value map.
       match ptr.term with

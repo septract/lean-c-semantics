@@ -228,11 +228,17 @@ partial def simplifyTerm' (ctx : SimCtxt) (t : Term) (bt : BaseType) (loc : Loc)
   -- CN ref: simplify.ml:226
   | .const _ => .mk t bt loc
 
-  -- Symbols: replace with known constant value from context, then simplify
-  -- CN ref: simplify.ml:221-225 (Sym.Map.find_opt sym simp_ctxt.sym_eqs)
+  -- Symbols: replace with known constant/symbol value from context
+  -- CN ref: simplify.ml:221-225 — CN only inlines Const or Sym values, NOT complex
+  -- expressions (to avoid exponential term growth).
+  -- Unit-typed symbols are always simplified to unit_ (simplify.ml:221).
   | .sym s =>
-    match ctx.symEqs.get? s.id with
-    | some value => simplifyTerm ctx value
+    if BaseType.beq bt .unit then .mk (.const .unit) bt loc
+    else match ctx.symEqs.get? s.id with
+    | some value =>
+      match value.term with
+      | .const _ | .sym _ => simplifyTerm ctx value
+      | _ => .mk t bt loc
     | none => .mk t bt loc
 
   -- Binary operations: simplify children first, then fold
@@ -324,11 +330,17 @@ partial def simplifyTerm' (ctx : SimCtxt) (t : Term) (bt : BaseType) (loc : Loc)
     let val' := simplifyTerm ctx value
     .mk (.recordUpdate obj' member val') bt loc
 
-  -- EachI: simplify body
+  -- EachI: alpha-rename bound variable, then simplify body
   -- CN ref: simplify.ml:484-488
-  | .eachI lo var hi body =>
-    let body' := simplifyTerm ctx body
-    .mk (.eachI lo var hi body') bt loc
+  -- let s' = Sym.fresh_same s in
+  -- let t = IndexTerms.subst (make_rename ~from:s ~to_:s') t in
+  -- let t = aux t in
+  | .eachI lo (s, sBt) hi body =>
+    let freeIds := body.freeVarIds
+    let s' := freshSymFor s freeIds
+    let renameσ := Subst.single s (AnnotTerm.mk (.sym s') sBt default)
+    let body' := simplifyTerm ctx (body.subst renameσ)
+    .mk (.eachI lo (s', sBt) hi body') bt loc
 
   -- Constructor: simplify args
   -- CN ref: simplify.ml:557-558
@@ -420,9 +432,17 @@ partial def simplifyTerm' (ctx : SimCtxt) (t : Term) (bt : BaseType) (loc : Loc)
     let map' := simplifyTerm ctx map
     let key' := simplifyTerm ctx key
     simplifyMapGet ctx map' key' bt loc
-  | .mapDef var body =>
-    let body' := simplifyTerm ctx body
-    .mk (.mapDef var body') bt loc
+  -- MapDef: alpha-rename bound variable, then simplify body
+  -- CN ref: simplify.ml:620-624
+  -- let s' = Sym.fresh_same s in
+  -- let body = IndexTerms.subst (make_rename ~from:s ~to_:s') body in
+  -- let body = aux body in
+  | .mapDef (s, aBt) body =>
+    let freeIds := body.freeVarIds
+    let s' := freshSymFor s freeIds
+    let renameσ := Subst.single s (AnnotTerm.mk (.sym s') aBt default)
+    let body' := simplifyTerm ctx (body.subst renameσ)
+    .mk (.mapDef (s', aBt) body') bt loc
 
   -- Apply: simplify args
   -- CN ref: simplify.ml:625-634
@@ -824,5 +844,32 @@ def simplifyConstraint (ctx : SimCtxt) (lc : LogicalConstraint) : LogicalConstra
     match body'.term with
     | .const (.bool true) => .t (.mk (.const (.bool true)) .bool body'.loc)
     | _ => .forall_ (q, qbt) body'
+
+/-- Simplify a Predicate request: simplify pointer and iargs.
+    Corresponds to: Simplify.Request.Predicate.simp in simplify.ml:668-672 -/
+def simplifyPredicate (ctx : SimCtxt) (p : Predicate) : Predicate :=
+  { p with
+    pointer := simplifyTerm ctx p.pointer
+    iargs := p.iargs.map (simplifyTerm ctx ·) }
+
+/-- Simplify a Request: dispatch on P/Q.
+    Corresponds to: Simplify.Request.simp in simplify.ml:692-694 -/
+def simplifyRequest (ctx : SimCtxt) (r : Request) : Request :=
+  match r with
+  | .p p => .p (simplifyPredicate ctx p)
+  | .q qp =>
+    -- Q case: simplify pointer and iargs (skip alpha-rename and permission flatten
+    -- for now — those are QPredicate-specific and less critical).
+    -- Corresponds to: Simplify.Request.QPredicate.simp in simplify.ml:678-689
+    .q { qp with
+      pointer := simplifyTerm ctx qp.pointer
+      iargs := qp.iargs.map (simplifyTerm ctx ·) }
+
+/-- Simplify a Resource (request + output).
+    Corresponds to: add_r_internal in typing.ml:418-419 -/
+def simplifyResource (ctx : SimCtxt) (r : Resource) : Resource :=
+  { r with
+    request := simplifyRequest ctx r.request
+    output := ⟨simplifyTerm ctx r.output.value⟩ }
 
 end CerbLean.CN.TypeChecking.Simplify

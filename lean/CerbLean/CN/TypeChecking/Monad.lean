@@ -369,6 +369,15 @@ inductive Provable where
   | unknown    -- Solver couldn't determine (timeout, no solver, unsupported)
   deriving Inhabited, BEq
 
+/-- Build the simplification context from current typing state.
+    Corresponds to: make_simp_ctxt in typing.ml:112-114 -/
+def getSimpCtxt : TypingM Simplify.SimCtxt := do
+  let st ← getState
+  return {
+    symEqs := st.symEqs
+    typeEnv := some (CerbLean.Memory.TypeEnv.mk st.tagDefs)
+  }
+
 /-- Check if a constraint is provable under current assumptions.
     Protocol: push → assert(¬φ) → check-sat → pop.
     Returns `.proved` if ¬φ is unsatisfiable (i.e., φ follows from assumptions).
@@ -379,15 +388,9 @@ inductive Provable where
 
     Corresponds to: Solver.provable in solver.ml:1367-1404 -/
 def provable (lc : LogicalConstraint) : TypingM Provable := do
-  -- Build simplification context from typing state
-  -- CN ref: make_simp_ctxt (typing.ml:112-114) builds from sym_eqs + memory model
-  let st ← getState
-  let simpCtxt : Simplify.SimCtxt := {
-    symEqs := st.symEqs
-    typeEnv := some (CerbLean.Memory.TypeEnv.mk st.tagDefs)
-  }
   -- Simplify constraint before checking (CN does this in solver.ml via simplify)
   -- CN ref: solver.ml:1375-1376 (simplify before provable query)
+  let simpCtxt ← getSimpCtxt
   let lc := Simplify.simplifyConstraint simpCtxt lc
   -- Quick syntactic checks (CN does these too)
   match lc with
@@ -422,47 +425,32 @@ These mirror the operations in cn/lib/typing.ml lines 141-178
 
 /-- Add a computational variable.
     Declares the variable to the inline solver.
-    Corresponds to: add_a in typing.ml -/
+    Corresponds to: add_a in typing.ml:336-338 -/
 def addA (s : Sym) (bt : BaseType) (loc : Loc) (desc : String) : TypingM Unit := do
   modifyContext (Context.addA s bt ⟨loc, desc⟩)
   solverDeclare s bt
 
 /-- Add a computational variable with a value.
-    Declares the variable and assumes its equality to the inline solver.
-    Corresponds to: add_a_value in typing.ml -/
-def addAValue (s : Sym) (v : IndexTerm) (loc : Loc) (desc : String) : TypingM Unit := do
-  modifyContext (Context.addAValue s v ⟨loc, desc⟩)
-  solverDeclare s v.bt
-  -- Assume sym = value to solver so it can use this binding
-  let symTerm := AnnotTerm.mk (.sym s) v.bt loc
-  let eqTerm := AnnotTerm.mk (.binop .eq symTerm v) .bool loc
-  solverAssume (.t eqTerm)
+    Does NOT declare in solver — CN comment: "Don't need to be declared in solver."
+    Corresponds to: add_a_value in typing.ml:341-343 -/
+def addAValue (s : Sym) (v : IndexTerm) (_loc : Loc) (desc : String) : TypingM Unit := do
+  modifyContext (Context.addAValue s v ⟨_loc, desc⟩)
 
 /-- Add a logical variable.
     Declares the variable to the inline solver.
-    Corresponds to: add_l in typing.ml -/
+    Corresponds to: add_l in typing.ml:346-348 -/
 def addL (s : Sym) (bt : BaseType) (loc : Loc) (desc : String) : TypingM Unit := do
   modifyContext (Context.addL s bt ⟨loc, desc⟩)
   solverDeclare s bt
 
 /-- Add a logical variable with a value.
-    Corresponds to: add_l_value in typing.ml:349-354.
-    Records sym = value in symEqs (CN's add_sym_eqs, typing.ml:352-354),
-    declares variable and assumes equality to the inline solver,
-    and adds equality constraint so it's available as an SMT assumption. -/
-def addLValue (s : Sym) (v : IndexTerm) (loc : Loc) (desc : String) : TypingM Unit := do
-  modifyContext (Context.addLValue s v ⟨loc, desc⟩)
-  solverDeclare s v.bt
-  -- CN typing.ml:352-354: add_sym_eqs [(sym, value)]
+    Does NOT declare in solver — CN comment: "Don't need to be declared in solver."
+    Only records sym = value in symEqs for simplifier use.
+    Corresponds to: add_l_value in typing.ml:351-354 -/
+def addLValue (s : Sym) (v : IndexTerm) (_loc : Loc) (desc : String) : TypingM Unit := do
+  modifyContext (Context.addLValue s v ⟨_loc, desc⟩)
+  -- CN typing.ml:354: add_sym_eqs [(sym, value)]
   modifyState fun st => { st with symEqs := st.symEqs.insert s.id v }
-  -- Add equality constraint so SMT solver knows sym = value.
-  -- CN achieves this via term substitution in make_simp_ctxt (typing.ml:112-114);
-  -- we also add an explicit context constraint for the SMT solver obligation encoding.
-  -- Uses modifyContext directly (not TypingM.addC) to avoid redundant symEqs insertion.
-  let symTerm := AnnotTerm.mk (.sym s) v.bt loc
-  let eqTerm := AnnotTerm.mk (.binop .eq symTerm v) .bool loc
-  modifyContext (Context.addC (.t eqTerm))
-  solverAssume (.t eqTerm)
 
 /-- Extract symbol equality from constraint if it's of form `sym == expr`.
     Corresponds to: LC.is_sym_lhs_equality in logicalConstraints.ml:61-67 -/
@@ -477,13 +465,16 @@ def isSymLhsEquality (lc : LogicalConstraint) : Option (Sym × IndexTerm) :=
     | _ => none
   | _ => none
 
-/-- Add a constraint.
-    Corresponds to: add_c in typing.ml:403-412.
-    Adds the constraint to context, assumes it to the inline solver,
-    and extracts symbol equalities (CN's add_sym_eqs, typing.ml:410). -/
+/-- Add a constraint. Simplifies before adding.
+    Corresponds to: add_c_internal in typing.ml:403-412.
+    Simplifies the constraint (typing.ml:407), adds to context, assumes it
+    to the inline solver, and extracts symbol equalities (typing.ml:410). -/
 def addC (lc : LogicalConstraint) : TypingM Unit := do
+  -- CN typing.ml:407: let lc = Simplify.LogicalConstraints.simp simp_ctxt lc
+  let simpCtxt ← getSimpCtxt
+  let lc := Simplify.simplifyConstraint simpCtxt lc
   modifyContext (Context.addC lc)
-  -- CN typing.ml:407: Solver.assume solver lc
+  -- CN typing.ml:409: Solver.assume solver lc
   solverAssume lc
   -- CN typing.ml:410: add_sym_eqs (List.filter_map LC.is_sym_lhs_equality [lc])
   -- If the constraint is of form `sym == expr`, record sym = expr in symEqs map.
@@ -500,17 +491,19 @@ def lookupTag (tag : Sym) : TypingM (Option TagDef) := do
   return s.tagDefs.find? (·.1 == tag) |>.map (·.2.2)
 
 /-- Add a resource with derived constraints (pointer_facts).
-    Corresponds to: add_r in typing.ml + pointer_facts in resource.ml:67-71.
-    When a resource is added, CN derives logical constraints:
-    - Single-resource: hasAllocId, address range no-overflow
-    - Pairwise: non-overlap with all existing Owned resources (SEPARATION)
-    Audited: 2026-02-18 -/
+    Simplifies the resource before adding.
+    Corresponds to: add_r_internal in typing.ml:415-427.
+    CN simplifies both request and output (typing.ml:418-419),
+    then derives pointer_facts from the simplified resource. -/
 def addR (r : Resource) : TypingM Unit := do
+  -- CN typing.ml:418-419: simplify request and output
+  let simpCtxt ← getSimpCtxt
+  let r := Simplify.simplifyResource simpCtxt r
   let ctx ← getContext
   let existingResources := ctx.resources
   modifyContext (Context.addR r)
   -- Derive and add pointer_facts constraints
-  -- CN ref: typing.ml:415-427 (add_r calls pointer_facts then add_cs)
+  -- CN ref: typing.ml:420-427 (pointer_facts then iterM add_c_internal)
   let derivedLcs := DerivedConstraints.deriveConstraints r existingResources
   for lc in derivedLcs do
     addC lc

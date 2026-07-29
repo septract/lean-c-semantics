@@ -139,6 +139,10 @@ def getL (s : Sym) (ctx : Context) : Option BaseTypeOrValue :=
 /-! ### Adding Bindings
 
 Corresponds to: context.ml lines 93-109
+-- DIVERGES-FROM-CN: CN checks `bound s ctxt` before adding and `failwith`s on
+-- duplicate. We skip this check because our Core IR is not alpha-renamed (unlike
+-- CN's mu-Core where Sym.fresh ensures unique IDs). All our parser-generated
+-- symbols share ID 0, making ID-based duplicate detection impossible.
 -/
 
 /-- Add a computational variable with just a type
@@ -173,8 +177,8 @@ def removeA (s : Sym) (ctx : Context) : Context :=
   | some entry =>
     { ctx with
       computational := ctx.computational.filter (fun (s', _, _) => s'.id != s.id)
-      logical := entry :: ctx.logical }
-  | none => ctx
+      logical := (entry.1, entry.2.1, entry.2.2) :: ctx.logical }
+  | none => ctx  -- DIVERGES-FROM-CN: CN failwith here
 
 /-! ### Constraints
 

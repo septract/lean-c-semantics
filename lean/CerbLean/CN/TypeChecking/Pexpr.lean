@@ -1036,8 +1036,15 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
           | .basic (.integer .bool) =>
             -- Bool: ite(arg == 0, 0, 1)
             -- Corresponds to: check_conv_int lines 413-420
-            let zero := AnnotTerm.mk (.const (.z 0)) targetBt loc
-            let one := AnnotTerm.mk (.const (.z 1)) targetBt loc
+            -- CN uses num_lit_ which creates .bits constants at the target type
+            let (zero, one) := match targetBt with
+              | .bits sign width =>
+                (AnnotTerm.mk (.const (.bits sign width 0)) targetBt loc,
+                 AnnotTerm.mk (.const (.bits sign width 1)) targetBt loc)
+              | _ =>
+                -- Fallback for non-Bits target (shouldn't happen for bool conversion)
+                (AnnotTerm.mk (.const (.z 0)) targetBt loc,
+                 AnnotTerm.mk (.const (.z 1)) targetBt loc)
             let argBt := argVal.bt
             let zeroArg := AnnotTerm.mk (.const (.z 0)) argBt loc
             let eqZero := AnnotTerm.mk (.binop .eq argVal zeroArg) .bool loc
@@ -1077,6 +1084,25 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
             -- ptrdiff_t: signed, add representability check
             let reprTerm := AnnotTerm.mk (.representable ct argVal) .bool loc
             TypingM.requireConstraint (.t reprTerm) loc "integer representability"
+            return convertToBits argVal
+
+          | .basic (.integer .wchar_t) =>
+            -- wchar_t: signed (is_signed_ity returns true in ocaml_implementation.ml:100-101)
+            -- Falls through to signed case in check_conv_int lines 424-429
+            let reprTerm := AnnotTerm.mk (.representable ct argVal) .bool loc
+            TypingM.requireConstraint (.t reprTerm) loc "integer representability"
+            return convertToBits argVal
+
+          | .basic (.integer .wint_t) =>
+            -- wint_t: signed (is_signed_ity returns true in ocaml_implementation.ml:102-103)
+            -- Falls through to signed case in check_conv_int lines 424-429
+            let reprTerm := AnnotTerm.mk (.representable ct argVal) .bool loc
+            TypingM.requireConstraint (.t reprTerm) loc "integer representability"
+            return convertToBits argVal
+
+          | .basic (.integer .ptraddr_t) =>
+            -- ptraddr_t: unsigned (is_signed_ity returns false in ocaml_implementation.ml:107-108)
+            -- Matches unsigned case in check_conv_int lines 421-423
             return convertToBits argVal
 
           | _ =>
@@ -1248,8 +1274,26 @@ partial def checkPexpr (pe : APexpr) (expectedBt : Option BaseType := none) : Ty
     return AnnotTerm.mk (.sym undefSym) resBt loc
 
   -- Error expression
+  -- Corresponds to: PEerror in cn/lib/check.ml lines 1075-1082
+  -- CN calls `provable (LC.T (bool_ false))` to check if the path is dead:
+  --   - If provable (path is dead): return default value (IT.default_ expect loc)
+  --   - If not provable (error is reachable): fail with StaticError
+  --
+  -- We use the same post-hoc obligation approach as PEundef above:
+  -- generate a requireConstraint(false) obligation, then return a default value.
+  -- The obligation will fail at discharge time if the error path is reachable.
   | .error msg _ =>
-    TypingM.fail (.other s!"Error in pure expression: {msg}")
+    let falseTerm := AnnotTerm.mk (.const (.bool false)) .bool loc
+    TypingM.requireConstraint (.t falseTerm) loc s!"error ({msg}) must be unreachable"
+    -- Return a default value (matches CN's `default_ expect loc` for dead paths)
+    -- Corresponds to: IT.default_ in cn/lib/indexTerms.ml:504
+    let resBt ← match expectedBt with
+      | some bt => pure bt
+      | none => match pe.ty with
+        | some (.loaded .integer) | some (.object .integer) =>
+          pure .integer
+        | _ => requireCoreBaseTypeToCN pe.ty "error expression"
+    return AnnotTerm.mk (.const (.default resBt)) resBt loc
 
   -- Implementation constants (sizeof, alignof, etc.)
   | .impl c =>

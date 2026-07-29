@@ -1004,9 +1004,21 @@ partial def termToSmtTerm (env : Option TypeEnv) : Types.Term → TranslateResul
         -- Loc → AllocId: extract allocation ID
         -- Corresponds to: solver.ml line 973-974
         .ok (Term.mkApp2 (Term.symbolT "alloc_id_of") valTm (Term.literalT "0"))
-      | .bits _ _, .integer =>
-        -- BitVec → Int: use bv2int
-        .ok (Term.appT (Term.symbolT "bv2int") valTm)
+      | .bits sign sw, .integer =>
+        -- BitVec → Int: use bv2int (unsigned interpretation)
+        -- For signed types, correct for negative values:
+        -- if bvslt val 0 then (- (bv2int (bvneg val))) else (bv2int val)
+        -- Corresponds to: CN doesn't directly handle Bits→Integer cast in solver.ml
+        let unsigned := Term.appT (Term.symbolT "bv2int") valTm
+        match sign with
+        | .unsigned => .ok unsigned
+        | .signed =>
+          let zero := mkBitVecLiteral sw 0
+          let isNeg := Term.mkApp2 (Term.symbolT "bvslt") valTm zero
+          let negVal := Term.appT (Term.symbolT "bvneg") valTm
+          let negInt := Term.mkApp2 (Term.symbolT "-") (Term.literalT "0")
+            (Term.appT (Term.symbolT "bv2int") negVal)
+          .ok (Term.mkApp3 (Term.symbolT "ite") isNeg negInt unsigned)
       | .bits _ sw, .loc =>
         -- BitVec → Loc: use bits_to_ptr with default alloc_id=0
         -- Corresponds to: solver.ml lines 957-964

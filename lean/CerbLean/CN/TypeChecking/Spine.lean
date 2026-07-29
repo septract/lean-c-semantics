@@ -73,26 +73,30 @@ For our pragmatic approach, we directly process each case.
     - Constraint: add as obligation
     - I: return the inner type -/
 partial def spineL {α : Type} (loc : Loc) (situation : CallSituation)
+    (innerSubst : Subst → α → α)
     (lat : LAT α) (k : α → TypingM Unit) : TypingM Unit := do
   match lat with
-  | .define_ name value info rest =>
-    -- Corresponds to: RI handling of Define
-    -- Bind the logical variable with its value
-    TypingM.addLValue name value info.loc s!"define {name.name.getD ""}"
-    spineL loc situation rest k
+  | .define_ name value _info rest =>
+    -- Corresponds to: ftyp_args_request_step Define case (resourceInference.ml:144-146)
+    -- Direct substitution: simplify value, then substitute into rest of LAT
+    -- CN does NOT call add_l_value here — it substitutes directly.
+    let simpCtx ← TypingM.getSimpCtxt
+    let value' := Simplify.simplifyTerm simpCtx value
+    let σ := Subst.single name value'
+    spineL loc situation innerSubst (LAT.subst innerSubst σ rest) k
 
   | .resource name request outputBt info rest =>
     -- Corresponds to: RI handling of Resource (consumption)
     -- Consume the resource and bind the output
     -- For postconditions, this verifies the function produces the resource
     consumeResourceRequest request name outputBt info.loc
-    spineL loc situation rest k
+    spineL loc situation innerSubst rest k
 
   | .constraint lc info rest =>
     -- Corresponds to: RI handling of Constraint
     -- For postconditions, this becomes a proof obligation
     TypingM.requireConstraint lc info.loc "postcondition constraint"
-    spineL loc situation rest k
+    spineL loc situation innerSubst rest k
 
   | .I inner =>
     -- Base case: call the continuation with the inner type.
@@ -154,9 +158,17 @@ where
   aux (argsAcc : List IndexTerm) (args : List APexpr) (gargs : List IndexTerm)
       (at_ : AT α) (k : α → TypingM Unit) : TypingM Unit := do
     match args, gargs, at_ with
-    | arg :: restArgs, _, .computational s bt _info rest =>
+    | arg :: restArgs, _, .computational s bt info rest =>
       -- Computational argument: check and substitute
       -- Corresponds to: check.ml lines 1163-1173
+      -- MOD-12: ensure_base_type check for computational args
+      -- Corresponds to: check.ml:1164-1166 — WellTyped.ensure_base_type (fst info) ~expect:bt (Mu.bt_of_pexpr arg)
+      -- Verifies the Core annotation type matches the expected type before evaluating.
+      match arg.ty.bind coreBaseTypeToCN with
+      | some argBt =>
+        if !BaseType.beq argBt bt then
+          TypingM.fail (.other s!"Computational argument type mismatch at {repr info.loc}: expected {repr bt}, got {repr argBt}")
+      | none => pure ()  -- No annotation available or not convertible from Core IR
       -- Pass expected type to checkPexprK for type-aware literal creation
       checkPexprK arg (fun argVal => do
         -- Substitute arg value for parameter in rest of type
@@ -192,7 +204,7 @@ where
       | _ => pure ()
 
       -- Process the logical part
-      spineL loc situation lat k
+      spineL loc situation innerSubst lat k
 
     | _ :: _, _, .L _ =>
       -- Too many computational args provided
@@ -259,7 +271,7 @@ satisfies the postcondition.
     Used when a void function falls through without explicit return. -/
 def subtype (loc : Loc) (post : Postcondition) (k : Unit → TypingM Unit) : TypingM Unit := do
   let lat : LAT Unit := LAT.ofPostcondition post (.I ())
-  spineL loc .subtyping lat k
+  spineL loc .subtyping (fun _ x => x) lat k
 
 /-! ## Calltype_ft: Function Type Calling
 

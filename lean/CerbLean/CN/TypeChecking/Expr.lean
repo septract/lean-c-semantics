@@ -659,7 +659,7 @@ partial def checkExpr (labels : LabelContext) (e : AExpr) (k : IndexTerm → Typ
       | [], .L lat =>
         -- All computational args processed, now process precondition via spine_l
         -- Corresponds to: spine delegates to spine_l for LAT processing
-        spineL loc (.functionCall funSym) lat (fun rt => do
+        spineL loc (.functionCall funSym) ReturnType.subst lat (fun rt => do
           -- 4. Create fresh return symbol
           -- Corresponds to: let s' = Sym.fresh_make_uniq_kind ~prefix "return" in
           let s' ← TypingM.freshSym "return"

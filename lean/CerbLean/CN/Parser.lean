@@ -826,9 +826,9 @@ partial def functionSpec : P FunctionSpec := do
   let allClauses := reqBlocks.toList.map (·.1) |>.flatten
   let allGhostParams := reqBlocks.toList.map (·.2) |>.flatten
   -- Create the return symbol. This is the symbol that `return` references
-  -- in the postcondition resolve to. Using ID 0 matches mkSym "return".
+  -- in the postcondition resolve to. Must match mkSym "return".
   -- Corresponds to: register_new_cn_local (Id.make here "return") in CN
-  let returnSym : Sym := { id := 0, name := some "return" }
+  let returnSym := mkSym "return"
   pure {
     returnSym := returnSym
     requires := { clauses := allClauses }

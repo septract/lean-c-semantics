@@ -53,9 +53,14 @@ def processPreClause (clause : Clause) (loc : Loc) : TypingM Unit := do
     -- Add the constraint as an assumption
     TypingM.addC (.t assertion)
   | .letBinding name value =>
-    -- Let binding: bind the name to the expression's value in context
-    -- Corresponds to: mDefine in core_to_mucore.ml → addLValue in typing monad
-    TypingM.addLValue name value loc s!"let binding {name.name.getD ""}"
+    -- Let binding: declare variable and assert equality
+    -- Corresponds to: Define in bind_arguments aux_l (check.ml:2343-2345)
+    -- CN: add_l s (IT.get_bt it) info; add_c loc (LC.T (def_ s it loc))
+    TypingM.addL name value.bt loc s!"let binding {name.name.getD ""}"
+    let eqTerm := AnnotTerm.mk
+      (.binop .eq (AnnotTerm.mk (.sym name) value.bt loc) value)
+      .bool loc
+    TypingM.addC (.t eqTerm)
 
 /-- Process a single clause from a postcondition.
     - Resource clauses: CONSUME from context (verify function produces them)
@@ -78,8 +83,14 @@ def processPostClause (clause : Clause) (loc : Loc) : TypingM Unit := do
     -- They are accumulated with current assumptions as context
     TypingM.requireConstraint (.t assertion) loc "postcondition constraint"
   | .letBinding name value =>
-    -- Let binding works the same in postconditions
-    TypingM.addLValue name value loc s!"let binding {name.name.getD ""}"
+    -- Let binding: declare variable and assert equality
+    -- Corresponds to: Define in bind_arguments aux_l (check.ml:2343-2345)
+    -- Same as precondition: add_l + add_c(def_)
+    TypingM.addL name value.bt loc s!"let binding {name.name.getD ""}"
+    let eqTerm := AnnotTerm.mk
+      (.binop .eq (AnnotTerm.mk (.sym name) value.bt loc) value)
+      .bool loc
+    TypingM.addC (.t eqTerm)
 
 /-! ## Checking Function Specifications
 

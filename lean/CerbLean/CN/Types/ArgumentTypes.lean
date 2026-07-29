@@ -481,13 +481,17 @@ def ofLabelDefs (spec : FunctionSpec) (returnBt : BaseType)
           -- but no resource/constraint clauses.
           -- DIVERGES-FROM-CN: CN's make_label_args also produces Owned resources
           -- and invariant constraints. We build a minimal type with just args.
-          let lt := info.params.foldr (init := (.L LAT.terminalValue : LT)) fun (sym, _bt) acc =>
+          -- Note: info.params has Core.BaseType; CN uses CN.BaseType (from muCore).
+          -- In CN's muCore, label params are typically pointer types (stack addresses),
+          -- so .loc is the correct CN base type here.
+          let lt := info.params.foldr (init := (.L LAT.terminalValue : LT)) fun (sym, _coreBt) acc =>
             .computational sym .loc { loc := info.loc, desc := s!"loop var {sym.name.getD ""}" } acc
           some (symId, { lt := lt, kind := .loop, loc := info.loc })
       | _ =>
         -- Non-loop non-return label: create a simple label type with args
-        -- Corresponds to: Non_inlined case in WProc.label_context
-        let lt := info.params.foldr (init := (.L LAT.terminalValue : LT)) fun (sym, _bt) acc =>
+        -- Corresponds to: Non_inlined case in WProc.label_context (wellTyped.ml:2479-2480)
+        -- Same note about .loc as above.
+        let lt := info.params.foldr (init := (.L LAT.terminalValue : LT)) fun (sym, _coreBt) acc =>
           .computational sym .loc { loc := info.loc, desc := s!"label var {sym.name.getD ""}" } acc
         some (symId, { lt := lt, kind := .other, loc := info.loc })
 
