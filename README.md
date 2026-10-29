@@ -1,5 +1,23 @@
 # Lean C Semantics
 
+> ## ⚠️ This repository is archived
+>
+> This project has been superseded by **[OathTech/cerberus-lean](https://github.com/OathTech/cerberus-lean)**.
+> cerberus-lean is a from-scratch successor, not a continuation of this code, and its design is
+> fundamentally different:
+>
+> - **This repo** hand-translates the Core interpreter and memory model into Lean, and runs on Core IR
+>   exported as JSON from a lightly patched Cerberus. Correspondence with Cerberus is maintained by
+>   manual audit.
+> - **cerberus-lean** is a fork of Cerberus itself. The Lean semantics are *generated* from the same Lem
+>   model that produces the OCaml implementation, with hand-written "seam" files for the memory model,
+>   non-determinism runner, and implementation-defined behaviour. Only the C parser stays in OCaml; the
+>   Lean side performs desugaring, typing, elaboration to Core, and execution, and is validated
+>   differentially against the OCaml engine.
+>
+> This repository is retained for reference only and will not receive further updates, bug fixes, or
+> pull request reviews. Please direct new work, issues, and contributions to cerberus-lean.
+
 A Lean 4 implementation of C semantics via [Cerberus](https://github.com/rems-project/cerberus). Cerberus compiles C to its Core intermediate representation; this project parses and executes Core in Lean, enabling formal reasoning about C programs.
 
 > **Note**: This codebase was developed through AI-human collaboration using Claude Code. Review accordingly.
